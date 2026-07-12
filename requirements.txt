@@ -1,0 +1,13 @@
+torch
+torchvision
+open-clip-torch
+pytorch-lightning
+torchmetrics
+numpy
+pillow
+ftfy
+regex
+tqdm
+matplotlib
+scikit-learn
+tensorboard
