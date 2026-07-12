@@ -116,6 +116,8 @@ if __name__ == "__main__":
                         help='Trọng số relational KD sketch-photo.')
     parser.add_argument('--kd_temperature', type=float, default=0.07,
                         help='Temperature cho phân phối similarity sketch-photo.')
+    parser.add_argument('--lambda_text_feature_kd', type=float, default=1.0,
+                        help='Trọng số cosine KD sau projection student text 512→teacher text 1024.')
                         
     parser.add_argument('--exp_name', type=str, default='teacher_adapter_triplet_baseline')
 
