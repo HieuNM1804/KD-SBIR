@@ -33,6 +33,31 @@ def relational_kd_loss(
     return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
 
 
+def relational_text_kd_loss(
+    student_sketch_text,
+    student_photo_text,
+    teacher_sketch_text,
+    teacher_photo_text,
+    temperature=0.07,
+):
+    """Match cross-modal class relations without requiring equal feature dims."""
+    student_sketch_text = F.normalize(student_sketch_text.float(), dim=-1)
+    student_photo_text = F.normalize(student_photo_text.float(), dim=-1)
+    teacher_sketch_text = F.normalize(teacher_sketch_text.float(), dim=-1)
+    teacher_photo_text = F.normalize(teacher_photo_text.float(), dim=-1)
+
+    student_log_probs = F.log_softmax(
+        student_sketch_text @ student_photo_text.t() / temperature,
+        dim=-1,
+    )
+    with torch.no_grad():
+        teacher_probs = F.softmax(
+            teacher_sketch_text @ teacher_photo_text.t() / temperature,
+            dim=-1,
+        )
+    return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
+
+
 def batch_hard_teacher_triplet_loss(
     sketch_features,
     photo_features,
@@ -84,6 +109,8 @@ def loss_fn(args, features):
         labels,
         photo_logits,
         sketch_logits,
+        student_sketch_text,
+        student_photo_text,
         teacher_active,
         joint_teacher_adapter,
         teacher_sketch_text,
@@ -112,6 +139,16 @@ def loss_fn(args, features):
             args.kd_temperature,
         )
 
+    text_kd_loss = torch.zeros((), device=photo_logits.device)
+    if teacher_active and args.lambda_text_kd > 0:
+        text_kd_loss = relational_text_kd_loss(
+            student_sketch_text,
+            student_photo_text,
+            teacher_sketch_text,
+            teacher_photo_text,
+            args.text_kd_temperature,
+        )
+
     teacher_triplet_loss = torch.zeros((), device=photo_logits.device)
     teacher_semantic = torch.zeros((), device=photo_logits.device)
     if joint_teacher_adapter:
@@ -134,6 +171,7 @@ def loss_fn(args, features):
         args.lambda_cls * classification_loss
         + args.lambda_triplet * triplet_loss
         + args.lambda_kd * kd_loss
+        + args.lambda_text_kd * text_kd_loss
         + args.lambda_teacher_retrieval * teacher_triplet_loss
         + args.lambda_teacher_semantic * teacher_semantic
     )
@@ -141,6 +179,7 @@ def loss_fn(args, features):
         "cls": classification_loss,
         "triplet": triplet_loss,
         "kd_sketch_photo": kd_loss,
+        "text_relational_kd": text_kd_loss,
         "teacher_triplet": teacher_triplet_loss,
         "teacher_semantic": teacher_semantic,
     }
