@@ -9,29 +9,71 @@ from src.data_config import UNSEEN_CLASSES
 CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073]
 CLIP_STD = [0.26862954, 0.26130258, 0.27577711]
 
-def aumented_transform():
-    transform_list = [
-        transforms.RandomResizedCrop(224, scale=(0.85, 1.0)),
-        transforms.RandomHorizontalFlip(0.5),
-        transforms.ToTensor(),
-        transforms.RandomErasing(p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0),
-        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD)
-    ]
-    return transforms.Compose(transform_list)
 
-def normal_transform():
-    dataset_transforms = transforms.Compose([
+def photo_train_transform():
+    return transforms.Compose([
+        transforms.RandomResizedCrop(
+            224,
+            scale=(0.8, 1.0),
+            ratio=(0.9, 1.1),
+            interpolation=transforms.InterpolationMode.BICUBIC,
+        ),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ColorJitter(
+            brightness=0.2,
+            contrast=0.2,
+            saturation=0.15,
+            hue=0.05,
+        ),
+        transforms.RandomGrayscale(p=0.05),
+        transforms.ToTensor(),
+        transforms.RandomErasing(
+            p=0.2,
+            scale=(0.02, 0.12),
+            ratio=(0.3, 3.3),
+            value="random",
+        ),
+        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
+    ])
+
+
+def sketch_train_transform():
+    return transforms.Compose([
+        transforms.RandomAffine(
+            degrees=8,
+            translate=(0.05, 0.05),
+            scale=(0.9, 1.1),
+            shear=5,
+            interpolation=transforms.InterpolationMode.BILINEAR,
+            fill=255,
+        ),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ToTensor(),
+        # White fill removes strokes instead of adding artificial black boxes.
+        transforms.RandomErasing(
+            p=0.25,
+            scale=(0.01, 0.08),
+            ratio=(0.3, 3.3),
+            value=1.0,
+        ),
+        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
+    ])
+
+
+def evaluation_transform():
+    return transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD)
+        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
     ])
-    return dataset_transforms
+
 
 class TrainDataset(torch.utils.data.Dataset):
     def __init__(self, args):
         self.args = args
-        self.transform1 = normal_transform()
-        self.transform2 = aumented_transform()
+        self.photo_transform = photo_train_transform()
+        self.sketch_transform = sketch_train_transform()
+        self.teacher_transform = evaluation_transform()
         
         unseen_classes = UNSEEN_CLASSES[self.args.dataset]
 
@@ -66,14 +108,22 @@ class TrainDataset(torch.utils.data.Dataset):
         img_data = ImageOps.pad(Image.open(img_path).convert('RGB'), size=(self.args.max_size, self.args.max_size))
         neg_data = ImageOps.pad(Image.open(neg_path).convert('RGB'), size=(self.args.max_size, self.args.max_size))
 
-        sk_tensor  = self.transform1(sk_data)
-        img_tensor = self.transform1(img_data)
-        neg_tensor = self.transform1(neg_data)
-        
-        sk_aug_tensor = self.transform2(sk_data)
-        img_aug_tensor = self.transform2(img_data)
-        
-        return img_tensor, sk_tensor, img_aug_tensor, sk_aug_tensor, neg_tensor, self.all_categories.index(category)
+        student_sketch = self.sketch_transform(sk_data)
+        student_photo = self.photo_transform(img_data)
+        student_negative = self.photo_transform(neg_data)
+
+        # Stable, resize-only views are used to construct DFN5B KD targets.
+        teacher_sketch = self.teacher_transform(sk_data)
+        teacher_photo = self.teacher_transform(img_data)
+
+        return (
+            student_photo,
+            student_sketch,
+            teacher_photo,
+            teacher_sketch,
+            student_negative,
+            self.all_categories.index(category),
+        )
 
 
 class ValidDataset(torch.utils.data.Dataset):
@@ -81,7 +131,7 @@ class ValidDataset(torch.utils.data.Dataset):
         super(ValidDataset, self).__init__()
         self.args = args
         self.mode = mode
-        self.transform = normal_transform()
+        self.transform = evaluation_transform()
         self.unseen_classes = UNSEEN_CLASSES[self.args.dataset]
             
         unseen_paths = []

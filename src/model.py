@@ -265,12 +265,19 @@ class CustomCLIP(nn.Module):
         return logits, image_features_normalize
         
     def forward(self, x, classnames):
-        photo_tensor, sk_tensor, photo_aug_tensor, sk_aug_tensor, neg_tensor, label = x
-        pos_logits, photo_features = self.get_logits(photo_tensor, classnames)
+        (
+            student_photo,
+            student_sketch,
+            teacher_photo,
+            teacher_sketch,
+            student_negative,
+            label,
+        ) = x
+        pos_logits, photo_features = self.get_logits(student_photo, classnames)
         sk_logits, sketch_features = self.get_logits(
-            sk_tensor, classnames, type='sketch'
+            student_sketch, classnames, type='sketch'
         )
-        _, negative_features = self.get_logits(neg_tensor, classnames)
+        _, negative_features = self.get_logits(student_negative, classnames)
 
         teacher_photo_features = photo_features.detach()
         teacher_sketch_features = sketch_features.detach()
@@ -279,10 +286,10 @@ class CustomCLIP(nn.Module):
         if self.teacher_active:
             with torch.no_grad():
                 teacher_photo_base = self.model_distill.encode_image(
-                    self.teacher_image_input(photo_aug_tensor)
+                    self.teacher_image_input(teacher_photo)
                 )
                 teacher_sketch_base = self.model_distill.encode_image(
-                    self.teacher_image_input(sk_aug_tensor)
+                    self.teacher_image_input(teacher_sketch)
                 )
             teacher_photo_features = self.adapt_teacher_feature(
                 teacher_photo_base, "photo"
