@@ -33,31 +33,32 @@ def relational_kd_loss(
     return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
 
 
-def batch_hard_teacher_triplet_loss(
+def random_teacher_triplet_loss(
     sketch_features,
     photo_features,
     labels,
     margin=0.2,
 ):
-    """Symmetric batch-hard triplet loss for the jointly trained teacher adapters."""
-    sketch_features = F.normalize(sketch_features.float(), dim=-1)
-    photo_features = F.normalize(photo_features.float(), dim=-1)
+    """One-way teacher triplet with one random in-batch negative per sketch."""
     labels = labels.to(sketch_features.device)
+    negative_mask = labels[:, None].ne(labels[None, :])
+    valid_anchor = negative_mask.any(dim=-1)
+    if not valid_anchor.any():
+        return sketch_features.sum() * 0.0
 
-    distance = 1.0 - sketch_features @ photo_features.t()
-    positive_mask = labels[:, None].eq(labels[None, :])
-    negative_mask = ~positive_mask
-
-    def one_direction(dist):
-        valid_negative = negative_mask.any(dim=-1)
-        hardest_positive = dist.masked_fill(~positive_mask, -torch.inf).max(dim=-1).values
-        hardest_negative = dist.masked_fill(~negative_mask, torch.inf).min(dim=-1).values
-        losses = F.relu(hardest_positive - hardest_negative + margin)
-        if valid_negative.any():
-            return losses[valid_negative].mean()
-        return dist.new_zeros(())
-
-    return 0.5 * (one_direction(distance) + one_direction(distance.t()))
+    negative_indices = torch.multinomial(
+        negative_mask[valid_anchor].float(),
+        num_samples=1,
+    ).squeeze(1)
+    cosine_distance = lambda x, y: 1.0 - F.cosine_similarity(x, y)
+    return nn.TripletMarginWithDistanceLoss(
+        distance_function=cosine_distance,
+        margin=margin,
+    )(
+        sketch_features[valid_anchor],
+        photo_features[valid_anchor],
+        photo_features[negative_indices],
+    )
 
 
 def teacher_semantic_loss(
@@ -115,7 +116,7 @@ def loss_fn(args, features):
     teacher_triplet_loss = torch.zeros((), device=photo_logits.device)
     teacher_semantic = torch.zeros((), device=photo_logits.device)
     if joint_teacher_adapter:
-        teacher_triplet_loss = batch_hard_teacher_triplet_loss(
+        teacher_triplet_loss = random_teacher_triplet_loss(
             teacher_sketch_features,
             teacher_photo_features,
             labels,
