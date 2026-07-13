@@ -1,5 +1,5 @@
 ```bash
-!python -m src.main_train \
+!python -m src.train \
     --root /content/sketchy/Sketchy \
     --dataset sketchy_2 \
     --epochs 5 \

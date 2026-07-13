@@ -8,7 +8,7 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger 
 from pytorch_lightning.callbacks import ModelCheckpoint 
 
-from src.sketchy_dataset import TrainDataset, ValidDataset
+from src.dataset import TrainDataset, ValidDataset
 from src.model import ZS_SBIR
 from src.utils import get_all_categories
 from src.data_config import UNSEEN_CLASSES

@@ -7,7 +7,7 @@ from torch.nn import functional as F
 from torchmetrics.functional import retrieval_average_precision #, retrieval_precision
 import open_clip
 
-from src.coprompt import MultiModalPromptLearner, TextEncoder
+from src.prompt_learner import MultiModalPromptLearner, TextEncoder
 from src.utils import load_clip_to_cpu, retrieval_precision
 from src.losses import loss_fn
 from src.teacher_adapters import ModalityAdapters
