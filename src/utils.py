@@ -30,11 +30,3 @@ def load_clip_to_cpu(cfg, design_details=None):
             "maple_length": cfg.n_ctx,
         }
     return clip.build_model(state_dict or model.state_dict(), design_details)
-
-
-def retrieval_precision(preds, target, top_k):
-    ranked_target = target[preds.argsort(dim=-1, descending=True)]
-    relevant_count = int(ranked_target.sum().item())
-    if relevant_count == 0:
-        return torch.tensor(0.0, device=preds.device)
-    return ranked_target[:min(top_k, relevant_count)].float().mean()
