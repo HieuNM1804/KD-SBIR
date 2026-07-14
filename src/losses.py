@@ -1,7 +1,6 @@
 """Losses used by the DFN5B-to-CoPrompt SBIR benchmark."""
 
 import torch
-import torch.nn as nn
 from torch.nn import functional as F
 
 
@@ -33,13 +32,13 @@ def relational_kd_loss(
     return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
 
 
-def batch_hard_teacher_triplet_loss(
+def batch_hard_cross_modal_triplet_loss(
     sketch_features,
     photo_features,
     labels,
     margin=0.2,
 ):
-    """Symmetric batch-hard triplet loss for the jointly trained teacher adapters."""
+    """Symmetric batch-hard triplet loss between sketch and photo features."""
     sketch_features = F.normalize(sketch_features.float(), dim=-1)
     photo_features = F.normalize(photo_features.float(), dim=-1)
     labels = labels.to(sketch_features.device)
@@ -80,7 +79,7 @@ def loss_fn(args, features):
         sketch_features,
         teacher_photo_features,
         teacher_sketch_features,
-        negative_features,
+        _negative_features,
         labels,
         photo_logits,
         sketch_logits,
@@ -96,11 +95,12 @@ def loss_fn(args, features):
         + F.cross_entropy(sketch_logits, labels)
     )
 
-    cosine_distance = lambda x, y: 1.0 - F.cosine_similarity(x, y)
-    triplet_loss = nn.TripletMarginWithDistanceLoss(
-        distance_function=cosine_distance,
+    triplet_loss = batch_hard_cross_modal_triplet_loss(
+        sketch_features,
+        photo_features,
+        labels,
         margin=0.2,
-    )(sketch_features, photo_features, negative_features)
+    )
 
     kd_loss = torch.zeros((), device=photo_logits.device)
     if teacher_active and args.lambda_kd > 0:
@@ -115,7 +115,7 @@ def loss_fn(args, features):
     teacher_triplet_loss = torch.zeros((), device=photo_logits.device)
     teacher_semantic = torch.zeros((), device=photo_logits.device)
     if joint_teacher_adapter:
-        teacher_triplet_loss = batch_hard_teacher_triplet_loss(
+        teacher_triplet_loss = batch_hard_cross_modal_triplet_loss(
             teacher_sketch_features,
             teacher_photo_features,
             labels,
