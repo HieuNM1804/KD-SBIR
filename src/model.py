@@ -239,7 +239,7 @@ class CustomCLIP(nn.Module):
         self._teacher_text_cache[cache_key] = result
         return result
 
-    def get_logits(self, img_tensor, classnames, type='photo'):
+    def get_logits(self, img_tensor, classnames, type='photo', return_text=False):
         if type=='photo':
             prompt_learner = self.prompt_learner_photo
             image_encoder = self.ph_encoder
@@ -265,13 +265,17 @@ class CustomCLIP(nn.Module):
 
         logits = logit_scale * image_features_normalize @ text_features.t()
         
+        if return_text:
+            return logits, image_features_normalize, text_features
         return logits, image_features_normalize
         
     def forward(self, x, classnames):
         photo_tensor, sk_tensor, photo_aug_tensor, sk_aug_tensor, neg_tensor, label = x
-        pos_logits, photo_features = self.get_logits(photo_tensor, classnames)
-        sk_logits, sketch_features = self.get_logits(
-            sk_tensor, classnames, type='sketch'
+        pos_logits, photo_features, student_photo_text = self.get_logits(
+            photo_tensor, classnames, return_text=True
+        )
+        sk_logits, sketch_features, student_sketch_text = self.get_logits(
+            sk_tensor, classnames, type='sketch', return_text=True
         )
         _, negative_features = self.get_logits(neg_tensor, classnames)
 
@@ -293,7 +297,7 @@ class CustomCLIP(nn.Module):
             teacher_sketch_features = self.adapt_teacher_feature(
                 teacher_sketch_base, "sketch"
             )
-            if self.joint_teacher_adapter:
+            if self.joint_teacher_adapter or getattr(self.cfg, "lambda_text_kd", 0) > 0:
                 teacher_sketch_text, teacher_photo_text = (
                     self.get_teacher_text_features(classnames)
                 )
@@ -311,6 +315,8 @@ class CustomCLIP(nn.Module):
             self.joint_teacher_adapter,
             teacher_sketch_text,
             teacher_photo_text,
+            student_sketch_text,
+            student_photo_text,
         )
         
     def extract_feature(self, image, classname, type='photo'):
@@ -396,6 +402,7 @@ class ZS_SBIR(pl.LightningModule):
         for k, v in loss_dict.items():
             bar_names = {
                 "kd_sketch_photo": "KD_SP",
+                "text_kd": "TXT_KD",
                 "teacher_triplet": "T_TRI",
                 "teacher_semantic": "T_SEM",
             }
