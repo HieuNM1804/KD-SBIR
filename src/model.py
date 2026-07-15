@@ -7,7 +7,7 @@ from torch.nn import functional as F
 from torchmetrics.functional import retrieval_average_precision #, retrieval_precision
 import open_clip
 
-from src.prompt_learner import MultiModalPromptLearner, TextEncoder
+from src.prompt_learner import MultiModalPromptLearner
 from src.utils import load_clip_to_cpu, retrieval_precision
 from src.losses import loss_fn
 from src.teacher_adapters import ModalityAdapters
@@ -161,8 +161,6 @@ class CustomCLIP(nn.Module):
         
         self.ph_encoder = copy.deepcopy(clip_model.visual)
         self.sk_encoder = copy.deepcopy(clip_model.visual)
-        self.text_encoder = TextEncoder(clip_model_distill)
-        self.logit_scale = clip_model.logit_scale
         
         self.model_distill = strong_teacher
         self.teacher_active = strong_teacher is not None
@@ -236,41 +234,29 @@ class CustomCLIP(nn.Module):
         self._teacher_text_cache[cache_key] = result
         return result
 
-    def get_logits(self, img_tensor, classnames, type='photo'):
+    def encode_student_image(self, img_tensor, classnames, type='photo'):
         if type=='photo':
             prompt_learner = self.prompt_learner_photo
             image_encoder = self.ph_encoder
         else:
             image_encoder = self.sk_encoder
             prompt_learner = self.prompt_learner_sketch
-            
-        logit_scale = self.logit_scale.exp()
-        (
-            tokenized_prompts,
-            prompts,
-            visual_ctx,
-        ) = prompt_learner(classnames)
-        
-        text_features = self.text_encoder(prompts, tokenized_prompts)
+
+        visual_ctx = prompt_learner()
 
         image_features = image_encoder(
                 img_tensor.type(self.dtype), visual_ctx, []
             ) # (batch_size, 768)
         
         image_features_normalize = image_features / image_features.norm(dim=-1, keepdim=True)
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-
-        logits = logit_scale * image_features_normalize @ text_features.t()
-        
-        return logits, image_features_normalize
+        return image_features_normalize
         
     def forward(self, x, classnames):
-        photo_tensor, sk_tensor, photo_aug_tensor, sk_aug_tensor, neg_tensor, label = x
-        pos_logits, photo_features = self.get_logits(photo_tensor, classnames)
-        sk_logits, sketch_features = self.get_logits(
+        photo_tensor, sk_tensor, photo_aug_tensor, sk_aug_tensor, label = x
+        photo_features = self.encode_student_image(photo_tensor, classnames)
+        sketch_features = self.encode_student_image(
             sk_tensor, classnames, type='sketch'
         )
-        _, negative_features = self.get_logits(neg_tensor, classnames)
 
         teacher_photo_features = photo_features.detach()
         teacher_sketch_features = sketch_features.detach()
@@ -300,10 +286,7 @@ class CustomCLIP(nn.Module):
             sketch_features,
             teacher_photo_features,
             teacher_sketch_features,
-            negative_features,
             label,
-            pos_logits,
-            sk_logits,
             self.teacher_active,
             self.joint_teacher_adapter,
             teacher_sketch_text,
@@ -311,8 +294,7 @@ class CustomCLIP(nn.Module):
         )
         
     def extract_feature(self, image, classname, type='photo'):
-        _, feature = self.get_logits(image, classnames=classname, type=type)
-        return feature
+        return self.encode_student_image(image, classnames=classname, type=type)
 
 
 class ZS_SBIR(pl.LightningModule):

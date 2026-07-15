@@ -1,7 +1,6 @@
 """Losses used by the DFN5B-to-CoPrompt SBIR benchmark."""
 
 import torch
-import torch.nn as nn
 from torch.nn import functional as F
 
 
@@ -80,33 +79,16 @@ def loss_fn(args, features):
         sketch_features,
         teacher_photo_features,
         teacher_sketch_features,
-        negative_features,
         labels,
-        photo_logits,
-        sketch_logits,
         teacher_active,
         joint_teacher_adapter,
         teacher_sketch_text,
         teacher_photo_text,
     ) = features
 
-    labels = labels.to(photo_logits.device)
-    classification_loss = torch.zeros((), device=photo_logits.device)
-    if args.lambda_cls > 0:
-        classification_loss = (
-            F.cross_entropy(photo_logits, labels)
-            + F.cross_entropy(sketch_logits, labels)
-        )
+    labels = labels.to(photo_features.device)
 
-    cosine_distance = lambda x, y: 1.0 - F.cosine_similarity(x, y)
-    triplet_loss = torch.zeros((), device=photo_logits.device)
-    if args.lambda_triplet > 0:
-        triplet_loss = nn.TripletMarginWithDistanceLoss(
-            distance_function=cosine_distance,
-            margin=0.2,
-        )(sketch_features, photo_features, negative_features)
-
-    kd_loss = torch.zeros((), device=photo_logits.device)
+    kd_loss = torch.zeros((), device=photo_features.device)
     if teacher_active and args.lambda_kd > 0:
         kd_loss = relational_kd_loss(
             sketch_features,
@@ -116,8 +98,8 @@ def loss_fn(args, features):
             args.kd_temperature,
         )
 
-    teacher_triplet_loss = torch.zeros((), device=photo_logits.device)
-    teacher_semantic = torch.zeros((), device=photo_logits.device)
+    teacher_triplet_loss = torch.zeros((), device=photo_features.device)
+    teacher_semantic = torch.zeros((), device=photo_features.device)
     if joint_teacher_adapter:
         teacher_triplet_loss = batch_hard_teacher_triplet_loss(
             teacher_sketch_features,
@@ -135,15 +117,11 @@ def loss_fn(args, features):
         )
 
     total_loss = (
-        args.lambda_cls * classification_loss
-        + args.lambda_triplet * triplet_loss
-        + args.lambda_kd * kd_loss
+        args.lambda_kd * kd_loss
         + args.lambda_teacher_retrieval * teacher_triplet_loss
         + args.lambda_teacher_semantic * teacher_semantic
     )
     return total_loss, {
-        "cls": classification_loss,
-        "triplet": triplet_loss,
         "kd_sketch_photo": kd_loss,
         "teacher_triplet": teacher_triplet_loss,
         "teacher_semantic": teacher_semantic,
