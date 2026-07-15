@@ -9,12 +9,32 @@ from src.data_config import UNSEEN_CLASSES
 CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073]
 CLIP_STD = [0.26862954, 0.26130258, 0.27577711]
 
-def aumented_transform():
+def sketch_augmented_transform():
     transform_list = [
-        transforms.RandomResizedCrop(224, scale=(0.85, 1.0)),
-        transforms.RandomHorizontalFlip(0.5),
+        transforms.RandomResizedCrop(224, scale=(0.90, 1.0), ratio=(0.95, 1.05)),
+        transforms.RandomHorizontalFlip(0.2),
+        transforms.RandomApply([
+            transforms.RandomAffine(
+                degrees=5,
+                translate=(0.02, 0.02),
+                scale=(0.98, 1.02),
+                shear=2,
+                fill=255,
+            )
+        ], p=0.5),
         transforms.ToTensor(),
-        transforms.RandomErasing(p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0),
+        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD)
+    ]
+    return transforms.Compose(transform_list)
+
+def photo_augmented_transform():
+    transform_list = [
+        transforms.RandomResizedCrop(224, scale=(0.85, 1.0), ratio=(0.90, 1.10)),
+        transforms.RandomHorizontalFlip(0.5),
+        transforms.RandomApply([
+            transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.05, hue=0.01)
+        ], p=0.5),
+        transforms.ToTensor(),
         transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD)
     ]
     return transforms.Compose(transform_list)
@@ -31,7 +51,8 @@ class TrainDataset(torch.utils.data.Dataset):
     def __init__(self, args):
         self.args = args
         self.transform1 = normal_transform()
-        self.transform2 = aumented_transform()
+        self.sketch_transform2 = sketch_augmented_transform()
+        self.photo_transform2 = photo_augmented_transform()
         
         unseen_classes = UNSEEN_CLASSES[self.args.dataset]
 
@@ -70,8 +91,8 @@ class TrainDataset(torch.utils.data.Dataset):
         img_tensor = self.transform1(img_data)
         neg_tensor = self.transform1(neg_data)
         
-        sk_aug_tensor = self.transform2(sk_data)
-        img_aug_tensor = self.transform2(img_data)
+        sk_aug_tensor = self.sketch_transform2(sk_data)
+        img_aug_tensor = self.photo_transform2(img_data)
         
         return img_tensor, sk_tensor, img_aug_tensor, sk_aug_tensor, neg_tensor, self.all_categories.index(category)
 
