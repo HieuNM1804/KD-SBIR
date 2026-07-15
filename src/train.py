@@ -86,7 +86,12 @@ if __name__ == "__main__":
     parser.add_argument("--lambda_triplet", type=float, default=1.0,
                         help="Trọng số cho triplet loss sketch-photo-negative.")
     
-    parser.add_argument("--lr", type=float, default=4e-5)
+    parser.add_argument("--optimizer", type=str, default="adamw", choices=["sgd", "adamw"])
+    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--weight_decay", type=float, default=1e-4)
+    parser.add_argument("--sgd_momentum", type=float, default=0.9)
+    parser.add_argument("--adamw_beta1", type=float, default=0.9)
+    parser.add_argument("--adamw_beta2", type=float, default=0.999)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--test_batch_size', type=int, default=1024)
     parser.add_argument('--epochs', type=int, default=3)

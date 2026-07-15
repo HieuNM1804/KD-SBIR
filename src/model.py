@@ -364,16 +364,32 @@ class ZS_SBIR(pl.LightningModule):
             param_groups.append(
                 {"params": adapter_params, "lr": self.args.teacher_adapter_lr}
             )
-        optimizer = torch.optim.SGD(
-            params=param_groups,
-            lr=self.args.lr,
-            weight_decay=1e-3,
-            momentum=0.9,
-        )
+        optimizer_name = self.args.optimizer.lower()
+        if optimizer_name == "adamw":
+            optimizer = torch.optim.AdamW(
+                params=param_groups,
+                lr=self.args.lr,
+                weight_decay=self.args.weight_decay,
+                betas=(self.args.adamw_beta1, self.args.adamw_beta2),
+            )
+            optimizer_info = (
+                f"AdamW lr={self.args.lr}, weight_decay={self.args.weight_decay}, "
+                f"betas=({self.args.adamw_beta1}, {self.args.adamw_beta2})"
+            )
+        else:
+            optimizer = torch.optim.SGD(
+                params=param_groups,
+                lr=self.args.lr,
+                weight_decay=self.args.weight_decay,
+                momentum=self.args.sgd_momentum,
+            )
+            optimizer_info = (
+                f"SGD lr={self.args.lr}, momentum={self.args.sgd_momentum}, "
+                f"weight_decay={self.args.weight_decay}"
+            )
         trainable = sum(p.numel() for group in optimizer.param_groups for p in group["params"] if p.requires_grad)
         print(
-            "[Optimizer] SGD "
-            f"lr={self.args.lr}, momentum=0.9, weight_decay=1e-3, "
+            f"[Optimizer] {optimizer_info}, "
             f"teacher_adapter_lr={self.args.teacher_adapter_lr if adapter_params else 'off'}, "
             f"trainable_params={trainable:,}"
         )
