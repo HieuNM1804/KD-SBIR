@@ -91,10 +91,12 @@ def loss_fn(args, features):
     ) = features
 
     labels = labels.to(photo_logits.device)
-    classification_loss = (
-        F.cross_entropy(photo_logits, labels)
-        + F.cross_entropy(sketch_logits, labels)
-    )
+    classification_loss = torch.zeros((), device=photo_logits.device)
+    if args.lambda_cls > 0:
+        classification_loss = (
+            F.cross_entropy(photo_logits, labels)
+            + F.cross_entropy(sketch_logits, labels)
+        )
 
     cosine_distance = lambda x, y: 1.0 - F.cosine_similarity(x, y)
     triplet_loss = nn.TripletMarginWithDistanceLoss(
