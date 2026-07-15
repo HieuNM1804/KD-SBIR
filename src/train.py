@@ -81,7 +81,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_size", type=int, default=224)
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed cho Python/NumPy/PyTorch/DataLoader workers.")
-    parser.add_argument("--lambda_cls", type=float, default=1.0,
+    parser.add_argument("--lambda_cls", type=float, default=0.0,
                         help="Trọng số cho classification loss: CE(photo,text)+CE(sketch,text).")
     parser.add_argument("--lambda_triplet", type=float, default=1.0,
                         help="Trọng số cho triplet loss sketch-photo-negative.")
@@ -116,8 +116,13 @@ if __name__ == "__main__":
                         help='Trọng số relational KD sketch-photo.')
     parser.add_argument('--kd_temperature', type=float, default=0.07,
                         help='Temperature cho phân phối similarity sketch-photo.')
+    parser.add_argument('--lambda_text_kd', type=float, default=0.5,
+                        help='Trọng số feature KD giữa projected student text và teacher text.')
+    parser.add_argument('--text_kd_mode', type=str, default='cosine',
+                        choices=['cosine', 'mse'],
+                        help='Kiểu text feature KD sau projection.')
                         
-    parser.add_argument('--exp_name', type=str, default='teacher_adapter_triplet_baseline')
+    parser.add_argument('--exp_name', type=str, default='no_cls_text_projection_kd')
 
 
     
