@@ -7,7 +7,7 @@ from torch.nn import functional as F
 from torchmetrics.functional import retrieval_average_precision #, retrieval_precision
 import open_clip
 
-from src.prompt_learner import MultiModalPromptLearner
+from src.prompt_learner import MultiModalPromptLearner, TextEncoder
 from src.utils import load_clip_to_cpu, retrieval_precision
 from src.losses import loss_fn
 from src.teacher_adapters import ModalityAdapters
@@ -112,8 +112,8 @@ def _infer_teacher_image_size(teacher):
 
 def _load_teacher(args):
     """Load the frozen DFN5B teacher when relational KD is enabled."""
-    if args.lambda_kd <= 0 and not args.joint_teacher_adapter:
-        print("[Teacher] KD và joint adapter đều tắt -> bỏ qua DFN5B teacher")
+    if args.lambda_kd <= 0 and args.lambda_text_image_kd <= 0 and not args.joint_teacher_adapter:
+        print("[Teacher] KD/text-image-KD và joint adapter đều tắt -> bỏ qua DFN5B teacher")
         return None
 
     print(f"[Teacher] Đang load DFN5B ({DFN5B_MODEL})...")
@@ -161,6 +161,8 @@ class CustomCLIP(nn.Module):
         
         self.ph_encoder = copy.deepcopy(clip_model.visual)
         self.sk_encoder = copy.deepcopy(clip_model.visual)
+        self.text_encoder = TextEncoder(clip_model_distill)
+        self.text_encoder.requires_grad_(False)
         
         self.model_distill = strong_teacher
         self.teacher_active = strong_teacher is not None
@@ -180,6 +182,7 @@ class CustomCLIP(nn.Module):
 
     def train(self, mode=True):
         super().train(mode)
+        self.text_encoder.eval()
         if self.model_distill is not None:
             self.model_distill.eval()
         if self.teacher_adapters is not None:
@@ -234,6 +237,18 @@ class CustomCLIP(nn.Module):
         self._teacher_text_cache[cache_key] = result
         return result
 
+    def encode_student_text(self, classnames, type='photo'):
+        prompt_learner = (
+            self.prompt_learner_photo
+            if type == 'photo'
+            else self.prompt_learner_sketch
+        )
+        tokenized_prompts, prompts = prompt_learner.text_prompts(classnames)
+        text_features = self.text_encoder(
+            prompts, tokenized_prompts.to(prompts.device)
+        )
+        return F.normalize(text_features.float(), dim=-1)
+
     def encode_student_image(self, img_tensor, classnames, type='photo'):
         if type=='photo':
             prompt_learner = self.prompt_learner_photo
@@ -262,6 +277,15 @@ class CustomCLIP(nn.Module):
         teacher_sketch_features = sketch_features.detach()
         teacher_sketch_text = None
         teacher_photo_text = None
+        student_sketch_text = None
+        student_photo_text = None
+        if getattr(self.cfg, "lambda_text_image_kd", 0) > 0:
+            student_sketch_text = self.encode_student_text(
+                classnames, type='sketch'
+            )
+            student_photo_text = self.encode_student_text(
+                classnames, type='photo'
+            )
         if self.teacher_active:
             with torch.no_grad():
                 teacher_photo_base = self.model_distill.encode_image(
@@ -276,7 +300,7 @@ class CustomCLIP(nn.Module):
             teacher_sketch_features = self.adapt_teacher_feature(
                 teacher_sketch_base, "sketch"
             )
-            if self.joint_teacher_adapter:
+            if self.joint_teacher_adapter or getattr(self.cfg, "lambda_text_image_kd", 0) > 0:
                 teacher_sketch_text, teacher_photo_text = (
                     self.get_teacher_text_features(classnames)
                 )
@@ -291,6 +315,8 @@ class CustomCLIP(nn.Module):
             self.joint_teacher_adapter,
             teacher_sketch_text,
             teacher_photo_text,
+            student_sketch_text,
+            student_photo_text,
         )
         
     def extract_feature(self, image, classname, type='photo'):
@@ -375,6 +401,7 @@ class ZS_SBIR(pl.LightningModule):
         for k, v in loss_dict.items():
             bar_names = {
                 "kd_sketch_photo": "KD_SP",
+                "text_image_kd": "TXT_IMG",
                 "teacher_triplet": "T_TRI",
                 "teacher_semantic": "T_SEM",
             }

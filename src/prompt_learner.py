@@ -3,10 +3,41 @@ import torch.nn as nn
 
 from clip import clip
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+class TextEncoder(nn.Module):
+    def __init__(self, clip_model):
+        super().__init__()
+        self.resblocks = clip_model.transformer.resblocks
+        self.positional_embedding = clip_model.positional_embedding
+        self.ln_final = clip_model.ln_final
+        self.text_projection = clip_model.text_projection
+        self.dtype = clip_model.dtype
+
+    def forward(self, prompts, tokenized_prompts):
+        x = prompts + self.positional_embedding.type(self.dtype)
+        x = x.permute(1, 0, 2)
+        for block in self.resblocks:
+            x = block(x)
+        x = x.permute(1, 0, 2)
+        x = self.ln_final(x).type(self.dtype)
+        return (
+            x[
+                torch.arange(x.shape[0], device=x.device),
+                tokenized_prompts.argmax(dim=-1),
+            ]
+            @ self.text_projection
+        )
+
+
 class MultiModalPromptLearner(nn.Module):
     def __init__(self, cfg, clip_model, type='photo'):
         super().__init__()
+        self.clip_model = clip_model
+        self.clip_model.requires_grad_(False)
         self.cfg = cfg
+        self.modality = type
         n_ctx = cfg.n_ctx
         ctx_init = "a photo/sketch of "
             
@@ -46,3 +77,23 @@ class MultiModalPromptLearner(nn.Module):
 
     def forward(self):
         return self.proj(self.ctx)
+
+    def text_prompts(self, classnames):
+        classnames = [name.replace("_", " ") for name in classnames]
+        raw_prompts = [
+            f"a {self.modality} of a {name}." for name in classnames
+        ]
+        tokenized_prompts = torch.cat([clip.tokenize(p) for p in raw_prompts])
+        with torch.no_grad():
+            embedding = self.clip_model.token_embedding(
+                tokenized_prompts.to(device)
+            ).type(self.clip_model.dtype)
+
+        ctx = self.ctx
+        if ctx.dim() == 2:
+            ctx = ctx.unsqueeze(0).expand(len(classnames), -1, -1)
+
+        prefix = embedding[:, :1, :]
+        suffix = embedding[:, 1 + self.cfg.n_ctx :, :]
+        prompts = torch.cat([prefix, ctx, suffix], dim=1)
+        return tokenized_prompts, prompts

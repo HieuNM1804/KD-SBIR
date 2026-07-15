@@ -111,8 +111,12 @@ if __name__ == "__main__":
                         help='Trọng số relational KD sketch-photo.')
     parser.add_argument('--kd_temperature', type=float, default=0.07,
                         help='Temperature cho phân phối similarity sketch-photo.')
+    parser.add_argument('--lambda_text_image_kd', type=float, default=0.25,
+                        help='Trọng số KD image-to-text distribution cho student.')
+    parser.add_argument('--text_image_kd_temperature', type=float, default=0.07,
+                        help='Temperature cho text-image KD.')
                         
-    parser.add_argument('--exp_name', type=str, default='student_distill_only')
+    parser.add_argument('--exp_name', type=str, default='text_image_logit_kd')
 
 
     
