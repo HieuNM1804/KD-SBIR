@@ -135,6 +135,8 @@ def loss_fn(args, features):
         teacher_photo_text,
         student_sketch_text,
         student_photo_text,
+        teacher_sketch_text_image_features,
+        teacher_photo_text_image_features,
     ) = features
 
     labels = labels.to(photo_features.device)
@@ -156,8 +158,8 @@ def loss_fn(args, features):
             photo_features,
             student_sketch_text,
             student_photo_text,
-            teacher_sketch_features,
-            teacher_photo_features,
+            teacher_sketch_text_image_features,
+            teacher_photo_text_image_features,
             teacher_sketch_text,
             teacher_photo_text,
             args.text_image_kd_temperature,

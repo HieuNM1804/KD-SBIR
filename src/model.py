@@ -275,6 +275,8 @@ class CustomCLIP(nn.Module):
 
         teacher_photo_features = photo_features.detach()
         teacher_sketch_features = sketch_features.detach()
+        teacher_photo_text_image_features = teacher_photo_features
+        teacher_sketch_text_image_features = teacher_sketch_features
         teacher_sketch_text = None
         teacher_photo_text = None
         student_sketch_text = None
@@ -300,6 +302,16 @@ class CustomCLIP(nn.Module):
             teacher_sketch_features = self.adapt_teacher_feature(
                 teacher_sketch_base, "sketch"
             )
+            if getattr(self.cfg, "text_image_teacher_source", "adapted") == "frozen":
+                teacher_photo_text_image_features = F.normalize(
+                    teacher_photo_base.float(), dim=-1
+                )
+                teacher_sketch_text_image_features = F.normalize(
+                    teacher_sketch_base.float(), dim=-1
+                )
+            else:
+                teacher_photo_text_image_features = teacher_photo_features
+                teacher_sketch_text_image_features = teacher_sketch_features
             if self.joint_teacher_adapter or getattr(self.cfg, "lambda_text_image_kd", 0) > 0:
                 teacher_sketch_text, teacher_photo_text = (
                     self.get_teacher_text_features(classnames)
@@ -317,6 +329,8 @@ class CustomCLIP(nn.Module):
             teacher_photo_text,
             student_sketch_text,
             student_photo_text,
+            teacher_sketch_text_image_features,
+            teacher_photo_text_image_features,
         )
         
     def extract_feature(self, image, classname, type='photo'):
