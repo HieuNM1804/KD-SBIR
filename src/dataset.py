@@ -12,7 +12,7 @@ CLIP_STD = [0.26862954, 0.26130258, 0.27577711]
 def aumented_transform():
     transform_list = [
         transforms.RandomResizedCrop(224, scale=(0.85, 1.0)),
-        transforms.RandomHorizontalFlip(0.5),
+        # transforms.RandomHorizontalFlip(0.5),
         transforms.ToTensor(),
         transforms.RandomErasing(p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0),
         transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD)
