@@ -32,6 +32,74 @@ def relational_kd_loss(
     return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
 
 
+def generalized_text_kd_loss(
+    student_sketch_text,
+    student_photo_text,
+    teacher_sketch_text,
+    teacher_photo_text,
+    manual_sketch_text,
+    manual_photo_text,
+    temperature=0.07,
+    anchor_weight=0.5,
+):
+    """Preserve teacher text relations while anchoring prompts to frozen CLIP text."""
+
+    def relation_loss(student_a, student_b, teacher_a, teacher_b):
+        device = student_a.device
+        student_a = F.normalize(student_a.float(), dim=-1)
+        student_b = F.normalize(student_b.float(), dim=-1)
+        teacher_a = F.normalize(
+            teacher_a.to(device=device, dtype=torch.float32), dim=-1
+        )
+        teacher_b = F.normalize(
+            teacher_b.to(device=device, dtype=torch.float32), dim=-1
+        )
+        student_log_probs = F.log_softmax(
+            student_a @ student_b.t() / temperature, dim=-1
+        )
+        with torch.no_grad():
+            teacher_probs = F.softmax(
+                teacher_a @ teacher_b.t() / temperature, dim=-1
+            )
+        return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
+
+    def anchor_loss(student_text, manual_text):
+        manual_text = manual_text.to(
+            device=student_text.device, dtype=torch.float32
+        )
+        return 1.0 - F.cosine_similarity(
+            F.normalize(student_text.float(), dim=-1),
+            F.normalize(manual_text, dim=-1),
+            dim=-1,
+        ).mean()
+
+    text_relation = (
+        relation_loss(
+            student_sketch_text,
+            student_sketch_text,
+            teacher_sketch_text,
+            teacher_sketch_text,
+        )
+        + relation_loss(
+            student_photo_text,
+            student_photo_text,
+            teacher_photo_text,
+            teacher_photo_text,
+        )
+        + relation_loss(
+            student_sketch_text,
+            student_photo_text,
+            teacher_sketch_text,
+            teacher_photo_text,
+        )
+    ) / 3.0
+    text_anchor = 0.5 * (
+        anchor_loss(student_sketch_text, manual_sketch_text)
+        + anchor_loss(student_photo_text, manual_photo_text)
+    )
+    return text_relation + anchor_weight * text_anchor, text_relation, text_anchor
+
+
 def batch_hard_teacher_triplet_loss(
     sketch_features,
     photo_features,
@@ -84,6 +152,10 @@ def loss_fn(args, features):
         joint_teacher_adapter,
         teacher_sketch_text,
         teacher_photo_text,
+        student_sketch_text,
+        student_photo_text,
+        manual_sketch_text,
+        manual_photo_text,
     ) = features
 
     labels = labels.to(photo_features.device)
@@ -96,6 +168,21 @@ def loss_fn(args, features):
             teacher_sketch_features,
             teacher_photo_features,
             args.kd_temperature,
+        )
+
+    text_kd_loss = torch.zeros((), device=photo_features.device)
+    text_relation = torch.zeros((), device=photo_features.device)
+    text_anchor = torch.zeros((), device=photo_features.device)
+    if teacher_active and args.lambda_text_kd > 0:
+        text_kd_loss, text_relation, text_anchor = generalized_text_kd_loss(
+            student_sketch_text,
+            student_photo_text,
+            teacher_sketch_text,
+            teacher_photo_text,
+            manual_sketch_text,
+            manual_photo_text,
+            args.text_kd_temperature,
+            args.text_anchor_weight,
         )
 
     teacher_triplet_loss = torch.zeros((), device=photo_features.device)
@@ -118,11 +205,15 @@ def loss_fn(args, features):
 
     total_loss = (
         args.lambda_kd * kd_loss
+        + args.lambda_text_kd * text_kd_loss
         + args.lambda_teacher_retrieval * teacher_triplet_loss
         + args.lambda_teacher_semantic * teacher_semantic
     )
     return total_loss, {
         "kd_sketch_photo": kd_loss,
+        "text_kd": text_kd_loss,
+        "text_relation": text_relation,
+        "text_anchor": text_anchor,
         "teacher_triplet": teacher_triplet_loss,
         "teacher_semantic": teacher_semantic,
     }
