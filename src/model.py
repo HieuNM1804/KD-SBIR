@@ -150,12 +150,11 @@ class CustomCLIP(nn.Module):
         return logits, image_features_normalize
         
     def forward(self, x, classnames):
-        photo_tensor, sk_tensor, photo_aug_tensor, sk_aug_tensor, neg_tensor, label = x
+        photo_tensor, sk_tensor, photo_aug_tensor, sk_aug_tensor, label = x
         photo_logits, photo_features = self.get_logits(photo_tensor, classnames)
         sketch_logits, sketch_features = self.get_logits(
             sk_tensor, classnames, type='sketch'
         )
-        _, negative_features = self.get_logits(neg_tensor, classnames)
 
         teacher_photo_features = photo_features.detach()
         teacher_sketch_features = sketch_features.detach()
@@ -173,7 +172,6 @@ class CustomCLIP(nn.Module):
             sketch_features,
             teacher_photo_features,
             teacher_sketch_features,
-            negative_features,
             label,
             photo_logits,
             sketch_logits,
@@ -252,7 +250,7 @@ class ZS_SBIR(pl.LightningModule):
         for k, v in loss_dict.items():
             bar_names = {
                 "cls": "CLS",
-                "triplet": "TRI",
+                "nt_xent": "NTX",
                 "kd_sketch_photo": "KD_SP",
             }
             show_on_bar = k in bar_names

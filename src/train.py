@@ -83,8 +83,10 @@ if __name__ == "__main__":
                         help="Random seed cho Python/NumPy/PyTorch/DataLoader workers.")
     parser.add_argument("--lambda_cls", type=float, default=1.0,
                         help="Trọng số classification loss của student.")
-    parser.add_argument("--lambda_triplet", type=float, default=1.0,
-                        help="Trọng số triplet loss của student.")
+    parser.add_argument("--lambda_nt_xent", type=float, default=1.0,
+                        help="Trọng số NT-Xent contrastive loss sketch-photo của student.")
+    parser.add_argument("--nt_xent_temperature", type=float, default=0.07,
+                        help="Temperature cho NT-Xent sketch-photo loss.")
     parser.add_argument("--lr", type=float, default=4e-5)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--test_batch_size', type=int, default=1024)

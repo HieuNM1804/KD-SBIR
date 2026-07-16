@@ -55,25 +55,19 @@ class TrainDataset(torch.utils.data.Dataset):
         filepath = self.all_sketches_path[index]                
         category = filepath.split(os.path.sep)[-2]
         
-        neg_classes = self.all_categories.copy()
-        neg_classes.remove(category)
-
         sk_path  = filepath
         img_path = np.random.choice(self.all_photos_path[category])
-        neg_path = np.random.choice(self.all_photos_path[np.random.choice(neg_classes)])
 
         sk_data  = ImageOps.pad(Image.open(sk_path).convert('RGB'),  size=(self.args.max_size, self.args.max_size))
         img_data = ImageOps.pad(Image.open(img_path).convert('RGB'), size=(self.args.max_size, self.args.max_size))
-        neg_data = ImageOps.pad(Image.open(neg_path).convert('RGB'), size=(self.args.max_size, self.args.max_size))
 
         sk_tensor  = self.transform1(sk_data)
         img_tensor = self.transform1(img_data)
-        neg_tensor = self.transform1(neg_data)
         
         sk_aug_tensor = self.transform2(sk_data)
         img_aug_tensor = self.transform2(img_data)
         
-        return img_tensor, sk_tensor, img_aug_tensor, sk_aug_tensor, neg_tensor, self.all_categories.index(category)
+        return img_tensor, sk_tensor, img_aug_tensor, sk_aug_tensor, self.all_categories.index(category)
 
 
 class ValidDataset(torch.utils.data.Dataset):
