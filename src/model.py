@@ -18,10 +18,11 @@ from src.teacher_adapters import ModalityAdapters
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ---------------------------------------------------------------------------
-# DFN5B teacher loader
+# Foundation teacher loader
 # ---------------------------------------------------------------------------
-DFN5B_MODEL = "ViT-H-14-quickgelu"
-DFN5B_PRETRAINED = "dfn5b"
+DFN5B_MODEL = "EVA01-g-14"
+DFN5B_PRETRAINED = "laion400m_s11b_b41k"
+TEACHER_NAME = "EVA01-g-14"
 
 
 def _freeze_teacher(teacher):
@@ -48,7 +49,7 @@ def _load_teacher_adapters(args, strong_teacher):
         )
         return adapters
     if strong_teacher is None:
-        raise ValueError("--teacher_adapter_ckpt requires the DFN5B teacher.")
+        raise ValueError(f"--teacher_adapter_ckpt requires the {TEACHER_NAME} teacher.")
 
     checkpoint = torch.load(ckpt_path, map_location="cpu")
     required = {"adapter_state_dict", "feature_dim", "bottleneck_dim"}
@@ -78,7 +79,7 @@ def _load_teacher_adapters(args, strong_teacher):
         )
 
     if checkpoint.get("adapter_mode", "residual") != "residual":
-        raise RuntimeError("Only residual DFN5B adapters are supported.")
+        raise RuntimeError("Only residual teacher adapters are supported.")
     adapters = ModalityAdapters(
         feature_dim=feature_dim,
         bottleneck_dim=int(checkpoint["bottleneck_dim"]),
@@ -114,12 +115,12 @@ def _infer_teacher_image_size(teacher):
 
 
 def _load_teacher(args):
-    """Load the frozen DFN5B teacher when relational KD is enabled."""
+    """Load the frozen foundation teacher when relational KD is enabled."""
     if args.lambda_kd <= 0 and not args.joint_teacher_adapter:
-        print("[Teacher] KD và joint adapter đều tắt -> bỏ qua DFN5B teacher")
+        print(f"[Teacher] KD và joint adapter đều tắt -> bỏ qua {TEACHER_NAME} teacher")
         return None
 
-    print(f"[Teacher] Đang load DFN5B ({DFN5B_MODEL})...")
+    print(f"[Teacher] Đang load {TEACHER_NAME} ({DFN5B_MODEL}, {DFN5B_PRETRAINED})...")
     teacher, _, _ = open_clip.create_model_and_transforms(
         DFN5B_MODEL, pretrained=DFN5B_PRETRAINED
     )
@@ -131,11 +132,11 @@ def _load_teacher(args):
             print("[Teacher] quantize_fp16=True nhưng không có CUDA; giữ teacher ở FP32.")
         else:
             teacher = teacher.half()
-            print("[Teacher] DFN5B chạy FP16")
+            print(f"[Teacher] {TEACHER_NAME} chạy FP16")
     teacher.output_dim = 1024
     teacher.image_size = _infer_teacher_image_size(teacher)
     print(
-        "[Teacher] DFN5B đã sẵn sàng "
+        f"[Teacher] {TEACHER_NAME} đã sẵn sàng "
         f"(frozen, output {teacher.output_dim}-dim, image_size={teacher.image_size or 'unknown'})"
     )
     return teacher
