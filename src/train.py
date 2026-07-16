@@ -91,22 +91,9 @@ if __name__ == "__main__":
     parser.add_argument('--no_progress', action='store_false', dest='progress',
                         help='Tắt tqdm progress bar.')
     parser.add_argument('--quantize_fp16', action='store_true', default=True,
-                        help='Chạy DFN5B teacher ở FP16 để giảm VRAM và tăng tốc.')
+                        help='Chạy EVA01-g-14 teacher ở FP16 để giảm VRAM và tăng tốc.')
     parser.add_argument('--no_quantize_fp16', action='store_false', dest='quantize_fp16',
-                        help='Giữ DFN5B teacher ở FP32.')
-    parser.add_argument('--teacher_adapter_ckpt', type=str, default='',
-                        help='Checkpoint modality adapter đã fine-tune cho DFN5B.')
-    parser.add_argument('--joint_teacher_adapter', action='store_true', default=True,
-                        help='Train DFN5B sketch/photo adapters jointly with the student.')
-    parser.add_argument('--no_joint_teacher_adapter', action='store_false', dest='joint_teacher_adapter',
-                        help='Tắt joint teacher adapter để chạy ablation/no-teacher.')
-    parser.add_argument('--teacher_adapter_bottleneck', type=int, default=64)
-    parser.add_argument('--teacher_adapter_lr', type=float, default=2e-5)
-    parser.add_argument('--lambda_teacher_retrieval', type=float, default=1.0,
-                        help='Trọng số teacher-adapter triplet loss trên nhánh ablation này.')
-    parser.add_argument('--lambda_teacher_semantic', type=float, default=1.0)
-    parser.add_argument('--teacher_temperature', type=float, default=0.07)
-    parser.add_argument('--teacher_triplet_margin', type=float, default=0.2)
+                        help='Giữ EVA01-g-14 teacher ở FP32.')
     parser.add_argument('--lambda_kd', type=float, default=3.0,
                         help='Trọng số relational KD sketch-photo.')
     parser.add_argument('--kd_temperature', type=float, default=0.07,

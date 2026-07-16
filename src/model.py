@@ -10,15 +10,15 @@ import open_clip
 from src.prompt_learner import MultiModalPromptLearner
 from src.utils import load_clip_to_cpu, retrieval_precision
 from src.losses import loss_fn
-from src.teacher_adapters import ModalityAdapters
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ---------------------------------------------------------------------------
-# DFN5B teacher loader
+# EVA01-g-14 teacher loader
 # ---------------------------------------------------------------------------
-DFN5B_MODEL = "ViT-H-14-quickgelu"
-DFN5B_PRETRAINED = "dfn5b"
+TEACHER_MODEL = "EVA01-g-14"
+TEACHER_PRETRAINED = "laion400m_s11b_b41k"
+TEACHER_NAME = "EVA01-g-14"
 
 
 def _freeze_teacher(teacher):
@@ -26,72 +26,6 @@ def _freeze_teacher(teacher):
     for p in teacher.parameters():
         p.requires_grad = False
     return teacher
-
-
-def _load_teacher_adapters(args, strong_teacher):
-    ckpt_path = getattr(args, "teacher_adapter_ckpt", "")
-    joint_training = getattr(args, "joint_teacher_adapter", False)
-    if not ckpt_path:
-        if not joint_training:
-            return None
-        adapters = ModalityAdapters(
-            feature_dim=int(strong_teacher.output_dim),
-            bottleneck_dim=args.teacher_adapter_bottleneck,
-        ).to(device=device, dtype=torch.float32)
-        print(
-            "[Teacher Adapter] initialized for joint training "
-            f"(feature_dim={strong_teacher.output_dim}, "
-            f"bottleneck={args.teacher_adapter_bottleneck})"
-        )
-        return adapters
-    if strong_teacher is None:
-        raise ValueError("--teacher_adapter_ckpt requires the DFN5B teacher.")
-
-    checkpoint = torch.load(ckpt_path, map_location="cpu")
-    required = {"adapter_state_dict", "feature_dim", "bottleneck_dim"}
-    missing = required - set(checkpoint)
-    if missing:
-        raise RuntimeError(
-            f"Invalid teacher adapter checkpoint '{ckpt_path}'; missing keys: {sorted(missing)}"
-        )
-
-    saved_model = checkpoint.get("model")
-    saved_pretrained = checkpoint.get("pretrained")
-    if saved_model and saved_model != DFN5B_MODEL:
-        raise RuntimeError(
-            f"Adapter model mismatch: checkpoint={saved_model}, teacher={DFN5B_MODEL}"
-        )
-    if saved_pretrained and saved_pretrained != DFN5B_PRETRAINED:
-        raise RuntimeError(
-            "Adapter pretrained-weight mismatch: "
-            f"checkpoint={saved_pretrained}, teacher={DFN5B_PRETRAINED}"
-        )
-
-    feature_dim = int(checkpoint["feature_dim"])
-    teacher_dim = int(getattr(strong_teacher, "output_dim", feature_dim))
-    if feature_dim != teacher_dim:
-        raise RuntimeError(
-            f"Adapter feature_dim={feature_dim} does not match teacher output_dim={teacher_dim}."
-        )
-
-    if checkpoint.get("adapter_mode", "residual") != "residual":
-        raise RuntimeError("Only residual DFN5B adapters are supported.")
-    adapters = ModalityAdapters(
-        feature_dim=feature_dim,
-        bottleneck_dim=int(checkpoint["bottleneck_dim"]),
-    )
-    adapters.load_state_dict(checkpoint["adapter_state_dict"], strict=True)
-    adapters.requires_grad_(joint_training)
-    adapters.train(joint_training)
-    adapters = adapters.to(device=device, dtype=torch.float32)
-    print(
-        f"[Teacher Adapter] loaded {ckpt_path} "
-        f"(epoch={checkpoint.get('epoch', 'unknown')}, feature_dim={feature_dim}, "
-        f"bottleneck={checkpoint['bottleneck_dim']}, "
-        f"mode={checkpoint.get('adapter_mode', 'residual')}, "
-        f"trainable={joint_training})"
-    )
-    return adapters
 
 
 def _infer_teacher_image_size(teacher):
@@ -111,16 +45,15 @@ def _infer_teacher_image_size(teacher):
 
 
 def _load_teacher(args):
-    """Load the frozen DFN5B teacher when relational KD is enabled."""
-    if args.lambda_kd <= 0 and not args.joint_teacher_adapter:
-        print("[Teacher] KD và joint adapter đều tắt -> bỏ qua DFN5B teacher")
+    """Load the frozen EVA01-g-14 teacher for relational KD."""
+    if args.lambda_kd <= 0:
+        print(f"[Teacher] lambda_kd <= 0 -> bỏ qua {TEACHER_NAME} teacher")
         return None
 
-    print(f"[Teacher] Đang load DFN5B ({DFN5B_MODEL})...")
+    print(f"[Teacher] Đang load {TEACHER_NAME} ({TEACHER_MODEL}, {TEACHER_PRETRAINED})...")
     teacher, _, _ = open_clip.create_model_and_transforms(
-        DFN5B_MODEL, pretrained=DFN5B_PRETRAINED
+        TEACHER_MODEL, pretrained=TEACHER_PRETRAINED
     )
-    teacher.text_tokenizer = open_clip.get_tokenizer(DFN5B_MODEL)
     teacher = _freeze_teacher(teacher)
     teacher = teacher.to(device)
     if getattr(args, "quantize_fp16", False):
@@ -128,11 +61,11 @@ def _load_teacher(args):
             print("[Teacher] quantize_fp16=True nhưng không có CUDA; giữ teacher ở FP32.")
         else:
             teacher = teacher.half()
-            print("[Teacher] DFN5B chạy FP16")
+            print(f"[Teacher] {TEACHER_NAME} chạy FP16")
     teacher.output_dim = 1024
     teacher.image_size = _infer_teacher_image_size(teacher)
     print(
-        "[Teacher] DFN5B đã sẵn sàng "
+        f"[Teacher] {TEACHER_NAME} đã sẵn sàng "
         f"(frozen, output {teacher.output_dim}-dim, image_size={teacher.image_size or 'unknown'})"
     )
     return teacher
@@ -164,9 +97,6 @@ class CustomCLIP(nn.Module):
         
         self.model_distill = strong_teacher
         self.teacher_active = strong_teacher is not None
-        self.joint_teacher_adapter = getattr(cfg, "joint_teacher_adapter", False)
-        self.teacher_adapters = _load_teacher_adapters(cfg, strong_teacher)
-        self._teacher_text_cache = {}
         self._teacher_fp16 = (
             self.teacher_active
             and getattr(cfg, "quantize_fp16", False)
@@ -182,8 +112,6 @@ class CustomCLIP(nn.Module):
         super().train(mode)
         if self.model_distill is not None:
             self.model_distill.eval()
-        if self.teacher_adapters is not None:
-            self.teacher_adapters.train(mode and self.joint_teacher_adapter)
         return self
     
     def teacher_image_input(self, image):
@@ -196,43 +124,6 @@ class CustomCLIP(nn.Module):
                 align_corners=False,
             )
         return image.half() if self._teacher_fp16 else image.float()
-
-    def adapt_teacher_feature(self, feature, modality):
-        if self.teacher_adapters is None:
-            return feature
-        feature = F.normalize(feature.float(), dim=-1)
-        adapter = (
-            self.teacher_adapters.photo
-            if modality == "photo"
-            else self.teacher_adapters.sketch
-        )
-        return adapter(feature)
-
-    def get_teacher_text_features(self, classnames):
-        cache_key = tuple(classnames)
-        if cache_key in self._teacher_text_cache:
-            return self._teacher_text_cache[cache_key]
-
-        sketch_prompts = [
-            f"a sketch of a {name.replace('_', ' ')}." for name in classnames
-        ]
-        photo_prompts = [
-            f"a photo of a {name.replace('_', ' ')}." for name in classnames
-        ]
-        tokens = self.model_distill.text_tokenizer(
-            sketch_prompts + photo_prompts
-        ).to(device)
-        with torch.no_grad():
-            text_features = F.normalize(
-                self.model_distill.encode_text(tokens).float(), dim=-1
-            )
-        class_count = len(classnames)
-        result = (
-            text_features[:class_count],
-            text_features[class_count:],
-        )
-        self._teacher_text_cache[cache_key] = result
-        return result
 
     def encode_student_image(self, img_tensor, classnames, type='photo'):
         if type=='photo':
@@ -260,25 +151,13 @@ class CustomCLIP(nn.Module):
 
         teacher_photo_features = photo_features.detach()
         teacher_sketch_features = sketch_features.detach()
-        teacher_sketch_text = None
-        teacher_photo_text = None
         if self.teacher_active:
             with torch.no_grad():
-                teacher_photo_base = self.model_distill.encode_image(
+                teacher_photo_features = self.model_distill.encode_image(
                     self.teacher_image_input(photo_aug_tensor)
                 )
-                teacher_sketch_base = self.model_distill.encode_image(
+                teacher_sketch_features = self.model_distill.encode_image(
                     self.teacher_image_input(sk_aug_tensor)
-                )
-            teacher_photo_features = self.adapt_teacher_feature(
-                teacher_photo_base, "photo"
-            )
-            teacher_sketch_features = self.adapt_teacher_feature(
-                teacher_sketch_base, "sketch"
-            )
-            if self.joint_teacher_adapter:
-                teacher_sketch_text, teacher_photo_text = (
-                    self.get_teacher_text_features(classnames)
                 )
 
         return (
@@ -286,11 +165,7 @@ class CustomCLIP(nn.Module):
             sketch_features,
             teacher_photo_features,
             teacher_sketch_features,
-            label,
             self.teacher_active,
-            self.joint_teacher_adapter,
-            teacher_sketch_text,
-            teacher_photo_text,
         )
         
     def extract_feature(self, image, classname, type='photo'):
@@ -328,21 +203,11 @@ class ZS_SBIR(pl.LightningModule):
         self.val_step_outputs_ph = []
         
     def configure_optimizers(self):
-        adapter_params = (
-            [p for p in self.model.teacher_adapters.parameters() if p.requires_grad]
-            if self.model.teacher_adapters is not None
-            else []
-        )
-        adapter_param_ids = {id(p) for p in adapter_params}
         student_params = [
             p for p in self.model.parameters()
-            if p.requires_grad and id(p) not in adapter_param_ids
+            if p.requires_grad
         ]
         param_groups = [{"params": student_params, "lr": self.args.lr}]
-        if adapter_params:
-            param_groups.append(
-                {"params": adapter_params, "lr": self.args.teacher_adapter_lr}
-            )
         optimizer = torch.optim.SGD(
             params=param_groups,
             lr=self.args.lr,
@@ -353,7 +218,6 @@ class ZS_SBIR(pl.LightningModule):
         print(
             "[Optimizer] SGD "
             f"lr={self.args.lr}, momentum=0.9, weight_decay=1e-3, "
-            f"teacher_adapter_lr={self.args.teacher_adapter_lr if adapter_params else 'off'}, "
             f"trainable_params={trainable:,}"
         )
         
@@ -375,8 +239,6 @@ class ZS_SBIR(pl.LightningModule):
         for k, v in loss_dict.items():
             bar_names = {
                 "kd_sketch_photo": "KD_SP",
-                "teacher_triplet": "T_TRI",
-                "teacher_semantic": "T_SEM",
             }
             show_on_bar = k in bar_names
             bar_name = bar_names.get(k, k)
