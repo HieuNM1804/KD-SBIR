@@ -12,9 +12,9 @@ from torchmetrics.functional.retrieval import (
 )
 from tqdm import tqdm
 
-from clip import clip
 from src.data_config import UNSEEN_CLASSES
 from src.dataset import ValidDataset
+from src.utils import load_clip_to_cpu
 
 
 DATASETS = ("sketchy_1", "sketchy_2", "tuberlin", "quickdraw")
@@ -185,7 +185,17 @@ def main():
     runs = resolve_runs(args)
 
     print(f"Loading frozen CLIP ViT-B/32 on {args.device}...")
-    model, _ = clip.load("ViT-B/32", device=args.device, jit=False)
+    model_cfg = SimpleNamespace(backbone="ViT-B/32", n_ctx=0)
+    model = load_clip_to_cpu(
+        model_cfg,
+        design_details={
+            "trainer": "CoOp",
+            "vision_depth": 0,
+            "language_depth": 0,
+            "vision_ctx": 0,
+            "language_ctx": 0,
+        },
+    ).to(args.device)
     model.eval()
 
     results = [evaluate_dataset(model, dataset, root, args) for dataset, root in runs]
