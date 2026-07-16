@@ -20,8 +20,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # ---------------------------------------------------------------------------
 # Foundation teacher loader
 # ---------------------------------------------------------------------------
-DFN5B_MODEL = "EVA01-g-14"
-DFN5B_PRETRAINED = "laion400m_s11b_b41k"
+TEACHER_MODEL = "EVA01-g-14"
+TEACHER_PRETRAINED = "laion400m_s11b_b41k"
 TEACHER_NAME = "EVA01-g-14"
 
 
@@ -61,14 +61,14 @@ def _load_teacher_adapters(args, strong_teacher):
 
     saved_model = checkpoint.get("model")
     saved_pretrained = checkpoint.get("pretrained")
-    if saved_model and saved_model != DFN5B_MODEL:
+    if saved_model and saved_model != TEACHER_MODEL:
         raise RuntimeError(
-            f"Adapter model mismatch: checkpoint={saved_model}, teacher={DFN5B_MODEL}"
+            f"Adapter model mismatch: checkpoint={saved_model}, teacher={TEACHER_MODEL}"
         )
-    if saved_pretrained and saved_pretrained != DFN5B_PRETRAINED:
+    if saved_pretrained and saved_pretrained != TEACHER_PRETRAINED:
         raise RuntimeError(
             "Adapter pretrained-weight mismatch: "
-            f"checkpoint={saved_pretrained}, teacher={DFN5B_PRETRAINED}"
+            f"checkpoint={saved_pretrained}, teacher={TEACHER_PRETRAINED}"
         )
 
     feature_dim = int(checkpoint["feature_dim"])
@@ -120,11 +120,11 @@ def _load_teacher(args):
         print(f"[Teacher] KD và joint adapter đều tắt -> bỏ qua {TEACHER_NAME} teacher")
         return None
 
-    print(f"[Teacher] Đang load {TEACHER_NAME} ({DFN5B_MODEL}, {DFN5B_PRETRAINED})...")
+    print(f"[Teacher] Đang load {TEACHER_NAME} ({TEACHER_MODEL}, {TEACHER_PRETRAINED})...")
     teacher, _, _ = open_clip.create_model_and_transforms(
-        DFN5B_MODEL, pretrained=DFN5B_PRETRAINED
+        TEACHER_MODEL, pretrained=TEACHER_PRETRAINED
     )
-    teacher.text_tokenizer = open_clip.get_tokenizer(DFN5B_MODEL)
+    teacher.text_tokenizer = open_clip.get_tokenizer(TEACHER_MODEL)
     teacher = _freeze_teacher(teacher)
     teacher = teacher.to(device)
     if getattr(args, "quantize_fp16", False):
@@ -269,12 +269,11 @@ class CustomCLIP(nn.Module):
         return logits, image_features_normalize
         
     def forward(self, x, classnames):
-        photo_tensor, sk_tensor, photo_aug_tensor, sk_aug_tensor, neg_tensor, label = x
+        photo_tensor, sk_tensor, photo_aug_tensor, sk_aug_tensor, label = x
         pos_logits, photo_features = self.get_logits(photo_tensor, classnames)
         sk_logits, sketch_features = self.get_logits(
             sk_tensor, classnames, type='sketch'
         )
-        _, negative_features = self.get_logits(neg_tensor, classnames)
 
         teacher_photo_features = photo_features.detach()
         teacher_sketch_features = sketch_features.detach()
@@ -304,7 +303,6 @@ class CustomCLIP(nn.Module):
             sketch_features,
             teacher_photo_features,
             teacher_sketch_features,
-            negative_features,
             label,
             pos_logits,
             sk_logits,
@@ -396,8 +394,10 @@ class ZS_SBIR(pl.LightningModule):
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         for k, v in loss_dict.items():
             bar_names = {
+                "cls": "CLS",
+                "nt_xent": "NTX",
                 "kd_sketch_photo": "KD_SP",
-                "teacher_triplet": "T_TRI",
+                "teacher_nt_xent": "T_NTX",
                 "teacher_semantic": "T_SEM",
             }
             show_on_bar = k in bar_names

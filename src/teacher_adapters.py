@@ -1,4 +1,4 @@
-"""Trainable modality adapters for the frozen DFN5B teacher."""
+"""Trainable modality adapters for the frozen foundation teacher."""
 
 import torch.nn as nn
 from torch.nn import functional as F
