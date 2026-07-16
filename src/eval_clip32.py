@@ -162,6 +162,26 @@ def evaluate_dataset(model, dataset, root, args):
     return metrics
 
 
+def print_summary(results):
+    if not results:
+        return
+
+    print("\n=== CLIP ViT-B/32 zero-shot retrieval summary ===")
+    header = (
+        f"{'dataset':<12} {'mAP':>10} {'precision':>12} "
+        f"{'sketches':>10} {'photos':>10}"
+    )
+    print(header)
+    print("-" * len(header))
+    for result in results:
+        map_text = f"{result['mAP_name']}={result['mAP']:.4f}"
+        precision_text = f"{result['precision_name']}={result['precision']:.4f}"
+        print(
+            f"{result['dataset']:<12} {map_text:>10} {precision_text:>12} "
+            f"{result['num_sketches']:>10} {result['num_photos']:>10}"
+        )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Zero-shot SBIR retrieval baseline with frozen CLIP ViT-B/32 image encoder."
@@ -199,6 +219,7 @@ def main():
     model.eval()
 
     results = [evaluate_dataset(model, dataset, root, args) for dataset, root in runs]
+    print_summary(results)
 
     if args.output:
         output_dir = os.path.dirname(args.output)
