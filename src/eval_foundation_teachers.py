@@ -134,6 +134,19 @@ def teacher_registry():
     return {spec.alias: spec for spec in TEACHERS}
 
 
+def config_image_size(model_name):
+    cfg = open_clip.get_model_config(model_name) or {}
+    vision_cfg = cfg.get("vision_cfg", {})
+    image_size = vision_cfg.get("image_size", "unknown")
+    if isinstance(image_size, (list, tuple)):
+        if len(image_size) == 1:
+            return int(image_size[0])
+        return "x".join(str(int(size)) for size in image_size)
+    if isinstance(image_size, int):
+        return image_size
+    return image_size
+
+
 def parse_teacher_token(token):
     registry = teacher_registry()
     if token in registry:
@@ -254,6 +267,7 @@ def evaluate_dataset(model, preprocess, spec, root, dataset, params, args):
     print(
         f"params={params['total_params_b']:.3f}B "
         f"(visual={params['visual_params_b']:.3f}B), "
+        f"input_size={params['input_size']}, "
         f"unseen_classes={len(UNSEEN_CLASSES[dataset])}"
     )
 
@@ -292,7 +306,7 @@ def print_summary(results, failures):
     if results:
         print("\n=== Foundation CLIP teacher zero-shot retrieval summary ===")
         header = (
-            f"{'teacher':<24} {'params':>8} {'dataset':<10} "
+            f"{'teacher':<24} {'params':>8} {'input':>6} {'dataset':<10} "
             f"{'mAP':>12} {'precision':>12} {'sketches':>9} {'photos':>9}"
         )
         print(header)
@@ -302,7 +316,8 @@ def print_summary(results, failures):
             precision_text = f"{result['precision_name']}={result['precision']:.4f}"
             print(
                 f"{result['teacher']:<24} {result['total_params_b']:>7.3f}B "
-                f"{result['dataset']:<10} {map_text:>12} {precision_text:>12} "
+                f"{str(result['input_size']):>6} {result['dataset']:<10} "
+                f"{map_text:>12} {precision_text:>12} "
                 f"{result['num_sketches']:>9} {result['num_photos']:>9}"
             )
 
@@ -320,7 +335,9 @@ def unload_model(model):
 
 
 def evaluate_teacher(spec, runs, args):
+    input_size = config_image_size(spec.model)
     print(f"\nLoading teacher: {spec.alias} ({spec.model}, {spec.pretrained})")
+    print(f"Configured input_size={input_size}")
     model, _, preprocess = open_clip.create_model_and_transforms(
         spec.model,
         pretrained=spec.pretrained,
@@ -333,6 +350,7 @@ def evaluate_teacher(spec, runs, args):
         "visual_params": int(visual_params),
         "total_params_b": total_params / 1e9,
         "visual_params_b": visual_params / 1e9,
+        "input_size": input_size,
     }
 
     if params["total_params_b"] >= args.max_params_b:
@@ -344,7 +362,8 @@ def evaluate_teacher(spec, runs, args):
 
     print(
         f"Loaded {spec.alias}: params={params['total_params_b']:.3f}B, "
-        f"visual={params['visual_params_b']:.3f}B, precision={args.precision}"
+        f"visual={params['visual_params_b']:.3f}B, input_size={input_size}, "
+        f"precision={args.precision}"
     )
     results = [
         evaluate_dataset(model, preprocess, spec, root, dataset, params, args)
@@ -358,7 +377,10 @@ def list_teachers():
     print("Available built-in teacher aliases:")
     for spec in TEACHERS:
         mark = "*" if spec.alias in RECOMMENDED_ALIASES else " "
-        print(f"{mark} {spec.alias:<24} {spec.model:<32} {spec.pretrained}")
+        print(
+            f"{mark} {spec.alias:<24} {spec.model:<32} "
+            f"{spec.pretrained:<24} input={config_image_size(spec.model)}"
+        )
     print("\n* = included by --teacher recommended")
     print("Custom format: --teacher ModelName/pretrained_name")
 
