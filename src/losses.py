@@ -1,6 +1,7 @@
-"""Distillation-only loss used by the EVA01-g-14 teacher benchmark."""
+"""Student classification/triplet plus EVA01-g-14 relational distillation loss."""
 
 import torch
+import torch.nn as nn
 from torch.nn import functional as F
 
 
@@ -38,10 +39,26 @@ def loss_fn(args, features):
         sketch_features,
         teacher_photo_features,
         teacher_sketch_features,
+        negative_features,
+        labels,
+        photo_logits,
+        sketch_logits,
         teacher_active,
     ) = features
 
-    kd_loss = torch.zeros((), device=photo_features.device)
+    labels = labels.to(photo_logits.device)
+    classification_loss = (
+        F.cross_entropy(photo_logits, labels)
+        + F.cross_entropy(sketch_logits, labels)
+    )
+
+    cosine_distance = lambda x, y: 1.0 - F.cosine_similarity(x, y)
+    triplet_loss = nn.TripletMarginWithDistanceLoss(
+        distance_function=cosine_distance,
+        margin=0.2,
+    )(sketch_features, photo_features, negative_features)
+
+    kd_loss = torch.zeros((), device=photo_logits.device)
     if teacher_active and args.lambda_kd > 0:
         kd_loss = relational_kd_loss(
             sketch_features,
@@ -51,7 +68,13 @@ def loss_fn(args, features):
             args.kd_temperature,
         )
 
-    total_loss = args.lambda_kd * kd_loss
+    total_loss = (
+        args.lambda_cls * classification_loss
+        + args.lambda_triplet * triplet_loss
+        + args.lambda_kd * kd_loss
+    )
     return total_loss, {
+        "cls": classification_loss,
+        "triplet": triplet_loss,
         "kd_sketch_photo": kd_loss,
     }

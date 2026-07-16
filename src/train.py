@@ -81,6 +81,10 @@ if __name__ == "__main__":
     parser.add_argument("--max_size", type=int, default=224)
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed cho Python/NumPy/PyTorch/DataLoader workers.")
+    parser.add_argument("--lambda_cls", type=float, default=1.0,
+                        help="Trọng số classification loss của student.")
+    parser.add_argument("--lambda_triplet", type=float, default=1.0,
+                        help="Trọng số triplet loss của student.")
     parser.add_argument("--lr", type=float, default=4e-5)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--test_batch_size', type=int, default=1024)
