@@ -1,4 +1,9 @@
 import os
+
+# Required by deterministic CUDA matrix multiplications. This must be set
+# before importing torch and before the CUDA context is initialized.
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 import torch
 import numpy as np
 import random
@@ -14,7 +19,8 @@ from src.utils import get_all_categories
 from src.data_config import UNSEEN_CLASSES
 
 
-def seed_everything(seed):
+def seed_everything(seed, deterministic=True):
+    os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -22,22 +28,29 @@ def seed_everything(seed):
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
+    torch.use_deterministic_algorithms(deterministic)
+    torch.backends.cudnn.benchmark = not deterministic
+    torch.backends.cudnn.deterministic = deterministic
+    if hasattr(torch.backends, "cuda"):
+        torch.backends.cuda.matmul.allow_tf32 = not deterministic
+    torch.backends.cudnn.allow_tf32 = not deterministic
+    if deterministic and hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision("highest")
+
 
 def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
+    torch.manual_seed(worker_seed)
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
 
 def get_datasets(args):
-    seed_everything(args.seed)
+    seed_everything(args.seed, deterministic=args.deterministic)
     
     train_dataset = TrainDataset(args)
     val_sketch = ValidDataset(args, mode='sketch')
     val_photo = ValidDataset(args)
-
-    generator = torch.Generator()
-    generator.manual_seed(args.seed)
 
     loader_kwargs = dict(
         num_workers=args.workers,
@@ -45,7 +58,6 @@ def get_datasets(args):
         persistent_workers=args.workers > 0,  # Giữ worker sống giữa các epoch
         prefetch_factor=4 if args.workers > 0 else None,  # Pre-load 4 batch trước
         worker_init_fn=seed_worker,
-        generator=generator,
     )
 
     train_loader = DataLoader(
@@ -53,18 +65,21 @@ def get_datasets(args):
         batch_size=args.batch_size,
         shuffle=True,
         drop_last=True,  # Tránh batch lẻ ở cuối gây vấn đề với RKD (cần B>=2)
+        generator=torch.Generator().manual_seed(args.seed),
         **loader_kwargs,
     )
     val_sketch_loader = DataLoader(
         dataset=val_sketch,
         batch_size=args.test_batch_size,
         shuffle=False,
+        generator=torch.Generator().manual_seed(args.seed + 1),
         **loader_kwargs,
     )
     val_photo_loader = DataLoader(
         dataset=val_photo,
         batch_size=args.test_batch_size,
         shuffle=False,
+        generator=torch.Generator().manual_seed(args.seed + 2),
         **loader_kwargs,
     )
 
@@ -81,6 +96,10 @@ if __name__ == "__main__":
     parser.add_argument("--max_size", type=int, default=224)
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed cho Python/NumPy/PyTorch/DataLoader workers.")
+    parser.add_argument('--deterministic', action='store_true', default=True,
+                        help='Dùng deterministic CUDA algorithms để tái lập benchmark.')
+    parser.add_argument('--no_deterministic', action='store_false', dest='deterministic',
+                        help='Cho phép thuật toán CUDA không deterministic để ưu tiên tốc độ.')
     parser.add_argument("--lambda_cls", type=float, default=1.0,
                         help="Trọng số cho classification loss: CE(photo,text)+CE(sketch,text).")
     parser.add_argument("--lambda_triplet", type=float, default=1.0,
@@ -144,7 +163,9 @@ if __name__ == "__main__":
 
     trainer = Trainer(accelerator='gpu', devices=1, 
         min_epochs=1, max_epochs=args.epochs,
-        benchmark=True,
+        benchmark=not args.deterministic,
+        deterministic=args.deterministic,
+        num_sanity_val_steps=0,
         logger=logger,
         check_val_every_n_epoch=1,
         enable_progress_bar=args.progress,

@@ -42,8 +42,12 @@ class TrainDataset(torch.utils.data.Dataset):
         self.all_photos_path = {}
 
         for category in self.all_categories:
-            sketch_paths = glob.glob(os.path.join(self.args.root, 'sketch', category, '*'))
-            photo_paths = glob.glob(os.path.join(self.args.root, 'photo', category, '*'))
+            sketch_paths = sorted(
+                glob.glob(os.path.join(self.args.root, 'sketch', category, '*'))
+            )
+            photo_paths = sorted(
+                glob.glob(os.path.join(self.args.root, 'photo', category, '*'))
+            )
             
             self.all_sketches_path.extend(sketch_paths)
             self.all_photos_path[category] = photo_paths
@@ -87,9 +91,10 @@ class ValidDataset(torch.utils.data.Dataset):
         unseen_paths = []
         for category in self.unseen_classes:
             if self.mode == 'photo':
-                unseen_paths.extend(glob.glob(os.path.join(self.args.root, 'photo', category, '*')))
+                paths = glob.glob(os.path.join(self.args.root, 'photo', category, '*'))
             else:
-                unseen_paths.extend(glob.glob(os.path.join(self.args.root, 'sketch', category, '*')))
+                paths = glob.glob(os.path.join(self.args.root, 'sketch', category, '*'))
+            unseen_paths.extend(sorted(paths))
 
         self.paths = list(unseen_paths)
 
