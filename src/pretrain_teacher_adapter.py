@@ -1,4 +1,4 @@
-"""Pretrain DFN5B modality adapters to convergence before student distillation."""
+"""Pretrain DFN5B modality adapters for fixed epochs before distillation."""
 
 import os
 
@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
 from src.data_config import UNSEEN_CLASSES
-from src.dataset import aumented_transform, normal_transform
+from src.dataset import aumented_transform
 from src.teacher_adapters import ModalityAdapters
 
 
@@ -77,55 +77,24 @@ def get_seen_classes(root, dataset):
     )
 
 
-def collect_seen_splits(args, classnames):
+def collect_seen_samples(args, classnames):
     root = Path(args.root)
     rng = random.Random(args.seed)
-    splits = {
-        "train": {"sketch": [], "photo": []},
-        "validation": {"sketch": [], "photo": []},
-    }
+    samples = {"sketch": [], "photo": []}
 
     for label, classname in enumerate(classnames):
         for modality in ("sketch", "photo"):
             paths = list_images(root / modality / classname)
-            if len(paths) < 2:
+            if not paths:
                 raise RuntimeError(
-                    f"Need at least two {modality} images for seen class '{classname}'."
+                    f"No {modality} images found for seen class '{classname}'."
                 )
             if args.max_images_per_class > 0 and len(paths) > args.max_images_per_class:
                 paths = sorted(rng.sample(paths, args.max_images_per_class))
 
-            shuffled = paths.copy()
-            rng.shuffle(shuffled)
-            validation_count = max(1, int(round(len(shuffled) * args.validation_fraction)))
-            validation_count = min(validation_count, len(shuffled) - 1)
-            validation_paths = sorted(shuffled[:validation_count])
-            train_paths = sorted(shuffled[validation_count:])
+            samples[modality].extend((path, label) for path in paths)
 
-            splits["train"][modality].extend(
-                (path, label) for path in train_paths
-            )
-            splits["validation"][modality].extend(
-                (path, label) for path in validation_paths
-            )
-
-    return splits
-
-
-class PathDataset(Dataset):
-    def __init__(self, samples, transform):
-        self.samples = samples
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, index):
-        path, label = self.samples[index]
-        with Image.open(path) as image:
-            image = ImageOps.pad(image.convert("RGB"), size=(224, 224))
-            image = self.transform(image)
-        return image, label
+    return samples
 
 
 class ImagePairDataset(Dataset):
@@ -155,34 +124,6 @@ class ImagePairDataset(Dataset):
             self.load_image(photo_path),
             label,
         )
-
-
-@torch.inference_mode()
-def encode_images(backbone, samples, transform, args, device, description, seed_offset):
-    dataset = PathDataset(samples, transform)
-    loader = DataLoader(
-        dataset,
-        batch_size=args.encode_batch_size,
-        shuffle=False,
-        num_workers=args.workers,
-        pin_memory=True,
-        persistent_workers=args.workers > 0,
-        prefetch_factor=4 if args.workers > 0 else None,
-        worker_init_fn=seed_worker,
-        generator=torch.Generator().manual_seed(args.seed + seed_offset),
-    )
-
-    features = []
-    labels = []
-    for images, batch_labels in tqdm(loader, desc=description):
-        images = images.to(device, non_blocking=True)
-        if args.fp16_backbone and device.type == "cuda":
-            images = images.half()
-        batch_features = F.normalize(backbone.encode_image(images).float(), dim=-1)
-        features.append(batch_features.cpu())
-        labels.append(batch_labels.cpu())
-
-    return torch.cat(features), torch.cat(labels).long()
 
 
 @torch.no_grad()
@@ -238,44 +179,6 @@ def semantic_loss(
     )
 
 
-@torch.inference_mode()
-def adapt_features(adapter, features, device, batch_size=4096):
-    outputs = []
-    adapter.eval()
-    for start in range(0, len(features), batch_size):
-        batch = features[start : start + batch_size].to(device, non_blocking=True)
-        outputs.append(adapter(batch.float()).cpu())
-    return torch.cat(outputs)
-
-
-@torch.inference_mode()
-def retrieval_map(adapters, validation_features, device, chunk_size):
-    sketch_features = adapt_features(
-        adapters.sketch, validation_features["sketch"][0], device
-    ).to(device)
-    photo_features = adapt_features(
-        adapters.photo, validation_features["photo"][0], device
-    ).to(device)
-    sketch_labels = validation_features["sketch"][1].to(device)
-    photo_labels = validation_features["photo"][1].to(device)
-    ranks = torch.arange(1, len(photo_features) + 1, device=device).float()
-
-    average_precisions = []
-    for start in range(0, len(sketch_features), chunk_size):
-        query = sketch_features[start : start + chunk_size]
-        query_labels = sketch_labels[start : start + chunk_size]
-        similarity = query @ photo_features.t()
-        order = similarity.argsort(dim=-1, descending=True)
-        relevant = photo_labels[order].eq(query_labels[:, None])
-        relevant_float = relevant.float()
-        precision = relevant_float.cumsum(dim=-1) / ranks
-        relevant_count = relevant_float.sum(dim=-1)
-        average_precision = (precision * relevant_float).sum(dim=-1) / relevant_count.clamp_min(1)
-        average_precisions.append(average_precision.cpu())
-
-    return float(torch.cat(average_precisions).mean().item())
-
-
 def make_scheduler(optimizer, total_steps, warmup_fraction):
     warmup_steps = int(total_steps * warmup_fraction)
 
@@ -289,7 +192,7 @@ def make_scheduler(optimizer, total_steps, warmup_fraction):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
 
 
-def save_checkpoint(path, adapters, args, epoch, validation_map, classnames):
+def save_checkpoint(path, adapters, args, epoch, train_metrics, classnames):
     torch.save(
         {
             "epoch": epoch,
@@ -304,7 +207,7 @@ def save_checkpoint(path, adapters, args, epoch, validation_map, classnames):
             "pretrained": DFN5B_PRETRAINED,
             "dataset": args.dataset,
             "seen_classes": classnames,
-            "validation_map": validation_map,
+            "train_metrics": train_metrics,
             "args": vars(args),
         },
         path,
@@ -315,12 +218,8 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True)
     parser.add_argument("--dataset", default="sketchy_1", choices=sorted(UNSEEN_CLASSES))
-    parser.add_argument("--max_epochs", type=int, default=50)
-    parser.add_argument("--min_epochs", type=int, default=5)
-    parser.add_argument("--patience", type=int, default=5)
-    parser.add_argument("--min_delta", type=float, default=1e-4)
+    parser.add_argument("--epochs", type=int, required=True)
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--encode_batch_size", type=int, default=64)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--bottleneck_dim", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -332,22 +231,18 @@ def parse_args():
     parser.add_argument("--lambda_semantic", type=float, default=1.0)
     parser.add_argument("--warmup_fraction", type=float, default=0.05)
     parser.add_argument("--grad_clip", type=float, default=1.0)
-    parser.add_argument("--validation_fraction", type=float, default=0.1)
     parser.add_argument("--max_images_per_class", type=int, default=0)
-    parser.add_argument("--retrieval_chunk_size", type=int, default=256)
     parser.add_argument("--fp16_backbone", action="store_true", default=True)
     parser.add_argument("--no_fp16_backbone", action="store_false", dest="fp16_backbone")
     parser.add_argument("--deterministic", action="store_true", default=True)
     parser.add_argument("--no_deterministic", action="store_false", dest="deterministic")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
-        "--output_dir", default="teacher_adapter_runs/dfn5b_sketchy1_converged"
+        "--output_dir", default="teacher_adapter_runs/dfn5b_sketchy1_full_seen"
     )
     args = parser.parse_args()
-    if not 0 < args.validation_fraction < 1:
-        parser.error("--validation_fraction must be between 0 and 1.")
-    if args.min_epochs < 1 or args.max_epochs < args.min_epochs:
-        parser.error("Require 1 <= min_epochs <= max_epochs.")
+    if args.epochs < 1:
+        parser.error("--epochs must be at least 1.")
     return args
 
 
@@ -359,12 +254,11 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     classnames = get_seen_classes(args.root, args.dataset)
-    splits = collect_seen_splits(args, classnames)
-    for split_name, modalities in splits.items():
-        print(
-            f"[{split_name}] sketches={len(modalities['sketch']):,}, "
-            f"photos={len(modalities['photo']):,}, classes={len(classnames)}"
-        )
+    samples = collect_seen_samples(args, classnames)
+    print(
+        f"[full seen train] sketches={len(samples['sketch']):,}, "
+        f"photos={len(samples['photo']):,}, classes={len(classnames)}"
+    )
 
     print(f"Loading frozen backbone {DFN5B_MODEL} ({DFN5B_PRETRAINED})...")
     backbone, _, _ = open_clip.create_model_and_transforms(
@@ -375,25 +269,12 @@ def main():
     if args.fp16_backbone and device.type == "cuda":
         backbone = backbone.half()
 
-    validation_features = {}
-    validation_transform = normal_transform()
-    for seed_offset, modality in enumerate(("sketch", "photo"), start=100):
-        validation_features[modality] = encode_images(
-            backbone,
-            splits["validation"][modality],
-            validation_transform,
-            args,
-            device,
-            f"encode validation {modality}",
-            seed_offset,
-        )
-
     sketch_text, photo_text = encode_text(backbone, tokenizer, classnames, device)
-    feature_dim = validation_features["sketch"][0].shape[-1]
+    feature_dim = int(backbone.output_dim)
 
     pair_dataset = ImagePairDataset(
-        splits["train"]["sketch"],
-        splits["train"]["photo"],
+        samples["sketch"],
+        samples["photo"],
         aumented_transform(),
     )
     train_loader = DataLoader(
@@ -411,7 +292,7 @@ def main():
     if not len(train_loader):
         raise RuntimeError("Adapter training loader has no complete batch.")
 
-    # Reset initialization RNG after feature extraction so adapter weights depend only on seed.
+    # Make adapter initialization independent of teacher/text initialization details.
     seed_everything(args.seed, deterministic=args.deterministic)
     adapters = ModalityAdapters(feature_dim, args.bottleneck_dim).to(device)
     sketch_text = sketch_text.to(device)
@@ -421,27 +302,17 @@ def main():
     )
     scheduler = make_scheduler(
         optimizer,
-        total_steps=args.max_epochs * len(train_loader),
+        total_steps=args.epochs * len(train_loader),
         warmup_fraction=args.warmup_fraction,
     )
 
     metrics_path = output_dir / "metrics.jsonl"
     metrics_path.write_text("", encoding="utf-8")
-    initial_map = retrieval_map(
-        adapters, validation_features, device, args.retrieval_chunk_size
-    )
-    best_map = -math.inf
-    best_epoch = 0
-    stale_epochs = 0
-    save_checkpoint(
-        output_dir / "initial.pt", adapters, args, 0, initial_map, classnames
-    )
-    print(f"[Adapter] epoch=0 validation_mAP={initial_map:.6f} (identity baseline)")
 
-    for epoch in range(1, args.max_epochs + 1):
+    for epoch in range(1, args.epochs + 1):
         adapters.train()
         totals = {"total": 0.0, "contrastive": 0.0, "retrieval": 0.0, "semantic": 0.0}
-        progress = tqdm(train_loader, desc=f"adapter epoch {epoch}/{args.max_epochs}")
+        progress = tqdm(train_loader, desc=f"adapter epoch {epoch}/{args.epochs}")
         for sketch_images, photo_images, labels in progress:
             sketch_images = sketch_images.to(device, non_blocking=True)
             photo_images = photo_images.to(device, non_blocking=True)
@@ -494,59 +365,28 @@ def main():
 
         batch_count = len(train_loader)
         train_metrics = {key: value / batch_count for key, value in totals.items()}
-        validation_map = retrieval_map(
-            adapters, validation_features, device, args.retrieval_chunk_size
-        )
-        improved = validation_map > best_map + args.min_delta
-        if improved:
-            best_map = validation_map
-            best_epoch = epoch
-            stale_epochs = 0
-            save_checkpoint(
-                output_dir / "best.pt",
-                adapters,
-                args,
-                epoch,
-                validation_map,
-                classnames,
-            )
-        else:
-            stale_epochs += 1
-
         save_checkpoint(
             output_dir / "last.pt",
             adapters,
             args,
             epoch,
-            validation_map,
+            train_metrics,
             classnames,
         )
         record = {
             "epoch": epoch,
             "train": train_metrics,
-            "validation_map": validation_map,
-            "best_map": best_map,
-            "best_epoch": best_epoch,
-            "stale_epochs": stale_epochs,
         }
         with metrics_path.open("a", encoding="utf-8") as file:
             file.write(json.dumps(record) + "\n")
         print(
-            f"[Adapter] epoch={epoch} train={train_metrics['total']:.6f} "
-            f"validation_mAP={validation_map:.6f} best={best_map:.6f}@{best_epoch} "
-            f"stale={stale_epochs}/{args.patience}{' *' if improved else ''}"
+            f"[Adapter] epoch={epoch}/{args.epochs} "
+            f"train={train_metrics['total']:.6f}; saved last.pt"
         )
 
-        if epoch >= args.min_epochs and stale_epochs >= args.patience:
-            print(
-                f"[Adapter] converged: no validation improvement greater than "
-                f"{args.min_delta} for {args.patience} epochs."
-            )
-            break
-
     print(
-        f"[Adapter] finished; best checkpoint={output_dir / 'best.pt'}, "
-        f"mAP={best_map:.6f}, epoch={best_epoch}"
+        f"[Adapter] finished all {args.epochs} epochs; "
+        f"checkpoint={output_dir / 'last.pt'}"
     )
 
 

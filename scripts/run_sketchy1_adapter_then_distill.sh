@@ -2,21 +2,16 @@
 set -euo pipefail
 
 ROOT="${1:-/content/sketchy/Sketchy}"
-ADAPTER_DIR="${ADAPTER_DIR:-teacher_adapter_runs/dfn5b_sketchy1_converged}"
-ADAPTER_MAX_EPOCHS="${ADAPTER_MAX_EPOCHS:-50}"
-ADAPTER_MIN_EPOCHS="${ADAPTER_MIN_EPOCHS:-5}"
-ADAPTER_PATIENCE="${ADAPTER_PATIENCE:-5}"
+ADAPTER_EPOCHS="${2:?Usage: $0 <dataset_root> <adapter_epochs>}"
+ADAPTER_DIR="${ADAPTER_DIR:-teacher_adapter_runs/dfn5b_sketchy1_full_seen}"
 EXP_NAME="${EXP_NAME:-sketchy1_pretrained_adapter_distill}"
 WORKERS="${WORKERS:-8}"
 
 python -m src.pretrain_teacher_adapter \
     --root "$ROOT" \
     --dataset sketchy_1 \
-    --max_epochs "$ADAPTER_MAX_EPOCHS" \
-    --min_epochs "$ADAPTER_MIN_EPOCHS" \
-    --patience "$ADAPTER_PATIENCE" \
+    --epochs "$ADAPTER_EPOCHS" \
     --batch_size 128 \
-    --encode_batch_size 64 \
     --workers "$WORKERS" \
     --bottleneck_dim 64 \
     --lr 1e-4 \
@@ -33,7 +28,7 @@ python -m src.train \
     --root "$ROOT" \
     --dataset sketchy_1 \
     --epochs 3 \
-    --teacher_adapter_ckpt "$ADAPTER_DIR/best.pt" \
+    --teacher_adapter_ckpt "$ADAPTER_DIR/last.pt" \
     --no_joint_teacher_adapter \
     --workers "$WORKERS" \
     --batch_size 64 \
