@@ -8,12 +8,14 @@ import torch
 import numpy as np
 import random
 import argparse
+import hashlib
+from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from pytorch_lightning import Trainer 
 from pytorch_lightning.loggers import TensorBoardLogger 
 from pytorch_lightning.callbacks import ModelCheckpoint 
 
-from src.dataset import TrainDataset, ValidDataset
+from src.dataset import AdapterPCADataset, TrainDataset, ValidDataset
 from src.model import ZS_SBIR
 from src.utils import get_all_categories
 from src.data_config import UNSEEN_CLASSES
@@ -85,6 +87,120 @@ def get_datasets(args):
 
     return train_loader, val_sketch_loader, val_photo_loader
 
+
+def get_adapter_pca_loader(args, modality, seed_offset):
+    dataset = AdapterPCADataset(args, modality=modality)
+    print(
+        f"[Adapter PCA] calibration modality={modality}, "
+        f"images={len(dataset):,}, workers={args.workers}, "
+        f"batch_size={args.adapter_pca_batch_size}"
+    )
+    return DataLoader(
+        dataset=dataset,
+        batch_size=args.adapter_pca_batch_size,
+        shuffle=False,
+        num_workers=args.workers,
+        pin_memory=True,
+        persistent_workers=False,
+        prefetch_factor=4 if args.workers > 0 else None,
+        worker_init_fn=seed_worker,
+        generator=torch.Generator().manual_seed(args.seed + seed_offset),
+    )
+
+
+def _canonicalize_pca_signs(basis):
+    """Resolve the arbitrary eigenvector signs for reproducible initialization."""
+    max_indices = basis.abs().argmax(dim=1)
+    row_indices = torch.arange(basis.shape[0])
+    signs = torch.sign(basis[row_indices, max_indices])
+    signs[signs == 0] = 1
+    return basis * signs.unsqueeze(1)
+
+
+@torch.inference_mode()
+def _modality_pca_basis(model, adapter, loader, modality):
+    teacher = model.model_distill
+    teacher_device = next(teacher.parameters()).device
+    feature_dim = int(teacher.output_dim)
+    rank = adapter.down.out_features
+
+    weighted_sum = torch.zeros(feature_dim, device=teacher_device, dtype=torch.float32)
+    weighted_second_moment = torch.zeros(
+        feature_dim,
+        feature_dim,
+        device=teacher_device,
+        dtype=torch.float32,
+    )
+    total_weight = torch.zeros((), device=teacher_device, dtype=torch.float32)
+    sample_count = 0
+
+    teacher.eval()
+    for images, sample_weights in loader:
+        images = images.to(teacher_device, non_blocking=True)
+        teacher_features = teacher.encode_image(model.teacher_image_input(images))
+        teacher_features = F.normalize(teacher_features.float(), dim=-1)
+        down_inputs = adapter.norm(teacher_features)
+
+        sample_weights = sample_weights.to(
+            teacher_device,
+            dtype=torch.float32,
+            non_blocking=True,
+        ).reshape(-1, 1)
+        weighted_inputs = down_inputs * sample_weights
+        weighted_sum += weighted_inputs.sum(dim=0)
+        weighted_second_moment += down_inputs.t() @ weighted_inputs
+        total_weight += sample_weights.sum()
+        sample_count += down_inputs.shape[0]
+
+    if sample_count < rank or total_weight.item() <= 0:
+        raise RuntimeError(
+            f"Not enough {modality} samples for rank-{rank} PCA: {sample_count}."
+        )
+
+    mean = weighted_sum / total_weight
+    covariance = weighted_second_moment / total_weight - torch.outer(mean, mean)
+    covariance = 0.5 * (covariance + covariance.t())
+
+    eigenvalues, eigenvectors = torch.linalg.eigh(covariance.cpu().double())
+    basis = eigenvectors[:, -rank:].t().float().contiguous()
+    basis = _canonicalize_pca_signs(basis)
+    explained = eigenvalues[-rank:].clamp_min(0).sum()
+    total = eigenvalues.clamp_min(0).sum().clamp_min(torch.finfo(eigenvalues.dtype).eps)
+    explained_ratio = float((explained / total).item())
+    digest = hashlib.sha256(basis.numpy().tobytes()).hexdigest()[:16]
+
+    print(
+        f"[Adapter PCA] modality={modality}, samples={sample_count:,}, "
+        f"rank={rank}, explained_variance={explained_ratio:.4f}, "
+        f"basis_sha256={digest}"
+    )
+    return basis
+
+
+@torch.no_grad()
+def initialize_teacher_adapters_from_pca(lightning_model, args):
+    model = lightning_model.model
+    adapters = model.teacher_adapters
+    if model.model_distill is None or adapters is None:
+        raise RuntimeError("Adapter PCA initialization requires DFN5B and teacher adapters.")
+
+    for modality, adapter, seed_offset in (
+        ("sketch", adapters.sketch, 100),
+        ("photo", adapters.photo, 101),
+    ):
+        loader = get_adapter_pca_loader(args, modality, seed_offset)
+        basis = _modality_pca_basis(model, adapter, loader, modality)
+        adapter.norm.weight.fill_(1)
+        adapter.norm.bias.zero_()
+        adapter.down.weight.copy_(
+            basis.to(adapter.down.weight.device, dtype=adapter.down.weight.dtype)
+        )
+        adapter.down.bias.zero_()
+        adapter.up.weight.zero_()
+        adapter.up.bias.zero_()
+
+    print("[Adapter PCA] initialized modality-specific down projections; up projections remain zero.")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=str, required=True, help="dataset root containing sketch/ and photo/")
@@ -126,6 +242,14 @@ if __name__ == "__main__":
                         help='Tắt joint teacher adapter để chạy ablation/no-teacher.')
     parser.add_argument('--teacher_adapter_bottleneck', type=int, default=64)
     parser.add_argument('--teacher_adapter_lr', type=float, default=2e-5)
+    parser.add_argument('--adapter_pca_init', action='store_true', default=True,
+                        help='Khởi tạo teacher-adapter down projections bằng PCA theo modality.')
+    parser.add_argument('--no_adapter_pca_init', action='store_false', dest='adapter_pca_init',
+                        help='Dùng Xavier initialization gốc thay cho PCA.')
+    parser.add_argument('--adapter_pca_batch_size', type=int, default=64,
+                        help='Batch size encode DFN5B cho PCA calibration pass.')
+    parser.add_argument('--adapter_pca_samples_per_class', type=int, default=0,
+                        help='Số mẫu tối đa mỗi class/modality cho PCA; 0 dùng toàn bộ.')
     parser.add_argument('--lambda_teacher_retrieval', type=float, default=1.0,
                         help='Trọng số teacher-adapter triplet loss trên nhánh ablation này.')
     parser.add_argument('--lambda_teacher_semantic', type=float, default=1.0)
@@ -136,11 +260,15 @@ if __name__ == "__main__":
     parser.add_argument('--kd_temperature', type=float, default=0.07,
                         help='Temperature cho phân phối similarity sketch-photo.')
                         
-    parser.add_argument('--exp_name', type=str, default='teacher_adapter_triplet_baseline')
+    parser.add_argument('--exp_name', type=str, default='teacher_adapter_pca_init')
 
 
     
     args = parser.parse_args()
+    if args.adapter_pca_init and args.teacher_adapter_ckpt:
+        parser.error("--adapter_pca_init cannot be combined with --teacher_adapter_ckpt.")
+    if args.adapter_pca_init and not args.joint_teacher_adapter:
+        parser.error("--adapter_pca_init requires joint teacher-adapter training.")
     logger = TensorBoardLogger('tb_logs', name=args.exp_name)
     
     checkpoint_callback = ModelCheckpoint(
@@ -180,5 +308,10 @@ if __name__ == "__main__":
         ckpt = torch.load(ckpt_path, map_location="cpu")
         model = ZS_SBIR(args=args, classname=classnames)
         model.load_state_dict(ckpt["state_dict"], strict=False)
+
+    if args.adapter_pca_init and ckpt_path is None:
+        initialize_teacher_adapters_from_pca(model, args)
+        # Calibration must not change the random stream used by joint training.
+        seed_everything(args.seed, deterministic=args.deterministic)
 
     trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])

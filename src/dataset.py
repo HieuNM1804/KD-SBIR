@@ -109,3 +109,57 @@ class ValidDataset(torch.utils.data.Dataset):
     
     def __len__(self):
         return len(self.paths)
+
+
+class AdapterPCADataset(torch.utils.data.Dataset):
+    """Deterministic, class-balanced calibration data for adapter PCA init."""
+
+    def __init__(self, args, modality):
+        if modality not in {"sketch", "photo"}:
+            raise ValueError(f"Unsupported PCA modality: {modality}")
+
+        self.args = args
+        self.modality = modality
+        self.transform = normal_transform()
+        unseen_classes = set(UNSEEN_CLASSES[self.args.dataset])
+        category_root = os.path.join(self.args.root, modality)
+        categories = sorted(
+            category
+            for category in os.listdir(category_root)
+            if category not in unseen_classes
+            and os.path.isdir(os.path.join(category_root, category))
+        )
+
+        max_per_class = self.args.adapter_pca_samples_per_class
+        self.samples = []
+        for category in categories:
+            paths = sorted(glob.glob(os.path.join(category_root, category, '*')))
+            if max_per_class > 0 and len(paths) > max_per_class:
+                indices = np.linspace(
+                    0,
+                    len(paths) - 1,
+                    num=max_per_class,
+                    dtype=np.int64,
+                )
+                paths = [paths[int(index)] for index in indices]
+            if not paths:
+                raise RuntimeError(
+                    f"No {modality} images found for seen class '{category}'."
+                )
+
+            # Each class contributes total weight 1 regardless of image count.
+            sample_weight = np.float32(1.0 / len(paths))
+            self.samples.extend((path, sample_weight) for path in paths)
+
+    def __getitem__(self, index):
+        path, sample_weight = self.samples[index]
+        with Image.open(path) as image:
+            image = ImageOps.pad(
+                image.convert('RGB'),
+                size=(self.args.max_size, self.args.max_size),
+            )
+            image_tensor = self.transform(image)
+        return image_tensor, sample_weight
+
+    def __len__(self):
+        return len(self.samples)
