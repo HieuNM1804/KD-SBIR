@@ -12,6 +12,8 @@ The two-stage Sketchy-1 experiment first trains the modality adapters with a
 frozen DFN5B teacher, all seen-class images, and fresh sketch/photo
 augmentations on every batch. It runs for the requested number of epochs, then
 loads the final adapter checkpoint, freezes it, and starts student distillation.
+The adapter stage reuses the retrieval/semantic losses and SGD/StepLR optimizer
+configuration from `main`; it does not add another training objective.
 
 ```bash
 bash scripts/run_sketchy1_adapter_then_distill.sh /content/sketchy/Sketchy 20

@@ -11,13 +11,12 @@ python -m src.pretrain_teacher_adapter \
     --root "$ROOT" \
     --dataset sketchy_1 \
     --epochs "$ADAPTER_EPOCHS" \
-    --batch_size 128 \
+    --batch_size 64 \
     --workers "$WORKERS" \
     --bottleneck_dim 64 \
-    --lr 1e-4 \
+    --lr 2e-5 \
     --temperature 0.07 \
     --triplet_margin 0.2 \
-    --lambda_contrastive 1 \
     --lambda_retrieval 1 \
     --lambda_semantic 1 \
     --fp16_backbone \

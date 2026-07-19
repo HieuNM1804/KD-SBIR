@@ -1,12 +1,8 @@
 """Pretrain DFN5B modality adapters for fixed epochs before distillation."""
 
-import os
-
-os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-
 import argparse
 import json
-import math
+import os
 import random
 from pathlib import Path
 
@@ -20,6 +16,7 @@ from tqdm.auto import tqdm
 
 from src.data_config import UNSEEN_CLASSES
 from src.dataset import aumented_transform
+from src.losses import batch_hard_teacher_triplet_loss, teacher_semantic_loss
 from src.teacher_adapters import ModalityAdapters
 
 
@@ -28,7 +25,7 @@ DFN5B_PRETRAINED = "dfn5b"
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".webp"}
 
 
-def seed_everything(seed, deterministic=True):
+def seed_everything(seed):
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
@@ -36,14 +33,6 @@ def seed_everything(seed, deterministic=True):
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-
-    torch.use_deterministic_algorithms(deterministic)
-    torch.backends.cudnn.benchmark = not deterministic
-    torch.backends.cudnn.deterministic = deterministic
-    torch.backends.cudnn.allow_tf32 = not deterministic
-    if hasattr(torch.backends, "cuda"):
-        torch.backends.cuda.matmul.allow_tf32 = not deterministic
-
 
 def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
@@ -79,7 +68,6 @@ def get_seen_classes(root, dataset):
 
 def collect_seen_samples(args, classnames):
     root = Path(args.root)
-    rng = random.Random(args.seed)
     samples = {"sketch": [], "photo": []}
 
     for label, classname in enumerate(classnames):
@@ -89,9 +77,6 @@ def collect_seen_samples(args, classnames):
                 raise RuntimeError(
                     f"No {modality} images found for seen class '{classname}'."
                 )
-            if args.max_images_per_class > 0 and len(paths) > args.max_images_per_class:
-                paths = sorted(rng.sample(paths, args.max_images_per_class))
-
             samples[modality].extend((path, label) for path in paths)
 
     return samples
@@ -136,62 +121,6 @@ def encode_text(backbone, tokenizer, classnames, device):
     return features[:class_count].cpu(), features[class_count:].cpu()
 
 
-def supervised_cross_modal_loss(sketch_features, photo_features, labels, temperature):
-    logits = sketch_features @ photo_features.t() / temperature
-    positive_mask = labels[:, None].eq(labels[None, :]).float()
-    sketch_targets = positive_mask / positive_mask.sum(dim=-1, keepdim=True).clamp_min(1)
-    photo_targets = positive_mask.t() / positive_mask.t().sum(dim=-1, keepdim=True).clamp_min(1)
-    sketch_loss = -(sketch_targets * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
-    photo_loss = -(photo_targets * F.log_softmax(logits.t(), dim=-1)).sum(dim=-1).mean()
-    return 0.5 * (sketch_loss + photo_loss)
-
-
-def batch_hard_triplet_loss(sketch_features, photo_features, labels, margin):
-    distance = 1.0 - sketch_features @ photo_features.t()
-    positive_mask = labels[:, None].eq(labels[None, :])
-    negative_mask = ~positive_mask
-
-    def one_direction(current_distance):
-        valid = negative_mask.any(dim=-1)
-        hardest_positive = current_distance.masked_fill(
-            ~positive_mask, -torch.inf
-        ).max(dim=-1).values
-        hardest_negative = current_distance.masked_fill(
-            ~negative_mask, torch.inf
-        ).min(dim=-1).values
-        losses = F.relu(hardest_positive - hardest_negative + margin)
-        return losses[valid].mean() if valid.any() else current_distance.new_zeros(())
-
-    return 0.5 * (one_direction(distance) + one_direction(distance.t()))
-
-
-def semantic_loss(
-    sketch_features,
-    photo_features,
-    labels,
-    sketch_text,
-    photo_text,
-    temperature,
-):
-    return 0.5 * (
-        F.cross_entropy(sketch_features @ sketch_text.t() / temperature, labels)
-        + F.cross_entropy(photo_features @ photo_text.t() / temperature, labels)
-    )
-
-
-def make_scheduler(optimizer, total_steps, warmup_fraction):
-    warmup_steps = int(total_steps * warmup_fraction)
-
-    def schedule(step):
-        if warmup_steps > 0 and step < warmup_steps:
-            return float(step + 1) / warmup_steps
-        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
-        progress = min(max(progress, 0.0), 1.0)
-        return 0.5 * (1.0 + math.cos(math.pi * progress))
-
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
-
-
 def save_checkpoint(path, adapters, args, epoch, train_metrics, classnames):
     torch.save(
         {
@@ -219,23 +148,16 @@ def parse_args():
     parser.add_argument("--root", required=True)
     parser.add_argument("--dataset", default="sketchy_1", choices=sorted(UNSEEN_CLASSES))
     parser.add_argument("--epochs", type=int, required=True)
-    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--bottleneck_dim", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--weight_decay", type=float, default=1e-2)
+    parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--triplet_margin", type=float, default=0.2)
-    parser.add_argument("--lambda_contrastive", type=float, default=1.0)
     parser.add_argument("--lambda_retrieval", type=float, default=1.0)
     parser.add_argument("--lambda_semantic", type=float, default=1.0)
-    parser.add_argument("--warmup_fraction", type=float, default=0.05)
-    parser.add_argument("--grad_clip", type=float, default=1.0)
-    parser.add_argument("--max_images_per_class", type=int, default=0)
     parser.add_argument("--fp16_backbone", action="store_true", default=True)
     parser.add_argument("--no_fp16_backbone", action="store_false", dest="fp16_backbone")
-    parser.add_argument("--deterministic", action="store_true", default=True)
-    parser.add_argument("--no_deterministic", action="store_false", dest="deterministic")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--output_dir", default="teacher_adapter_runs/dfn5b_sketchy1_full_seen"
@@ -248,7 +170,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    seed_everything(args.seed, deterministic=args.deterministic)
+    seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -270,7 +192,7 @@ def main():
         backbone = backbone.half()
 
     sketch_text, photo_text = encode_text(backbone, tokenizer, classnames, device)
-    feature_dim = int(backbone.output_dim)
+    feature_dim = int(sketch_text.shape[-1])
 
     pair_dataset = ImagePairDataset(
         samples["sketch"],
@@ -293,17 +215,20 @@ def main():
         raise RuntimeError("Adapter training loader has no complete batch.")
 
     # Make adapter initialization independent of teacher/text initialization details.
-    seed_everything(args.seed, deterministic=args.deterministic)
+    seed_everything(args.seed)
     adapters = ModalityAdapters(feature_dim, args.bottleneck_dim).to(device)
     sketch_text = sketch_text.to(device)
     photo_text = photo_text.to(device)
-    optimizer = torch.optim.AdamW(
-        adapters.parameters(), lr=args.lr, weight_decay=args.weight_decay
+    optimizer = torch.optim.SGD(
+        adapters.parameters(),
+        lr=args.lr,
+        weight_decay=1e-3,
+        momentum=0.9,
     )
-    scheduler = make_scheduler(
+    scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer,
-        total_steps=args.epochs * len(train_loader),
-        warmup_fraction=args.warmup_fraction,
+        step_size=5,
+        gamma=0.1,
     )
 
     metrics_path = output_dir / "metrics.jsonl"
@@ -311,7 +236,7 @@ def main():
 
     for epoch in range(1, args.epochs + 1):
         adapters.train()
-        totals = {"total": 0.0, "contrastive": 0.0, "retrieval": 0.0, "semantic": 0.0}
+        totals = {"total": 0.0, "retrieval": 0.0, "semantic": 0.0}
         progress = tqdm(train_loader, desc=f"adapter epoch {epoch}/{args.epochs}")
         for sketch_images, photo_images, labels in progress:
             sketch_images = sketch_images.to(device, non_blocking=True)
@@ -330,13 +255,10 @@ def main():
 
             adapted_sketch = adapters.sketch(sketch_features)
             adapted_photo = adapters.photo(photo_features)
-            contrastive = supervised_cross_modal_loss(
-                adapted_sketch, adapted_photo, labels, args.temperature
-            )
-            retrieval = batch_hard_triplet_loss(
+            retrieval = batch_hard_teacher_triplet_loss(
                 adapted_sketch, adapted_photo, labels, args.triplet_margin
             )
-            semantic = semantic_loss(
+            semantic = teacher_semantic_loss(
                 adapted_sketch,
                 adapted_photo,
                 labels,
@@ -345,20 +267,15 @@ def main():
                 args.temperature,
             )
             loss = (
-                args.lambda_contrastive * contrastive
-                + args.lambda_retrieval * retrieval
+                args.lambda_retrieval * retrieval
                 + args.lambda_semantic * semantic
             )
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            if args.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(adapters.parameters(), args.grad_clip)
             optimizer.step()
-            scheduler.step()
 
             totals["total"] += loss.item()
-            totals["contrastive"] += contrastive.item()
             totals["retrieval"] += retrieval.item()
             totals["semantic"] += semantic.item()
             progress.set_postfix(loss=f"{loss.item():.4f}")
@@ -383,6 +300,7 @@ def main():
             f"[Adapter] epoch={epoch}/{args.epochs} "
             f"train={train_metrics['total']:.6f}; saved last.pt"
         )
+        scheduler.step()
 
     print(
         f"[Adapter] finished all {args.epochs} epochs; "
