@@ -116,8 +116,12 @@ if __name__ == "__main__":
                         help='Trọng số relational KD sketch-photo.')
     parser.add_argument('--kd_temperature', type=float, default=0.07,
                         help='Temperature cho phân phối similarity sketch-photo.')
-    parser.add_argument('--lambda_text_kd', type=float, default=1.0,
-                        help='Trọng số relational KD giữa sketch-text và photo-text.')
+    parser.add_argument('--lambda_sketch_text_kd', type=float, default=1.0,
+                        help='Trọng số relational KD riêng giữa student và teacher sketch-text.')
+    parser.add_argument('--lambda_photo_text_kd', type=float, default=1.0,
+                        help='Trọng số relational KD riêng giữa student và teacher photo-text.')
+    parser.add_argument('--lambda_text_kd', type=float, default=None,
+                        help='Alias cũ: nếu được truyền, đặt cả hai trọng số text KD bằng giá trị này.')
     parser.add_argument('--text_kd_temperature', type=float, default=0.07)
                         
     parser.add_argument('--exp_name', type=str, default='teacher_adapter_triplet_baseline')
@@ -125,6 +129,14 @@ if __name__ == "__main__":
 
     
     args = parser.parse_args()
+    if args.lambda_text_kd is not None:
+        args.lambda_sketch_text_kd = args.lambda_text_kd
+        args.lambda_photo_text_kd = args.lambda_text_kd
+        print(
+            "[Deprecated] --lambda_text_kd đặt cả "
+            "--lambda_sketch_text_kd và --lambda_photo_text_kd="
+            f"{args.lambda_text_kd}."
+        )
     logger = TensorBoardLogger('tb_logs', name=args.exp_name)
     
     checkpoint_callback = ModelCheckpoint(

@@ -114,7 +114,8 @@ def _load_teacher(args):
     """Load the frozen DFN5B teacher when relational KD is enabled."""
     if (
         args.lambda_kd <= 0
-        and args.lambda_text_kd <= 0
+        and args.lambda_sketch_text_kd <= 0
+        and args.lambda_photo_text_kd <= 0
         and not args.joint_teacher_adapter
     ):
         print("[Teacher] Tất cả KD và joint adapter đều tắt -> bỏ qua DFN5B teacher")
@@ -296,7 +297,11 @@ class CustomCLIP(nn.Module):
             teacher_sketch_features = self.adapt_teacher_feature(
                 teacher_sketch_base, "sketch"
             )
-            if self.joint_teacher_adapter or self.cfg.lambda_text_kd > 0:
+            if (
+                self.joint_teacher_adapter
+                or self.cfg.lambda_sketch_text_kd > 0
+                or self.cfg.lambda_photo_text_kd > 0
+            ):
                 teacher_sketch_text, teacher_photo_text = (
                     self.get_teacher_text_features(classnames)
                 )
@@ -401,7 +406,8 @@ class ZS_SBIR(pl.LightningModule):
         for k, v in loss_dict.items():
             bar_names = {
                 "kd_sketch_photo": "KD_SP",
-                "text_relational_kd": "TXT_KD",
+                "sketch_text_relational_kd": "TXT_SK",
+                "photo_text_relational_kd": "TXT_PH",
                 "teacher_triplet": "T_TRI",
                 "teacher_semantic": "T_SEM",
             }
