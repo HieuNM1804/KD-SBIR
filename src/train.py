@@ -116,6 +116,10 @@ if __name__ == "__main__":
                         help='Trọng số relational KD sketch-photo.')
     parser.add_argument('--kd_temperature', type=float, default=0.07,
                         help='Temperature cho phân phối similarity sketch-photo.')
+    parser.add_argument('--lambda_shared_text_sketch_kd', type=float, default=0.0,
+                        help='Trọng số PromptKD-style KL cho sketch dùng shared teacher text.')
+    parser.add_argument('--lambda_shared_text_photo_kd', type=float, default=0.0,
+                        help='Trọng số PromptKD-style KL cho photo dùng shared teacher text.')
                         
     parser.add_argument('--exp_name', type=str, default='teacher_adapter_triplet_baseline')
 

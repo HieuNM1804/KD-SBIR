@@ -115,8 +115,16 @@ def _infer_teacher_image_size(teacher):
 
 def _load_teacher(args):
     """Load the frozen DFN5B teacher when relational KD is enabled."""
-    if args.lambda_kd <= 0 and not args.joint_teacher_adapter:
-        print("[Teacher] KD và joint adapter đều tắt -> bỏ qua DFN5B teacher")
+    shared_text_kd_active = (
+        getattr(args, "lambda_shared_text_sketch_kd", 0.0) > 0
+        or getattr(args, "lambda_shared_text_photo_kd", 0.0) > 0
+    )
+    if (
+        args.lambda_kd <= 0
+        and not args.joint_teacher_adapter
+        and not shared_text_kd_active
+    ):
+        print("[Teacher] mọi nhánh KD đều tắt -> bỏ qua DFN5B teacher")
         return None
 
     print(f"[Teacher] Đang load DFN5B ({DFN5B_MODEL})...")
@@ -170,6 +178,27 @@ class CustomCLIP(nn.Module):
         self.model_distill = strong_teacher
         self.teacher_active = strong_teacher is not None
         self.joint_teacher_adapter = getattr(cfg, "joint_teacher_adapter", False)
+        self.shared_text_logit_kd_active = (
+            getattr(cfg, "lambda_shared_text_sketch_kd", 0.0) > 0
+            or getattr(cfg, "lambda_shared_text_photo_kd", 0.0) > 0
+        )
+        self.shared_text_image_projector = None
+        if self.shared_text_logit_kd_active:
+            if not self.teacher_active:
+                raise RuntimeError("Shared teacher-text logit KD requires DFN5B.")
+            student_image_dim = int(clip_model.visual.output_dim)
+            teacher_text_dim = int(strong_teacher.output_dim)
+            # PromptKD-style projector shared by sketch and photo students.
+            self.shared_text_image_projector = nn.Linear(
+                student_image_dim, teacher_text_dim
+            )
+            print(
+                "[Shared Teacher-Text KD] image projector "
+                f"{student_image_dim}->{teacher_text_dim}, "
+                f"lambda_sketch={cfg.lambda_shared_text_sketch_kd}, "
+                f"lambda_photo={cfg.lambda_shared_text_photo_kd}, "
+                f"temperature={cfg.teacher_temperature}"
+            )
         self.teacher_adapters = _load_teacher_adapters(cfg, strong_teacher)
         self._teacher_text_cache = {}
         self._teacher_fp16 = (
@@ -275,6 +304,16 @@ class CustomCLIP(nn.Module):
         )
         _, negative_features = self.get_logits(neg_tensor, classnames)
 
+        projected_student_sketch = None
+        projected_student_photo = None
+        if self.shared_text_image_projector is not None:
+            projected_student_sketch = self.shared_text_image_projector(
+                sketch_features.float()
+            )
+            projected_student_photo = self.shared_text_image_projector(
+                photo_features.float()
+            )
+
         teacher_photo_features = photo_features.detach()
         teacher_sketch_features = sketch_features.detach()
         teacher_sketch_text = None
@@ -293,7 +332,7 @@ class CustomCLIP(nn.Module):
             teacher_sketch_features = self.adapt_teacher_feature(
                 teacher_sketch_base, "sketch"
             )
-            if self.joint_teacher_adapter:
+            if self.joint_teacher_adapter or self.shared_text_logit_kd_active:
                 teacher_sketch_text, teacher_photo_text = (
                     self.get_teacher_text_features(classnames)
                 )
@@ -307,6 +346,8 @@ class CustomCLIP(nn.Module):
             label,
             pos_logits,
             sk_logits,
+            projected_student_sketch,
+            projected_student_photo,
             self.teacher_active,
             self.joint_teacher_adapter,
             teacher_sketch_text,
@@ -396,6 +437,8 @@ class ZS_SBIR(pl.LightningModule):
         for k, v in loss_dict.items():
             bar_names = {
                 "kd_sketch_photo": "KD_SP",
+                "shared_text_sketch_kd": "STXT_SK",
+                "shared_text_photo_kd": "STXT_PH",
                 "teacher_triplet": "T_TRI",
                 "teacher_semantic": "T_SEM",
             }
