@@ -19,8 +19,6 @@ vì vậy cấu hình cũ không đổi nếu không truyền hai cờ mới.
     --dataset sketchy_1 \
     --epochs 5 \
     --workers 8 \
-    --batch_size 32 \
-    --lr 2e-5 \
     --lambda_sketch_text_feature_kd 1.0 \
     --lambda_photo_text_feature_kd 1.0 \
     --exp_name sketchy1_clipkd_text_feature
