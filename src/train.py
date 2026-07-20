@@ -77,7 +77,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default="sketchy_1",
                         choices=sorted(UNSEEN_CLASSES), help="zero-shot split")
     parser.add_argument("--backbone", type=str, default="ViT-B/32")
-    parser.add_argument("--n_ctx", type=int, default=2)
+    parser.add_argument("--n_ctx", type=int, default=4)
     parser.add_argument("--max_size", type=int, default=224)
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed cho Python/NumPy/PyTorch/DataLoader workers.")
@@ -107,7 +107,7 @@ if __name__ == "__main__":
                         help='Tắt joint teacher adapter để chạy ablation/no-teacher.')
     parser.add_argument('--teacher_adapter_bottleneck', type=int, default=64)
     parser.add_argument('--teacher_adapter_lr', type=float, default=2e-5)
-    parser.add_argument('--lambda_teacher_retrieval', type=float, default=1.0,
+    parser.add_argument('--lambda_teacher_retrieval', type=float, default=1.5,
                         help='Trọng số teacher-adapter triplet loss trên nhánh ablation này.')
     parser.add_argument('--lambda_teacher_semantic', type=float, default=1.0)
     parser.add_argument('--teacher_temperature', type=float, default=0.07)
