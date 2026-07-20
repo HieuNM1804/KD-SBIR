@@ -13,7 +13,7 @@ import open_clip
 from src.prompt_learner import MultiModalPromptLearner, TextEncoder
 from src.utils import load_clip_to_cpu
 from src.losses import loss_fn
-from src.teacher_adapters import ModalityAdapters
+from src.teacher_adapters import ModalityAdapters, ResidualAdapter
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -178,6 +178,13 @@ class CustomCLIP(nn.Module):
         self.model_distill = strong_teacher
         self.teacher_active = strong_teacher is not None
         self.joint_teacher_adapter = getattr(cfg, "joint_teacher_adapter", False)
+        self.use_teacher_text_adapter = getattr(
+            cfg, "use_teacher_text_adapter", False
+        )
+        if self.use_teacher_text_adapter and not self.joint_teacher_adapter:
+            raise ValueError(
+                "--use_teacher_text_adapter requires joint teacher-adapter training."
+            )
         self.text_feature_kd_active = (
             getattr(cfg, "lambda_sketch_text_feature_kd", 0.0) > 0
             or getattr(cfg, "lambda_photo_text_feature_kd", 0.0) > 0
@@ -197,6 +204,19 @@ class CustomCLIP(nn.Module):
                 f"lambda_photo={cfg.lambda_photo_text_feature_kd}"
             )
         self.teacher_adapters = _load_teacher_adapters(cfg, strong_teacher)
+        self.teacher_text_adapter = None
+        if self.use_teacher_text_adapter:
+            if not self.teacher_active:
+                raise RuntimeError("Teacher text adapter requires the DFN5B teacher.")
+            self.teacher_text_adapter = ResidualAdapter(
+                feature_dim=int(strong_teacher.output_dim),
+                bottleneck_dim=cfg.teacher_text_adapter_bottleneck,
+            ).to(device=device, dtype=torch.float32)
+            print(
+                "[Teacher Text Adapter] shared by sketch/photo text "
+                f"(feature_dim={strong_teacher.output_dim}, "
+                f"bottleneck={cfg.teacher_text_adapter_bottleneck})"
+            )
         self._teacher_text_cache = {}
         self._teacher_fp16 = (
             self.teacher_active
@@ -215,6 +235,8 @@ class CustomCLIP(nn.Module):
             self.model_distill.eval()
         if self.teacher_adapters is not None:
             self.teacher_adapters.train(mode and self.joint_teacher_adapter)
+        if self.teacher_text_adapter is not None:
+            self.teacher_text_adapter.train(mode and self.joint_teacher_adapter)
         return self
     
     def teacher_image_input(self, image):
@@ -241,29 +263,33 @@ class CustomCLIP(nn.Module):
 
     def get_teacher_text_features(self, classnames):
         cache_key = tuple(classnames)
-        if cache_key in self._teacher_text_cache:
-            return self._teacher_text_cache[cache_key]
-
-        sketch_prompts = [
-            f"a sketch of a {name.replace('_', ' ')}." for name in classnames
-        ]
-        photo_prompts = [
-            f"a photo of a {name.replace('_', ' ')}." for name in classnames
-        ]
-        tokens = self.model_distill.text_tokenizer(
-            sketch_prompts + photo_prompts
-        ).to(device)
-        with torch.no_grad():
-            text_features = F.normalize(
-                self.model_distill.encode_text(tokens).float(), dim=-1
+        if cache_key not in self._teacher_text_cache:
+            sketch_prompts = [
+                f"a sketch of a {name.replace('_', ' ')}." for name in classnames
+            ]
+            photo_prompts = [
+                f"a photo of a {name.replace('_', ' ')}." for name in classnames
+            ]
+            tokens = self.model_distill.text_tokenizer(
+                sketch_prompts + photo_prompts
+            ).to(device)
+            with torch.no_grad():
+                text_features = F.normalize(
+                    self.model_distill.encode_text(tokens).float(), dim=-1
+                )
+            class_count = len(classnames)
+            self._teacher_text_cache[cache_key] = (
+                text_features[:class_count],
+                text_features[class_count:],
             )
-        class_count = len(classnames)
-        result = (
-            text_features[:class_count],
-            text_features[class_count:],
-        )
-        self._teacher_text_cache[cache_key] = result
-        return result
+
+        sketch_text, photo_text = self._teacher_text_cache[cache_key]
+        if self.teacher_text_adapter is not None:
+            # Adapt on every forward pass; caching these outputs would retain an
+            # already-backpropagated graph and break the next training batch.
+            sketch_text = self.teacher_text_adapter(sketch_text)
+            photo_text = self.teacher_text_adapter(photo_text)
+        return sketch_text, photo_text
 
     def get_logits(self, img_tensor, classnames, type='photo'):
         if type=='photo':
@@ -389,11 +415,17 @@ class ZS_SBIR(pl.LightningModule):
         self.val_step_outputs_ph = []
         
     def configure_optimizers(self):
-        adapter_params = (
+        image_adapter_params = (
             [p for p in self.model.teacher_adapters.parameters() if p.requires_grad]
             if self.model.teacher_adapters is not None
             else []
         )
+        text_adapter_params = (
+            [p for p in self.model.teacher_text_adapter.parameters() if p.requires_grad]
+            if self.model.teacher_text_adapter is not None
+            else []
+        )
+        adapter_params = image_adapter_params + text_adapter_params
         adapter_param_ids = {id(p) for p in adapter_params}
         student_params = [
             p for p in self.model.parameters()

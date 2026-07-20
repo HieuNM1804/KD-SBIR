@@ -106,6 +106,10 @@ if __name__ == "__main__":
     parser.add_argument('--no_joint_teacher_adapter', action='store_false', dest='joint_teacher_adapter',
                         help='Tắt joint teacher adapter để chạy ablation/no-teacher.')
     parser.add_argument('--teacher_adapter_bottleneck', type=int, default=64)
+    parser.add_argument('--use_teacher_text_adapter', action='store_true', default=False,
+                        help='Thêm một residual adapter dùng chung cho teacher sketch/photo text.')
+    parser.add_argument('--teacher_text_adapter_bottleneck', type=int, default=64,
+                        help='Bottleneck của shared teacher text adapter.')
     parser.add_argument('--teacher_adapter_lr', type=float, default=2e-5)
     parser.add_argument('--lambda_teacher_retrieval', type=float, default=1.5,
                         help='Trọng số teacher-adapter triplet loss trên nhánh ablation này.')
