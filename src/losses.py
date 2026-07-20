@@ -74,6 +74,15 @@ def teacher_semantic_loss(
     )
 
 
+def projected_text_feature_mse(projected_student_text, teacher_text):
+    """CLIP-KD text feature distillation: normalize, then apply MSE."""
+    student = F.normalize(projected_student_text.float(), dim=-1)
+    teacher = F.normalize(
+        teacher_text.to(device=student.device, dtype=torch.float32).detach(), dim=-1
+    )
+    return F.mse_loss(student, teacher)
+
+
 def loss_fn(args, features):
     (
         photo_features,
@@ -84,6 +93,8 @@ def loss_fn(args, features):
         labels,
         photo_logits,
         sketch_logits,
+        projected_student_sketch_text,
+        projected_student_photo_text,
         teacher_active,
         joint_teacher_adapter,
         teacher_sketch_text,
@@ -130,17 +141,34 @@ def loss_fn(args, features):
             args.teacher_temperature,
         )
 
+    sketch_text_feature_kd = torch.zeros((), device=photo_logits.device)
+    photo_text_feature_kd = torch.zeros((), device=photo_logits.device)
+    if teacher_active and args.lambda_sketch_text_feature_kd > 0:
+        sketch_text_feature_kd = projected_text_feature_mse(
+            projected_student_sketch_text,
+            teacher_sketch_text,
+        )
+    if teacher_active and args.lambda_photo_text_feature_kd > 0:
+        photo_text_feature_kd = projected_text_feature_mse(
+            projected_student_photo_text,
+            teacher_photo_text,
+        )
+
     total_loss = (
         args.lambda_cls * classification_loss
         + args.lambda_triplet * triplet_loss
         + args.lambda_kd * kd_loss
         + args.lambda_teacher_retrieval * teacher_triplet_loss
         + args.lambda_teacher_semantic * teacher_semantic
+        + args.lambda_sketch_text_feature_kd * sketch_text_feature_kd
+        + args.lambda_photo_text_feature_kd * photo_text_feature_kd
     )
     return total_loss, {
         "cls": classification_loss,
         "triplet": triplet_loss,
         "kd_sketch_photo": kd_loss,
+        "sketch_text_feature_kd": sketch_text_feature_kd,
+        "photo_text_feature_kd": photo_text_feature_kd,
         "teacher_triplet": teacher_triplet_loss,
         "teacher_semantic": teacher_semantic,
     }
