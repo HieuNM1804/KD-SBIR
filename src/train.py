@@ -1,4 +1,9 @@
 import os
+
+# Required by deterministic CUDA matrix multiplication. It must be set before
+# importing torch and before CUDA is initialized.
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
 import torch
 import numpy as np
 import random
@@ -8,7 +13,7 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger 
 from pytorch_lightning.callbacks import ModelCheckpoint 
 
-from src.dataset import TrainDataset, ValidDataset
+from src.dataset import TrainDataset, ValidDataset, WorkerInvariantSampler
 from src.model import ZS_SBIR
 from src.utils import get_all_categories
 from src.data_config import UNSEEN_CLASSES
@@ -22,9 +27,16 @@ def seed_everything(seed):
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
 
 def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
+    torch.manual_seed(worker_seed)
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
@@ -36,35 +48,35 @@ def get_datasets(args):
     val_sketch = ValidDataset(args, mode='sketch')
     val_photo = ValidDataset(args)
 
-    generator = torch.Generator()
-    generator.manual_seed(args.seed)
-
     loader_kwargs = dict(
         num_workers=args.workers,
         pin_memory=True,           # Transfer CPU→GPU nhanh hơn (non-blocking)
         persistent_workers=args.workers > 0,  # Giữ worker sống giữa các epoch
         prefetch_factor=4 if args.workers > 0 else None,  # Pre-load 4 batch trước
         worker_init_fn=seed_worker,
-        generator=generator,
     )
 
     train_loader = DataLoader(
         dataset=train_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=False,
+        sampler=WorkerInvariantSampler(train_dataset, args.seed),
         drop_last=True,  # Tránh batch lẻ ở cuối gây vấn đề với RKD (cần B>=2)
+        generator=torch.Generator().manual_seed(args.seed),
         **loader_kwargs,
     )
     val_sketch_loader = DataLoader(
         dataset=val_sketch,
         batch_size=args.test_batch_size,
         shuffle=False,
+        generator=torch.Generator().manual_seed(args.seed + 1),
         **loader_kwargs,
     )
     val_photo_loader = DataLoader(
         dataset=val_photo,
         batch_size=args.test_batch_size,
         shuffle=False,
+        generator=torch.Generator().manual_seed(args.seed + 2),
         **loader_kwargs,
     )
 
@@ -88,7 +100,8 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--test_batch_size', type=int, default=1024)
     parser.add_argument('--epochs', type=int, default=3)
-    parser.add_argument('--workers', type=int, default=8)
+    parser.add_argument('--workers', type=int, default=4,
+                        help='Số DataLoader workers; sample RNG không phụ thuộc giá trị này.')
     parser.add_argument('--progress', action='store_true', default=True,
                         help='Hiện tqdm progress bar trong lúc train')
     parser.add_argument('--no_progress', action='store_false', dest='progress',
@@ -115,7 +128,7 @@ if __name__ == "__main__":
     parser.add_argument('--kd_temperature', type=float, default=0.07,
                         help='Temperature cho phân phối similarity sketch-photo.')
                         
-    parser.add_argument('--exp_name', type=str, default='teacher_adapter_no_student_triplet')
+    parser.add_argument('--exp_name', type=str, default='no_student_triplet_worker_invariant')
 
 
     
@@ -142,7 +155,8 @@ if __name__ == "__main__":
 
     trainer = Trainer(accelerator='gpu', devices=1, 
         min_epochs=1, max_epochs=args.epochs,
-        benchmark=True,
+        benchmark=False,
+        deterministic=True,
         logger=logger,
         check_val_every_n_epoch=1,
         enable_progress_bar=args.progress,

@@ -1,5 +1,6 @@
 import os
 import glob
+import hashlib
 import numpy as np
 import torch
 from torchvision import transforms
@@ -8,6 +9,31 @@ from src.data_config import UNSEEN_CLASSES
 
 CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073]
 CLIP_STD = [0.26862954, 0.26130258, 0.27577711]
+
+
+def sample_seed(global_seed, epoch, index):
+    """Stable seed that does not depend on which DataLoader worker gets a sample."""
+    key = f"{global_seed}:{epoch}:{index}".encode("utf-8")
+    return int.from_bytes(hashlib.blake2b(key, digest_size=8).digest(), "little") & ((1 << 63) - 1)
+
+
+class WorkerInvariantSampler(torch.utils.data.Sampler):
+    """Shuffle by epoch and pass the epoch to Dataset.__getitem__."""
+
+    def __init__(self, dataset, seed):
+        self.dataset = dataset
+        self.seed = seed
+        self.epoch = 0
+
+    def __iter__(self):
+        epoch = self.epoch
+        self.epoch += 1
+        generator = torch.Generator().manual_seed(sample_seed(self.seed, epoch, -1))
+        indices = torch.randperm(len(self.dataset), generator=generator).tolist()
+        return iter((epoch, index) for index in indices)
+
+    def __len__(self):
+        return len(self.dataset)
 
 def aumented_transform():
     transform_list = [
@@ -42,8 +68,8 @@ class TrainDataset(torch.utils.data.Dataset):
         self.all_photos_path = {}
 
         for category in self.all_categories:
-            sketch_paths = glob.glob(os.path.join(self.args.root, 'sketch', category, '*'))
-            photo_paths = glob.glob(os.path.join(self.args.root, 'photo', category, '*'))
+            sketch_paths = sorted(glob.glob(os.path.join(self.args.root, 'sketch', category, '*')))
+            photo_paths = sorted(glob.glob(os.path.join(self.args.root, 'photo', category, '*')))
             
             self.all_sketches_path.extend(sketch_paths)
             self.all_photos_path[category] = photo_paths
@@ -51,21 +77,33 @@ class TrainDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.all_sketches_path)
         
-    def __getitem__(self, index):
+    def __getitem__(self, sample_key):
+        if isinstance(sample_key, tuple):
+            epoch, index = sample_key
+        else:
+            epoch, index = 0, sample_key
+
+        current_seed = sample_seed(self.args.seed, epoch, index)
+        photo_rng = np.random.default_rng(current_seed)
         filepath = self.all_sketches_path[index]                
         category = filepath.split(os.path.sep)[-2]
 
         sk_path  = filepath
-        img_path = np.random.choice(self.all_photos_path[category])
+        photo_paths = self.all_photos_path[category]
+        img_path = photo_paths[photo_rng.integers(len(photo_paths))]
 
         sk_data  = ImageOps.pad(Image.open(sk_path).convert('RGB'),  size=(self.args.max_size, self.args.max_size))
         img_data = ImageOps.pad(Image.open(img_path).convert('RGB'), size=(self.args.max_size, self.args.max_size))
 
-        sk_tensor  = self.transform1(sk_data)
-        img_tensor = self.transform1(img_data)
-        
-        sk_aug_tensor = self.transform2(sk_data)
-        img_aug_tensor = self.transform2(img_data)
+        # torchvision v1 random transforms use the process-global torch RNG.
+        # Each worker is a separate process, and fork_rng restores its state
+        # after this sample, so scheduling/prefetch cannot change augmentation.
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(current_seed)
+            sk_tensor = self.transform1(sk_data)
+            img_tensor = self.transform1(img_data)
+            sk_aug_tensor = self.transform2(sk_data)
+            img_aug_tensor = self.transform2(img_data)
         
         return img_tensor, sk_tensor, img_aug_tensor, sk_aug_tensor, self.all_categories.index(category)
 
@@ -81,9 +119,10 @@ class ValidDataset(torch.utils.data.Dataset):
         unseen_paths = []
         for category in self.unseen_classes:
             if self.mode == 'photo':
-                unseen_paths.extend(glob.glob(os.path.join(self.args.root, 'photo', category, '*')))
+                paths = glob.glob(os.path.join(self.args.root, 'photo', category, '*'))
             else:
-                unseen_paths.extend(glob.glob(os.path.join(self.args.root, 'sketch', category, '*')))
+                paths = glob.glob(os.path.join(self.args.root, 'sketch', category, '*'))
+            unseen_paths.extend(sorted(paths))
 
         self.paths = list(unseen_paths)
 
