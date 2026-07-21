@@ -22,13 +22,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # ---------------------------------------------------------------------------
 DFN5B_MODEL = "ViT-H-14-quickgelu"
 DFN5B_PRETRAINED = "dfn5b"
-
-
-def _freeze_teacher(teacher):
-    teacher.eval()
-    for p in teacher.parameters():
-        p.requires_grad = False
-    return teacher
+DFN5B_OUTPUT_DIM = 1024
 
 
 def _build_teacher_adapters(args, strong_teacher):
@@ -48,30 +42,17 @@ def _build_teacher_adapters(args, strong_teacher):
     return adapters.to(device=device, dtype=torch.float32)
 
 
-def _load_teacher(args):
-    """Load the frozen DFN5B teacher when relational KD is enabled."""
-    if args.lambda_kd <= 0 and not args.joint_teacher_adapter:
-        print("[Teacher] KD and joint adapters are disabled; skipping DFN5B.")
-        return None
-
-    print(f"[Teacher] Loading DFN5B ({DFN5B_MODEL})...")
-    teacher, _, _ = open_clip.create_model_and_transforms(
-        DFN5B_MODEL, pretrained=DFN5B_PRETRAINED
+def _load_teacher():
+    print(f"[Teacher] Loading {DFN5B_MODEL} in FP16...")
+    teacher = open_clip.create_model(
+        DFN5B_MODEL,
+        pretrained=DFN5B_PRETRAINED,
+        precision="fp16",
+        device=device,
     )
+    teacher.eval().requires_grad_(False)
     teacher.text_tokenizer = open_clip.get_tokenizer(DFN5B_MODEL)
-    teacher = _freeze_teacher(teacher)
-    teacher = teacher.to(device)
-    if getattr(args, "quantize_fp16", False):
-        if device.type != "cuda":
-            print("[Teacher] quantize_fp16=True without CUDA; keeping the teacher in FP32.")
-        else:
-            teacher = teacher.half()
-            print("[Teacher] DFN5B is running in FP16.")
-    teacher.output_dim = 1024
-    print(
-        "[Teacher] DFN5B is ready "
-        f"(frozen, output {teacher.output_dim}-dim)"
-    )
+    teacher.output_dim = DFN5B_OUTPUT_DIM
     return teacher
 
 # ---------------------------------------------------------------------------
@@ -106,11 +87,6 @@ class CustomCLIP(nn.Module):
         self.joint_teacher_adapter = getattr(cfg, "joint_teacher_adapter", False)
         self.teacher_adapters = _build_teacher_adapters(cfg, strong_teacher)
         self._teacher_text_cache = {}
-        self._teacher_fp16 = (
-            self.teacher_active
-            and getattr(cfg, "quantize_fp16", False)
-            and device.type == "cuda"
-        )
         print(
             "[Relational KD] sketch-photo branch -> "
             f"active={self.teacher_active}, lambda={cfg.lambda_kd}, "
@@ -126,7 +102,7 @@ class CustomCLIP(nn.Module):
         return self
     
     def teacher_image_input(self, image):
-        return image.half() if self._teacher_fp16 else image.float()
+        return image.half()
 
     def adapt_teacher_feature(self, feature, modality):
         if self.teacher_adapters is None:
@@ -261,7 +237,7 @@ class ZS_SBIR(pl.LightningModule):
         self.distance_fn = lambda x, y: F.cosine_similarity(x, y)
         self.best_metric = 1e-3
 
-        strong_teacher = _load_teacher(args)
+        strong_teacher = _load_teacher()
         self.model = CustomCLIP(
             cfg=args,
             clip_model=clip_model,
