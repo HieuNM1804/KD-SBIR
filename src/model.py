@@ -48,22 +48,6 @@ def _build_teacher_adapters(args, strong_teacher):
     return adapters.to(device=device, dtype=torch.float32)
 
 
-def _infer_teacher_image_size(teacher):
-    visual = getattr(teacher, "visual", None)
-    if visual is None:
-        return None
-
-    for attr in ("image_size", "input_resolution"):
-        value = getattr(visual, attr, None)
-        if value is None:
-            continue
-        if isinstance(value, (tuple, list)):
-            return int(value[0])
-        return int(value)
-
-    return None
-
-
 def _load_teacher(args):
     """Load the frozen DFN5B teacher when relational KD is enabled."""
     if args.lambda_kd <= 0 and not args.joint_teacher_adapter:
@@ -84,10 +68,9 @@ def _load_teacher(args):
             teacher = teacher.half()
             print("[Teacher] DFN5B is running in FP16.")
     teacher.output_dim = 1024
-    teacher.image_size = _infer_teacher_image_size(teacher)
     print(
         "[Teacher] DFN5B is ready "
-        f"(frozen, output {teacher.output_dim}-dim, image_size={teacher.image_size or 'unknown'})"
+        f"(frozen, output {teacher.output_dim}-dim)"
     )
     return teacher
 
@@ -143,14 +126,6 @@ class CustomCLIP(nn.Module):
         return self
     
     def teacher_image_input(self, image):
-        teacher_size = getattr(self.model_distill, "image_size", None)
-        if teacher_size is not None and tuple(image.shape[-2:]) != (teacher_size, teacher_size):
-            image = F.interpolate(
-                image.float(),
-                size=(teacher_size, teacher_size),
-                mode="bicubic",
-                align_corners=False,
-            )
         return image.half() if self._teacher_fp16 else image.float()
 
     def adapt_teacher_feature(self, feature, modality):
