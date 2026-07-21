@@ -35,29 +35,35 @@ class WorkerInvariantSampler(torch.utils.data.Sampler):
     def __len__(self):
         return len(self.dataset)
 
-def aumented_transform():
-    transform_list = [
+
+def augmented_transform():
+    return transforms.Compose([
         transforms.RandomResizedCrop(224, scale=(0.85, 1.0)),
-        transforms.RandomHorizontalFlip(0.5),
+        transforms.RandomHorizontalFlip(p=0.5),
         transforms.ToTensor(),
-        transforms.RandomErasing(p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0),
-        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD)
-    ]
-    return transforms.Compose(transform_list)
+        transforms.RandomErasing(
+            p=0.5,
+            scale=(0.02, 0.33),
+            ratio=(0.3, 3.3),
+            value=0,
+        ),
+        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
+    ])
+
 
 def normal_transform():
-    dataset_transforms = transforms.Compose([
+    return transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD)
+        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
     ])
-    return dataset_transforms
+
 
 class TrainDataset(torch.utils.data.Dataset):
     def __init__(self, args):
         self.args = args
         self.transform1 = normal_transform()
-        self.transform2 = aumented_transform()
+        self.transform2 = augmented_transform()
         
         unseen_classes = UNSEEN_CLASSES[self.args.dataset]
 
