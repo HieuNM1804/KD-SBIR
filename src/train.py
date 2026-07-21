@@ -83,8 +83,6 @@ if __name__ == "__main__":
                         help="Random seed cho Python/NumPy/PyTorch/DataLoader workers.")
     parser.add_argument("--lambda_cls", type=float, default=1.0,
                         help="Trọng số cho classification loss: CE(photo,text)+CE(sketch,text).")
-    parser.add_argument("--lambda_triplet", type=float, default=1.0,
-                        help="Trọng số cho triplet loss sketch-photo-negative.")
     
     parser.add_argument("--lr", type=float, default=4e-5)
     parser.add_argument('--batch_size', type=int, default=64)
@@ -117,7 +115,7 @@ if __name__ == "__main__":
     parser.add_argument('--kd_temperature', type=float, default=0.07,
                         help='Temperature cho phân phối similarity sketch-photo.')
                         
-    parser.add_argument('--exp_name', type=str, default='teacher_adapter_triplet_baseline')
+    parser.add_argument('--exp_name', type=str, default='teacher_adapter_no_student_triplet')
 
 
     

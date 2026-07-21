@@ -3,5 +3,5 @@
     --root /content/sketchy/Sketchy \
     --dataset sketchy_2 \
     --epochs 5 \
-    --exp_name sketchy2_teacher_adapter_triplet_baseline
+    --exp_name sketchy2_no_student_triplet
 ```

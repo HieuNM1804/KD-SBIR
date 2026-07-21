@@ -1,7 +1,6 @@
 """Losses used by the DFN5B-to-CoPrompt SBIR benchmark."""
 
 import torch
-import torch.nn as nn
 from torch.nn import functional as F
 
 
@@ -80,7 +79,6 @@ def loss_fn(args, features):
         sketch_features,
         teacher_photo_features,
         teacher_sketch_features,
-        negative_features,
         labels,
         photo_logits,
         sketch_logits,
@@ -95,12 +93,6 @@ def loss_fn(args, features):
         F.cross_entropy(photo_logits, labels)
         + F.cross_entropy(sketch_logits, labels)
     )
-
-    cosine_distance = lambda x, y: 1.0 - F.cosine_similarity(x, y)
-    triplet_loss = nn.TripletMarginWithDistanceLoss(
-        distance_function=cosine_distance,
-        margin=0.2,
-    )(sketch_features, photo_features, negative_features)
 
     kd_loss = torch.zeros((), device=photo_logits.device)
     if teacher_active and args.lambda_kd > 0:
@@ -132,14 +124,12 @@ def loss_fn(args, features):
 
     total_loss = (
         args.lambda_cls * classification_loss
-        + args.lambda_triplet * triplet_loss
         + args.lambda_kd * kd_loss
         + args.lambda_teacher_retrieval * teacher_triplet_loss
         + args.lambda_teacher_semantic * teacher_semantic
     )
     return total_loss, {
         "cls": classification_loss,
-        "triplet": triplet_loss,
         "kd_sketch_photo": kd_loss,
         "teacher_triplet": teacher_triplet_loss,
         "teacher_semantic": teacher_semantic,
