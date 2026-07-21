@@ -5,7 +5,7 @@ from torch.nn import functional as F
 
 
 class ResidualAdapter(nn.Module):
-    def __init__(self, feature_dim, bottleneck_dim=32):
+    def __init__(self, feature_dim, bottleneck_dim=64):
         super().__init__()
         self.norm = nn.LayerNorm(feature_dim)
         self.down = nn.Linear(feature_dim, bottleneck_dim)
