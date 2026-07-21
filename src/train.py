@@ -15,7 +15,6 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 
 from src.dataset import TrainDataset, ValidDataset, WorkerInvariantSampler
 from src.model import ZS_SBIR
-from src.utils import get_all_categories
 from src.data_config import UNSEEN_CLASSES
 
 
@@ -157,7 +156,12 @@ if __name__ == "__main__":
         callbacks=[checkpoint_callback, progress_bar]
     )
 
-    classnames = get_all_categories(args)
+    categories = set(os.listdir(os.path.join(args.root, "sketch")))
+    classnames = sorted(
+        categories
+        - {".ipynb_checkpoints"}
+        - set(UNSEEN_CLASSES[args.dataset])
+    )
  
     if ckpt_path is None:
         model = ZS_SBIR(args=args, classname=classnames)

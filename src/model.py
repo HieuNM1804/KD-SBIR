@@ -10,8 +10,8 @@ from torchmetrics.functional.retrieval import (
 )
 import open_clip
 
+from clip import clip
 from src.prompt_learner import MultiModalPromptLearner, TextEncoder
-from src.utils import load_clip_to_cpu
 from src.losses import loss_fn
 from src.teacher_adapters import ModalityAdapters
 
@@ -23,6 +23,26 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DFN5B_MODEL = "ViT-H-14-quickgelu"
 DFN5B_PRETRAINED = "dfn5b"
 DFN5B_OUTPUT_DIM = 1024
+
+
+def _load_clip_model(cfg, design_details=None):
+    model_path = clip._download(clip._MODELS[cfg.backbone])
+    try:
+        model = torch.jit.load(model_path, map_location="cpu").eval()
+        state_dict = model.state_dict()
+    except RuntimeError:
+        state_dict = torch.load(model_path, map_location="cpu")
+
+    if design_details is None:
+        design_details = {
+            "trainer": "CoPrompt",
+            "vision_depth": 0,
+            "language_depth": 0,
+            "vision_ctx": 0,
+            "language_ctx": 0,
+            "maple_length": cfg.n_ctx,
+        }
+    return clip.build_model(state_dict, design_details)
 
 
 def _build_teacher_adapters(args, strong_teacher):
@@ -223,7 +243,7 @@ class ZS_SBIR(pl.LightningModule):
         super(ZS_SBIR, self).__init__()
         self.args = args
         self.classname = classname
-        clip_model = load_clip_to_cpu(args)
+        clip_model = _load_clip_model(args)
         
         design_details = {
             "trainer": "CoOp",
@@ -232,7 +252,7 @@ class ZS_SBIR(pl.LightningModule):
             "vision_ctx": 0,
             "language_ctx": 0,
         }
-        clip_model_distill = load_clip_to_cpu(args, design_details=design_details)
+        clip_model_distill = _load_clip_model(args, design_details=design_details)
         
         self.distance_fn = lambda x, y: F.cosine_similarity(x, y)
         self.best_metric = 1e-3
