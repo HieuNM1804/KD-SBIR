@@ -89,6 +89,12 @@ if __name__ == "__main__":
                         choices=sorted(UNSEEN_CLASSES), help="zero-shot split")
     parser.add_argument("--backbone", type=str, default="ViT-B/32")
     parser.add_argument("--n_ctx", type=int, default=4)
+    parser.add_argument(
+        "--n_tail_ctx",
+        type=int,
+        default=0,
+        help="Number of learnable text tokens inserted before the final period.",
+    )
     parser.add_argument("--max_size", type=int, default=224)
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for Python, NumPy, PyTorch, and DataLoader workers.")

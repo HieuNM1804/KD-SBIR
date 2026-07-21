@@ -39,6 +39,9 @@ class MultiModalPromptLearner(nn.Module):
         self.clip_model = clip_model
         self.cfg = cfg
         n_ctx = cfg.n_ctx
+        self.n_tail_ctx = cfg.n_tail_ctx
+        if self.n_tail_ctx < 0:
+            raise ValueError("n_tail_ctx must be non-negative.")
         ctx_init = "a photo/sketch of "
             
         dtype = clip_model.dtype
@@ -79,10 +82,25 @@ class MultiModalPromptLearner(nn.Module):
             self.proj.half()
         self.ctx = nn.Parameter(ctx_vectors)
 
+        if self.n_tail_ctx > 0:
+            tail_vectors = torch.empty(self.n_tail_ctx, ctx_dim, dtype=dtype)
+            tail_generator = torch.Generator()
+            tail_seed_offset = 0 if type == "photo" else 1
+            tail_generator.manual_seed(cfg.seed + tail_seed_offset)
+            nn.init.normal_(tail_vectors, std=0.02, generator=tail_generator)
+            self.tail_ctx = nn.Parameter(tail_vectors)
+        else:
+            self.register_parameter("tail_ctx", None)
+
     def forward(self, classnames):
         n_cls = len(classnames)
         classnames = [name.replace("_", " ") for name in classnames]
-        raw_prompts = [self.prompt_prefix + " " + name + "." for name in classnames]
+        tail_slots = " ".join(["x"] * self.n_tail_ctx)
+        tail_suffix = " " + tail_slots if tail_slots else ""
+        raw_prompts = [
+            self.prompt_prefix + " " + name + tail_suffix + "."
+            for name in classnames
+        ]
 
         tokenized_prompts = torch.cat([clip.tokenize(p) for p in raw_prompts])
         with torch.no_grad():
@@ -98,6 +116,23 @@ class MultiModalPromptLearner(nn.Module):
         prefix = embedding[:, :1, :]
         suffix = embedding[:, 1 + self.cfg.n_ctx :, :]
         prompts = torch.cat([prefix, ctx, suffix], dim=1)
+
+        if self.tail_ctx is not None:
+            tail_ctx = self.tail_ctx
+            if self.training:
+                tail_ctx = self.dropout_layer(tail_ctx)
+            tail_ctx = tail_ctx.unsqueeze(0).expand(n_cls, -1, -1)
+
+            eot_positions = tokenized_prompts.argmax(dim=-1).to(prompts.device)
+            tail_offsets = torch.arange(self.n_tail_ctx, device=prompts.device)
+            tail_positions = (
+                eot_positions[:, None] - self.n_tail_ctx - 1 + tail_offsets
+            )
+            prompts = prompts.scatter(
+                1,
+                tail_positions[:, :, None].expand(-1, -1, prompts.shape[-1]),
+                tail_ctx,
+            )
         
         return (
             tokenized_prompts,
