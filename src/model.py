@@ -31,70 +31,21 @@ def _freeze_teacher(teacher):
     return teacher
 
 
-def _load_teacher_adapters(args, strong_teacher):
-    ckpt_path = getattr(args, "teacher_adapter_ckpt", "")
-    joint_training = getattr(args, "joint_teacher_adapter", False)
-    if not ckpt_path:
-        if not joint_training:
-            return None
-        adapters = ModalityAdapters(
-            feature_dim=int(strong_teacher.output_dim),
-            bottleneck_dim=args.teacher_adapter_bottleneck,
-        ).to(device=device, dtype=torch.float32)
-        print(
-            "[Teacher Adapter] initialized for joint training "
-            f"(feature_dim={strong_teacher.output_dim}, "
-            f"bottleneck={args.teacher_adapter_bottleneck})"
-        )
-        return adapters
-    if strong_teacher is None:
-        raise ValueError("--teacher_adapter_ckpt requires the DFN5B teacher.")
+def _build_teacher_adapters(args, strong_teacher):
+    if not args.joint_teacher_adapter:
+        return None
 
-    checkpoint = torch.load(ckpt_path, map_location="cpu")
-    required = {"adapter_state_dict", "feature_dim", "bottleneck_dim"}
-    missing = required - set(checkpoint)
-    if missing:
-        raise RuntimeError(
-            f"Invalid teacher adapter checkpoint '{ckpt_path}'; missing keys: {sorted(missing)}"
-        )
-
-    saved_model = checkpoint.get("model")
-    saved_pretrained = checkpoint.get("pretrained")
-    if saved_model and saved_model != DFN5B_MODEL:
-        raise RuntimeError(
-            f"Adapter model mismatch: checkpoint={saved_model}, teacher={DFN5B_MODEL}"
-        )
-    if saved_pretrained and saved_pretrained != DFN5B_PRETRAINED:
-        raise RuntimeError(
-            "Adapter pretrained-weight mismatch: "
-            f"checkpoint={saved_pretrained}, teacher={DFN5B_PRETRAINED}"
-        )
-
-    feature_dim = int(checkpoint["feature_dim"])
-    teacher_dim = int(getattr(strong_teacher, "output_dim", feature_dim))
-    if feature_dim != teacher_dim:
-        raise RuntimeError(
-            f"Adapter feature_dim={feature_dim} does not match teacher output_dim={teacher_dim}."
-        )
-
-    if checkpoint.get("adapter_mode", "residual") != "residual":
-        raise RuntimeError("Only residual DFN5B adapters are supported.")
+    feature_dim = int(strong_teacher.output_dim)
     adapters = ModalityAdapters(
         feature_dim=feature_dim,
-        bottleneck_dim=int(checkpoint["bottleneck_dim"]),
+        bottleneck_dim=args.teacher_adapter_bottleneck,
     )
-    adapters.load_state_dict(checkpoint["adapter_state_dict"], strict=True)
-    adapters.requires_grad_(joint_training)
-    adapters.train(joint_training)
-    adapters = adapters.to(device=device, dtype=torch.float32)
     print(
-        f"[Teacher Adapter] loaded {ckpt_path} "
-        f"(epoch={checkpoint.get('epoch', 'unknown')}, feature_dim={feature_dim}, "
-        f"bottleneck={checkpoint['bottleneck_dim']}, "
-        f"mode={checkpoint.get('adapter_mode', 'residual')}, "
-        f"trainable={joint_training})"
+        "[Teacher Adapter] initialized for joint training "
+        f"(feature_dim={feature_dim}, "
+        f"bottleneck={args.teacher_adapter_bottleneck})"
     )
-    return adapters
+    return adapters.to(device=device, dtype=torch.float32)
 
 
 def _infer_teacher_image_size(teacher):
@@ -170,7 +121,7 @@ class CustomCLIP(nn.Module):
         self.model_distill = strong_teacher
         self.teacher_active = strong_teacher is not None
         self.joint_teacher_adapter = getattr(cfg, "joint_teacher_adapter", False)
-        self.teacher_adapters = _load_teacher_adapters(cfg, strong_teacher)
+        self.teacher_adapters = _build_teacher_adapters(cfg, strong_teacher)
         self._teacher_text_cache = {}
         self._teacher_fp16 = (
             self.teacher_active

@@ -110,8 +110,6 @@ if __name__ == "__main__":
                         help='Run the DFN5B teacher in FP16 to reduce VRAM use and improve throughput.')
     parser.add_argument('--no_quantize_fp16', action='store_false', dest='quantize_fp16',
                         help='Keep the DFN5B teacher in FP32.')
-    parser.add_argument('--teacher_adapter_ckpt', type=str, default='',
-                        help='Checkpoint for DFN5B modality adapters.')
     parser.add_argument('--joint_teacher_adapter', action='store_true', default=True,
                         help='Train DFN5B sketch/photo adapters jointly with the student.')
     parser.add_argument('--no_joint_teacher_adapter', action='store_false', dest='joint_teacher_adapter',
