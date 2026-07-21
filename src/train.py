@@ -50,9 +50,9 @@ def get_datasets(args):
 
     loader_kwargs = dict(
         num_workers=args.workers,
-        pin_memory=True,           # Transfer CPU→GPU nhanh hơn (non-blocking)
-        persistent_workers=args.workers > 0,  # Giữ worker sống giữa các epoch
-        prefetch_factor=4 if args.workers > 0 else None,  # Pre-load 4 batch trước
+        pin_memory=True,
+        persistent_workers=args.workers > 0,
+        prefetch_factor=4 if args.workers > 0 else None,
         worker_init_fn=seed_worker,
     )
 
@@ -61,7 +61,7 @@ def get_datasets(args):
         batch_size=args.batch_size,
         shuffle=False,
         sampler=WorkerInvariantSampler(train_dataset, args.seed),
-        drop_last=True,  # Tránh batch lẻ ở cuối gây vấn đề với RKD (cần B>=2)
+        drop_last=True,  # RKD requires complete batches with at least two samples.
         generator=torch.Generator().manual_seed(args.seed),
         **loader_kwargs,
     )
@@ -92,41 +92,41 @@ if __name__ == "__main__":
     parser.add_argument("--n_ctx", type=int, default=4)
     parser.add_argument("--max_size", type=int, default=224)
     parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed cho Python/NumPy/PyTorch/DataLoader workers.")
+                        help="Random seed for Python, NumPy, PyTorch, and DataLoader workers.")
     parser.add_argument("--lambda_cls", type=float, default=1.0,
-                        help="Trọng số cho classification loss: CE(photo,text)+CE(sketch,text).")
+                        help="Weight for CE(photo, text) + CE(sketch, text).")
     
     parser.add_argument("--lr", type=float, default=4e-5)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--test_batch_size', type=int, default=1024)
     parser.add_argument('--epochs', type=int, default=3)
     parser.add_argument('--workers', type=int, default=4,
-                        help='Số DataLoader workers; sample RNG không phụ thuộc giá trị này.')
+                        help='Number of DataLoader workers; sample RNG is worker-count invariant.')
     parser.add_argument('--progress', action='store_true', default=True,
-                        help='Hiện tqdm progress bar trong lúc train')
+                        help='Show the tqdm training progress bar.')
     parser.add_argument('--no_progress', action='store_false', dest='progress',
-                        help='Tắt tqdm progress bar.')
+                        help='Disable the tqdm progress bar.')
     parser.add_argument('--quantize_fp16', action='store_true', default=True,
-                        help='Chạy DFN5B teacher ở FP16 để giảm VRAM và tăng tốc.')
+                        help='Run the DFN5B teacher in FP16 to reduce VRAM use and improve throughput.')
     parser.add_argument('--no_quantize_fp16', action='store_false', dest='quantize_fp16',
-                        help='Giữ DFN5B teacher ở FP32.')
+                        help='Keep the DFN5B teacher in FP32.')
     parser.add_argument('--teacher_adapter_ckpt', type=str, default='',
-                        help='Checkpoint modality adapter đã fine-tune cho DFN5B.')
+                        help='Checkpoint for DFN5B modality adapters.')
     parser.add_argument('--joint_teacher_adapter', action='store_true', default=True,
                         help='Train DFN5B sketch/photo adapters jointly with the student.')
     parser.add_argument('--no_joint_teacher_adapter', action='store_false', dest='joint_teacher_adapter',
-                        help='Tắt joint teacher adapter để chạy ablation/no-teacher.')
+                        help='Disable joint teacher-adapter training for ablations.')
     parser.add_argument('--teacher_adapter_bottleneck', type=int, default=64)
     parser.add_argument('--teacher_adapter_lr', type=float, default=2e-5)
     parser.add_argument('--lambda_teacher_retrieval', type=float, default=1.5,
-                        help='Trọng số teacher-adapter triplet loss trên nhánh ablation này.')
+                        help='Weight for the teacher-adapter retrieval loss.')
     parser.add_argument('--lambda_teacher_semantic', type=float, default=1.0)
     parser.add_argument('--teacher_temperature', type=float, default=0.07)
     parser.add_argument('--teacher_triplet_margin', type=float, default=0.2)
     parser.add_argument('--lambda_kd', type=float, default=3.0,
-                        help='Trọng số relational KD sketch-photo.')
+                        help='Weight for sketch-photo relational distillation.')
     parser.add_argument('--kd_temperature', type=float, default=0.07,
-                        help='Temperature cho phân phối similarity sketch-photo.')
+                        help='Temperature for the sketch-photo similarity distribution.')
                         
     parser.add_argument('--exp_name', type=str, default='no_student_triplet_worker_invariant')
 

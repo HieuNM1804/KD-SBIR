@@ -116,10 +116,10 @@ def _infer_teacher_image_size(teacher):
 def _load_teacher(args):
     """Load the frozen DFN5B teacher when relational KD is enabled."""
     if args.lambda_kd <= 0 and not args.joint_teacher_adapter:
-        print("[Teacher] KD và joint adapter đều tắt -> bỏ qua DFN5B teacher")
+        print("[Teacher] KD and joint adapters are disabled; skipping DFN5B.")
         return None
 
-    print(f"[Teacher] Đang load DFN5B ({DFN5B_MODEL})...")
+    print(f"[Teacher] Loading DFN5B ({DFN5B_MODEL})...")
     teacher, _, _ = open_clip.create_model_and_transforms(
         DFN5B_MODEL, pretrained=DFN5B_PRETRAINED
     )
@@ -128,14 +128,14 @@ def _load_teacher(args):
     teacher = teacher.to(device)
     if getattr(args, "quantize_fp16", False):
         if device.type != "cuda":
-            print("[Teacher] quantize_fp16=True nhưng không có CUDA; giữ teacher ở FP32.")
+            print("[Teacher] quantize_fp16=True without CUDA; keeping the teacher in FP32.")
         else:
             teacher = teacher.half()
-            print("[Teacher] DFN5B chạy FP16")
+            print("[Teacher] DFN5B is running in FP16.")
     teacher.output_dim = 1024
     teacher.image_size = _infer_teacher_image_size(teacher)
     print(
-        "[Teacher] DFN5B đã sẵn sàng "
+        "[Teacher] DFN5B is ready "
         f"(frozen, output {teacher.output_dim}-dim, image_size={teacher.image_size or 'unknown'})"
     )
     return teacher

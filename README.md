@@ -8,6 +8,6 @@
     --exp_name sketchy2_no_student_triplet_worker_invariant
 ```
 
-`--workers 4`, `--workers 5` và các worker count khác nhận cùng thứ tự batch,
-positive photo và augmentation khi giữ nguyên `--seed`. Số worker chỉ thay đổi
-tốc độ nạp dữ liệu.
+With the same `--seed`, `--workers 4`, `--workers 5`, and other worker counts
+produce the same batch order, positive-photo selection, and augmentation. The
+worker count only changes data-loading throughput.
