@@ -11,7 +11,7 @@ from torchmetrics.functional.retrieval import (
 import open_clip
 
 from clip import clip
-from src.prompt_learner import MultiModalPromptLearner, TextEncoder
+from src.prompt_learner import TextEncoder, VisualPromptLearner
 from src.losses import loss_fn
 from src.teacher_adapters import ModalityAdapters
 
@@ -94,8 +94,12 @@ class CustomCLIP(nn.Module):
         clip_model.apply(freeze_all_but_ln)
         clip_model_distill.apply(freeze_all_but_ln)
         self.dtype = clip_model.dtype
-        self.prompt_learner_photo = MultiModalPromptLearner(cfg, clip_model_distill, type='photo')
-        self.prompt_learner_sketch = MultiModalPromptLearner(cfg, clip_model_distill, type='sketch')
+        self.visual_prompt_photo = VisualPromptLearner(
+            cfg, clip_model, type='photo'
+        )
+        self.visual_prompt_sketch = VisualPromptLearner(
+            cfg, clip_model, type='sketch'
+        )
         
         self.ph_encoder = copy.deepcopy(clip_model.visual)
         self.sk_encoder = copy.deepcopy(clip_model.visual)
@@ -106,7 +110,12 @@ class CustomCLIP(nn.Module):
         self.teacher_active = strong_teacher is not None
         self.joint_teacher_adapter = getattr(cfg, "joint_teacher_adapter", False)
         self.teacher_adapters = _build_teacher_adapters(cfg, strong_teacher)
+        self._student_text_token_cache = {}
         self._teacher_text_cache = {}
+        print(
+            "[Student Prompt] fixed text template, independently initialized "
+            f"random visual tokens (n_ctx={cfg.n_ctx})"
+        )
         print(
             "[Relational KD] sketch-photo branch -> "
             f"active={self.teacher_active}, lambda={cfg.lambda_kd}, "
@@ -161,22 +170,31 @@ class CustomCLIP(nn.Module):
         self._teacher_text_cache[cache_key] = result
         return result
 
+    def get_student_text_features(self, classnames):
+        cache_key = tuple(classnames)
+        if cache_key not in self._student_text_token_cache:
+            prompts = [
+                f"a photo/sketch of {name.replace('_', ' ')}."
+                for name in classnames
+            ]
+            self._student_text_token_cache[cache_key] = torch.cat(
+                [clip.tokenize(prompt) for prompt in prompts]
+            )
+        text_device = self.text_encoder.positional_embedding.device
+        tokens = self._student_text_token_cache[cache_key].to(text_device)
+        return self.text_encoder(tokens)
+
     def get_logits(self, img_tensor, classnames, type='photo'):
         if type=='photo':
-            prompt_learner = self.prompt_learner_photo
+            visual_prompt = self.visual_prompt_photo
             image_encoder = self.ph_encoder
         else:
             image_encoder = self.sk_encoder
-            prompt_learner = self.prompt_learner_sketch
+            visual_prompt = self.visual_prompt_sketch
             
         logit_scale = self.logit_scale.exp()
-        (
-            tokenized_prompts,
-            prompts,
-            visual_ctx,
-        ) = prompt_learner(classnames)
-        
-        text_features = self.text_encoder(prompts, tokenized_prompts)
+        visual_ctx = visual_prompt()
+        text_features = self.get_student_text_features(classnames)
 
         image_features = image_encoder(
                 img_tensor.type(self.dtype), visual_ctx, []

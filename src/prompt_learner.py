@@ -1,21 +1,20 @@
 import torch
 import torch.nn as nn
 
-from clip import clip
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
 class TextEncoder(nn.Module):
     def __init__(self, clip_model):
         super().__init__()
+        self.token_embedding = clip_model.token_embedding
         self.resblocks = clip_model.transformer.resblocks
         self.positional_embedding = clip_model.positional_embedding
         self.ln_final = clip_model.ln_final
         self.text_projection = clip_model.text_projection
         self.dtype = clip_model.dtype
 
-    def forward(self, prompts, tokenized_prompts):
+    def forward(self, tokenized_prompts):
+        with torch.no_grad():
+            prompts = self.token_embedding(tokenized_prompts).type(self.dtype)
         x = prompts + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND
         for block in self.resblocks:
@@ -32,75 +31,35 @@ class TextEncoder(nn.Module):
         )
 
         return x
-    
-class MultiModalPromptLearner(nn.Module):
+
+
+class VisualPromptLearner(nn.Module):
     def __init__(self, cfg, clip_model, type='photo'):
         super().__init__()
-        self.clip_model = clip_model
-        self.cfg = cfg
-        n_ctx = cfg.n_ctx
-        ctx_init = "a photo/sketch of "
-            
+        if cfg.n_ctx <= 0:
+            raise ValueError("n_ctx must be greater than 0 for visual prompting.")
+
         dtype = clip_model.dtype
-        ctx_dim = clip_model.ln_final.weight.shape[0]
+        visual_width = clip_model.visual.ln_pre.weight.shape[0]
         clip_imsize = clip_model.visual.input_resolution
-        cfg_imsize = cfg.max_size
-        
-        self.dropout_layer = nn.Dropout(p=0.1)
         assert (
-            cfg_imsize == clip_imsize
-        ), f"cfg_imsize ({cfg_imsize}) must equal to clip_imsize ({clip_imsize})"
+            cfg.max_size == clip_imsize
+        ), f"cfg_imsize ({cfg.max_size}) must equal to clip_imsize ({clip_imsize})"
 
-        if ctx_init and (n_ctx) <= 4:
-            # use given words to initialize context vectors
-            n_ctx = n_ctx
-            prompt = clip.tokenize(ctx_init)
-            with torch.no_grad():
-                embedding = clip_model.token_embedding(prompt).type(dtype)
-            ctx_vectors = embedding[0, 1 : 1 + n_ctx, :]
-            prompt_prefix = ctx_init
-        else:
-            # random initialization
-            ctx_vectors = torch.empty(n_ctx, ctx_dim, dtype=dtype)
-            nn.init.normal_(ctx_vectors)
-            prompt_prefix = ctx_init
-        
-        self.prompt_prefix = prompt_prefix
-        self.proj = nn.Linear(ctx_dim, 768)
+        # Preserve the baseline RNG position so later teacher-adapter weights
+        # keep the same initialization after removing text-to-visual projectors.
+        text_width = clip_model.ln_final.weight.shape[0]
+        if cfg.n_ctx > 4:
+            text_ctx_rng_compat = torch.empty(cfg.n_ctx, text_width, dtype=dtype)
+            nn.init.normal_(text_ctx_rng_compat)
+        nn.Linear(text_width, visual_width)
+        nn.Linear(text_width, visual_width)
 
-        # Keep the exact RNG sequence of the recorded shallow-prompt benchmark.
-        # The original implementation initialized this projection even when
-        # prompt_depth=1, then discarded it because there were no deep prompts.
-        # Removing that unused allocation changes the sketch prompt projection
-        # initialization and makes seed=42 reproduce a different run.
-        _benchmark_rng_compat = nn.Linear(ctx_dim, 768)
+        visual_ctx = torch.empty(cfg.n_ctx, visual_width, dtype=dtype)
+        generator = torch.Generator()
+        generator.manual_seed(cfg.seed + (0 if type == 'photo' else 1))
+        nn.init.normal_(visual_ctx, std=0.02, generator=generator)
+        self.ctx = nn.Parameter(visual_ctx)
 
-        if dtype == torch.float16:
-            self.proj.half()
-        self.ctx = nn.Parameter(ctx_vectors)
-
-    def forward(self, classnames):
-        n_cls = len(classnames)
-        classnames = [name.replace("_", " ") for name in classnames]
-        raw_prompts = [self.prompt_prefix + " " + name + "." for name in classnames]
-
-        tokenized_prompts = torch.cat([clip.tokenize(p) for p in raw_prompts])
-        with torch.no_grad():
-            embedding = self.clip_model.token_embedding(tokenized_prompts.to(device)).type(self.clip_model.dtype)
-        
-        ctx = self.ctx
-        if self.training:
-            ctx = self.dropout_layer(ctx)
-        
-        if ctx.dim() == 2:
-            ctx = ctx.unsqueeze(0).expand(n_cls, -1, -1)
-
-        prefix = embedding[:, :1, :]
-        suffix = embedding[:, 1 + self.cfg.n_ctx :, :]
-        prompts = torch.cat([prefix, ctx, suffix], dim=1)
-        
-        return (
-            tokenized_prompts,
-            prompts,
-            self.proj(self.ctx),
-        )
+    def forward(self):
+        return self.ctx
