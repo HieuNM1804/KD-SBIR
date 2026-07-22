@@ -25,7 +25,7 @@ DFN5B_PRETRAINED = "dfn5b"
 DFN5B_OUTPUT_DIM = 1024
 
 
-def _load_clip_model(cfg, design_details=None):
+def _load_clip_model(cfg):
     model_path = clip._download(clip._MODELS[cfg.backbone])
     try:
         model = torch.jit.load(model_path, map_location="cpu").eval()
@@ -33,15 +33,7 @@ def _load_clip_model(cfg, design_details=None):
     except RuntimeError:
         state_dict = torch.load(model_path, map_location="cpu")
 
-    if design_details is None:
-        design_details = {
-            "trainer": "CoOp",
-            "vision_depth": 0,
-            "language_depth": 0,
-            "vision_ctx": 0,
-            "language_ctx": 0,
-        }
-    return clip.build_model(state_dict, design_details)
+    return clip.build_model(state_dict)
 
 
 def _build_teacher_adapters(args, strong_teacher):
@@ -262,14 +254,7 @@ class ZS_SBIR(pl.LightningModule):
         self.classname = classname
         clip_model = _load_clip_model(args)
         
-        design_details = {
-            "trainer": "CoOp",
-            "vision_depth": 0,
-            "language_depth": 0,
-            "vision_ctx": 0,
-            "language_ctx": 0,
-        }
-        clip_model_distill = _load_clip_model(args, design_details=design_details)
+        clip_model_distill = _load_clip_model(args)
         
         self.distance_fn = lambda x, y: F.cosine_similarity(x, y)
         self.best_metric = 1e-3

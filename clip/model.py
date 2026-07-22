@@ -50,110 +50,6 @@ class ResidualAttentionBlock(nn.Module):
         return x
 
 
-class ResidualAttentionBlock_MaPLe(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        n_head: int,
-        attn_mask: torch.Tensor = None,
-        design_details=None,
-        text_layer=False,
-        i=0,
-    ):
-        super().__init__()
-
-        self.attn = nn.MultiheadAttention(d_model, n_head)
-        self.ln_1 = LayerNorm(d_model)
-        self.mlp = nn.Sequential(
-            OrderedDict(
-                [
-                    ("c_fc", nn.Linear(d_model, d_model * 4)),
-                    ("gelu", QuickGELU()),
-                    ("c_proj", nn.Linear(d_model * 4, d_model)),
-                ]
-            )
-        )
-        self.ln_2 = LayerNorm(d_model)
-        # For the first iteration i, we do not need to add the learnable parameters here
-        # as it will be added in the beginning, for both text and the vision branch
-        self.text_layer = text_layer
-        self.attn_mask = attn_mask
-        # This must be consistent with the config file prompt
-        self.compound_prompt_nctx = design_details["maple_length"]
-        if i == 0:
-            self.first_layer = True
-        else:
-            self.first_layer = False
-
-    def attention(self, x: torch.Tensor):
-        self.attn_mask = (
-            self.attn_mask.to(dtype=x.dtype, device=x.device)
-            if self.attn_mask is not None
-            else None
-        )
-        return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
-
-    def forward(self, inputs):
-        # For the first layer, we do not need to add any duplicate, as it is already added
-        # as the shallow version
-        x = inputs[0]
-        compound_prompts_deeper = inputs[1]
-        counter = inputs[2]
-        if not self.first_layer:
-            if len(compound_prompts_deeper) > 0:
-                # This means that deeper compound prompts are turned on
-                # Here it behaves differently for text and visual side
-                # Forward function is same for both
-
-                if not self.text_layer:
-                    # First check if the ith layer needs compound prompts or not
-                    if not (counter > len(compound_prompts_deeper) - 1):
-                        # Remove the outputs produced by learnable tokens of previous layer
-                        prefix = x[0 : x.shape[0] - self.compound_prompt_nctx, :, :]
-                        # Create/configure learnable tokens of this layer
-                        visual_context = compound_prompts_deeper[
-                            counter
-                        ]  # extract the correct index
-                        visual_context = (
-                            visual_context.expand(x.shape[1], -1, -1)
-                            .permute(1, 0, 2)
-                            .half()
-                        )
-                        # Add the learnable tokens of this layer with the input, by replacing previous
-                        # layer learnable tokens
-                        x = torch.cat([prefix, visual_context], dim=0)
-
-                        # Once done, update the counter, so that the next time, it does not use same learnable tokens
-                        counter += 1
-                else:
-                    # First check if the ith layer needs compound prompts or not
-                    if not (counter > len(compound_prompts_deeper) - 1):
-                        # Appending the learnable tokens in different way
-                        # x -> [77, NCLS, DIM]
-                        # First remove the learnable tokens from previous layer
-                        prefix = x[:1, :, :]
-                        suffix = x[1 + self.compound_prompt_nctx :, :, :]
-                        # Create/configure learnable tokens of this layer
-                        textual_context = compound_prompts_deeper[counter]
-                        textual_context = (
-                            textual_context.expand(x.shape[1], -1, -1)
-                            .permute(1, 0, 2)
-                            .half()
-                        )
-                        # Add the learnable tokens of this layer with the input, replaced by previous
-                        # layer learnable tokens
-                        x = torch.cat([prefix, textual_context, suffix], dim=0)
-                        # Once done, update the counter, so that the next time, it does not use same learnable tokens
-                        counter += 1
-        x = x + self.attention(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
-        return [
-            x,
-            compound_prompts_deeper,
-            counter,
-        ]  # return again as a list, so that nn.seq can work
-
-
 class Transformer(nn.Module):
     def __init__(
         self,
@@ -161,30 +57,16 @@ class Transformer(nn.Module):
         layers: int,
         heads: int,
         attn_mask: torch.Tensor = None,
-        text_layer=False,
-        design_details=None,
     ):
         super().__init__()
         self.width = width
         self.layers = layers
-        current_trainer = design_details["trainer"]
-        if current_trainer == "CoPrompt":
-            self.resblocks = nn.Sequential(
-                *[
-                    ResidualAttentionBlock_MaPLe(
-                        width, heads, attn_mask, design_details, text_layer, i
-                    )
-                    for i in range(layers)
-                ]
-            )
-        else:
-            assert current_trainer == "CoOp"
-            self.resblocks = nn.Sequential(
-                *[
-                    ResidualAttentionBlock(width, heads, attn_mask)
-                    for _ in range(layers)
-                ]
-            )
+        self.resblocks = nn.Sequential(
+            *[
+                ResidualAttentionBlock(width, heads, attn_mask)
+                for _ in range(layers)
+            ]
+        )
 
     def forward(self, x: torch.Tensor):
         return self.resblocks(x)
@@ -216,12 +98,7 @@ class VisionTransformer(nn.Module):
             scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width)
         )
         self.ln_pre = LayerNorm(width)
-        self.transformer = Transformer(
-            width,
-            layers,
-            heads,
-            design_details={"trainer": "CoOp"},
-        )
+        self.transformer = Transformer(width, layers, heads)
 
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
@@ -260,83 +137,6 @@ class VisionTransformer(nn.Module):
         return x
 
 
-class VisionTransformer_MaPLe(nn.Module):
-    def __init__(
-        self,
-        input_resolution: int,
-        patch_size: int,
-        width: int,
-        layers: int,
-        heads: int,
-        output_dim: int,
-        design_details,
-    ):
-        super().__init__()
-        self.input_resolution = input_resolution
-        self.output_dim = output_dim
-        self.conv1 = nn.Conv2d(
-            in_channels=3,
-            out_channels=width,
-            kernel_size=patch_size,
-            stride=patch_size,
-            bias=False,
-        )
-        scale = width**-0.5
-        self.class_embedding = nn.Parameter(scale * torch.randn(width))
-        self.positional_embedding = nn.Parameter(
-            scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width)
-        )
-        self.ln_pre = LayerNorm(width)
-        self.transformer = Transformer(
-            width, layers, heads, design_details=design_details
-        )
-
-        self.ln_post = LayerNorm(width)
-        self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
-        
-    def patch_embedding(self, x):
-        x = self.conv1(x)  # shape = [*, width, grid, grid]
-        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
-        x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
-        
-        return x
-
-    def forward(self, x: torch.Tensor, shared_ctx, compound_deeper_prompts):
-        x = self.conv1(x)  # shape = [*, width, grid, grid]
-        x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
-        x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
-        x = torch.cat(
-            [
-                self.class_embedding.to(x.dtype)
-                + torch.zeros(
-                    x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device
-                ),
-                x,
-            ],
-            dim=1,
-        )  # shape = [*, grid ** 2 + 1, width]
-        x = x + self.positional_embedding.to(x.dtype)
-
-        visual_ctx = shared_ctx.expand(x.shape[0], -1, -1).half()
-        x = torch.cat([x, visual_ctx], dim=1)
-        x = self.ln_pre(x)
-
-        x = x.permute(1, 0, 2)  # NLD -> LND
-        # Again combine the inputs, so nn.sequential can work
-        outputs = self.transformer(
-            [x, compound_deeper_prompts, 0]
-        )  # third argument is counter
-        x = outputs[0]
-        x = x.permute(1, 0, 2)  # LND -> NLD
-
-        x = self.ln_post(x[:, 0, :])
-
-        if self.proj is not None:
-            x = x @ self.proj
-
-        return x
-
-
 class CLIP(nn.Module):
     def __init__(
         self,
@@ -352,41 +152,24 @@ class CLIP(nn.Module):
         transformer_width: int,
         transformer_heads: int,
         transformer_layers: int,
-        design_details,
     ):
         super().__init__()
 
         self.context_length = context_length
-        trainer = design_details["trainer"]
-
         vision_heads = vision_width // 64
-        if trainer == "CoPrompt":
-            self.visual = VisionTransformer_MaPLe(
-                input_resolution=image_resolution,
-                patch_size=vision_patch_size,
-                width=vision_width,
-                layers=vision_layers,
-                heads=vision_heads,
-                output_dim=embed_dim,
-                design_details=design_details,
-            )
-        else:
-            assert trainer == "CoOp"
-            self.visual = VisionTransformer(
-                input_resolution=image_resolution,
-                patch_size=vision_patch_size,
-                width=vision_width,
-                layers=vision_layers,
-                heads=vision_heads,
-                output_dim=embed_dim,
-            )
+        self.visual = VisionTransformer(
+            input_resolution=image_resolution,
+            patch_size=vision_patch_size,
+            width=vision_width,
+            layers=vision_layers,
+            heads=vision_heads,
+            output_dim=embed_dim,
+        )
         self.transformer = Transformer(
             width=transformer_width,
             layers=transformer_layers,
             heads=transformer_heads,
             attn_mask=self.build_attention_mask(),
-            text_layer=True,
-            design_details=design_details,
         )
 
         self.vocab_size = vocab_size
@@ -495,7 +278,7 @@ def convert_weights(model: nn.Module):
     model.apply(_convert_weights_to_fp16)
 
 
-def build_model(state_dict: dict, design_details):
+def build_model(state_dict: dict):
     if "visual.proj" not in state_dict:
         raise ValueError("Only Vision Transformer CLIP checkpoints are supported.")
 
@@ -535,7 +318,6 @@ def build_model(state_dict: dict, design_details):
         transformer_width,
         transformer_heads,
         transformer_layers,
-        design_details,
     )
 
     for key in ["input_resolution", "context_length", "vocab_size"]:

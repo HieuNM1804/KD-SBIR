@@ -1,4 +1,4 @@
-"""Losses used by the DFN5B-to-CoPrompt SBIR benchmark."""
+"""Losses used by the DFN5B-to-CLIP SBIR benchmark."""
 
 import torch
 from torch.nn import functional as F
