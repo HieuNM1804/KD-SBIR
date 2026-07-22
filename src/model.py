@@ -35,12 +35,11 @@ def _load_clip_model(cfg, design_details=None):
 
     if design_details is None:
         design_details = {
-            "trainer": "CoPrompt",
+            "trainer": "CoOp",
             "vision_depth": 0,
             "language_depth": 0,
             "vision_ctx": 0,
             "language_ctx": 0,
-            "maple_length": cfg.n_ctx,
         }
     return clip.build_model(state_dict, design_details)
 
@@ -197,8 +196,8 @@ class CustomCLIP(nn.Module):
         text_features = self.get_student_text_features(classnames)
 
         image_features = image_encoder(
-                img_tensor.type(self.dtype), visual_ctx, []
-            ) # (batch_size, 768)
+            img_tensor.type(self.dtype), visual_ctx
+        )
         
         image_features_normalize = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
