@@ -83,7 +83,7 @@ class CustomCLIP(nn.Module):
         super().__init__()
         self.cfg = cfg
         clip_model.apply(freeze_all_but_ln)
-        clip_model_distill.apply(freeze_all_but_ln)
+        clip_model_distill.requires_grad_(False)
         self.dtype = clip_model.dtype
         prompt_dim = clip_model.visual.ln_pre.weight.shape[0]
         self.sk_prompt = nn.Parameter(torch.randn(cfg.n_ctx, prompt_dim))
@@ -92,6 +92,7 @@ class CustomCLIP(nn.Module):
         self.ph_encoder = copy.deepcopy(clip_model.visual)
         self.sk_encoder = copy.deepcopy(clip_model.visual)
         self.text_encoder = TextEncoder(clip_model_distill)
+        self.text_encoder.eval()
         self.logit_scale = clip_model.logit_scale
         
         self.model_distill = strong_teacher
@@ -112,6 +113,7 @@ class CustomCLIP(nn.Module):
 
     def train(self, mode=True):
         super().train(mode)
+        self.text_encoder.eval()
         if self.model_distill is not None:
             self.model_distill.eval()
         if self.teacher_adapters is not None:
