@@ -31,35 +31,3 @@ class TextEncoder(nn.Module):
         )
 
         return x
-
-
-class VisualPromptLearner(nn.Module):
-    def __init__(self, cfg, clip_model, type='photo'):
-        super().__init__()
-        if cfg.n_ctx <= 0:
-            raise ValueError("n_ctx must be greater than 0 for visual prompting.")
-
-        dtype = clip_model.dtype
-        visual_width = clip_model.visual.ln_pre.weight.shape[0]
-        clip_imsize = clip_model.visual.input_resolution
-        assert (
-            cfg.max_size == clip_imsize
-        ), f"cfg_imsize ({cfg.max_size}) must equal to clip_imsize ({clip_imsize})"
-
-        # Preserve the baseline RNG position so later teacher-adapter weights
-        # keep the same initialization after removing text-to-visual projectors.
-        text_width = clip_model.ln_final.weight.shape[0]
-        if cfg.n_ctx > 4:
-            text_ctx_rng_compat = torch.empty(cfg.n_ctx, text_width, dtype=dtype)
-            nn.init.normal_(text_ctx_rng_compat)
-        nn.Linear(text_width, visual_width)
-        nn.Linear(text_width, visual_width)
-
-        visual_ctx = torch.empty(cfg.n_ctx, visual_width, dtype=dtype)
-        generator = torch.Generator()
-        generator.manual_seed(cfg.seed + (0 if type == 'photo' else 1))
-        nn.init.normal_(visual_ctx, std=0.02, generator=generator)
-        self.ctx = nn.Parameter(visual_ctx)
-
-    def forward(self):
-        return self.ctx
