@@ -255,6 +255,13 @@ class CustomCLIP(nn.Module):
 class ZS_SBIR(pl.LightningModule):
     def __init__(self, args, classname):
         super(ZS_SBIR, self).__init__()
+        text_kd_enabled = (
+            args.lambda_sketch_text_kd > 0 or args.lambda_photo_text_kd > 0
+        )
+        if text_kd_enabled and args.n_tail_ctx <= 0:
+            raise ValueError(
+                "Text KD on this branch requires --n_tail_ctx to be greater than 0."
+            )
         self.args = args
         self.classname = classname
         clip_model = _load_clip_model(args)
@@ -325,7 +332,20 @@ class ZS_SBIR(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         features = self.forward(batch, self.classname)
-        loss, loss_dict = loss_fn(self.args, features)
+        sketch_prompt_params = [
+            self.model.prompt_learner_sketch.ctx,
+            self.model.prompt_learner_sketch.tail_ctx,
+        ]
+        photo_prompt_params = [
+            self.model.prompt_learner_photo.ctx,
+            self.model.prompt_learner_photo.tail_ctx,
+        ]
+        loss, loss_dict = loss_fn(
+            self.args,
+            features,
+            sketch_prompt_params,
+            photo_prompt_params,
+        )
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         for k, v in loss_dict.items():
             bar_names = {

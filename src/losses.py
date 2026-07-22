@@ -61,6 +61,26 @@ def image_text_relational_kd_loss(
     return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
 
 
+def restrict_loss_gradient(loss, parameters):
+    """Keep a loss value while sending its gradient only to selected parameters."""
+    parameters = [parameter for parameter in parameters if parameter is not None]
+    if not parameters:
+        raise ValueError("Text KD requires at least one learnable prompt parameter.")
+
+    gradients = torch.autograd.grad(
+        loss,
+        parameters,
+        retain_graph=True,
+        create_graph=False,
+    )
+    surrogate = loss.detach()
+    for parameter, gradient in zip(parameters, gradients):
+        surrogate = surrogate + (
+            (parameter - parameter.detach()) * gradient.detach()
+        ).sum()
+    return surrogate
+
+
 def batch_hard_teacher_triplet_loss(
     sketch_features,
     photo_features,
@@ -102,7 +122,7 @@ def teacher_semantic_loss(
     )
 
 
-def loss_fn(args, features):
+def loss_fn(args, features, sketch_prompt_params, photo_prompt_params):
     (
         photo_features,
         sketch_features,
@@ -145,6 +165,11 @@ def loss_fn(args, features):
             teacher_sketch_text,
             args.text_kd_temperature,
         )
+        sketch_text_kd_for_backward = restrict_loss_gradient(
+            sketch_text_kd, sketch_prompt_params
+        )
+    else:
+        sketch_text_kd_for_backward = sketch_text_kd
     if teacher_active and args.lambda_photo_text_kd > 0:
         photo_text_kd = image_text_relational_kd_loss(
             photo_features,
@@ -153,6 +178,11 @@ def loss_fn(args, features):
             teacher_photo_text,
             args.text_kd_temperature,
         )
+        photo_text_kd_for_backward = restrict_loss_gradient(
+            photo_text_kd, photo_prompt_params
+        )
+    else:
+        photo_text_kd_for_backward = photo_text_kd
 
     teacher_triplet_loss = torch.zeros((), device=photo_logits.device)
     teacher_semantic = torch.zeros((), device=photo_logits.device)
@@ -175,8 +205,8 @@ def loss_fn(args, features):
     total_loss = (
         args.lambda_cls * classification_loss
         + args.lambda_kd * kd_loss
-        + args.lambda_sketch_text_kd * sketch_text_kd
-        + args.lambda_photo_text_kd * photo_text_kd
+        + args.lambda_sketch_text_kd * sketch_text_kd_for_backward
+        + args.lambda_photo_text_kd * photo_text_kd_for_backward
         + args.lambda_teacher_retrieval * teacher_triplet_loss
         + args.lambda_teacher_semantic * teacher_semantic
     )
