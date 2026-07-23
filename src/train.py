@@ -180,19 +180,19 @@ if __name__ == "__main__":
         "--lambda_sketch_text_kd",
         type=float,
         default=0.0,
-        help="Weight for sketch-to-class-text relational distillation.",
+        help="Weight for batch sketch-to-text relational distillation.",
     )
     parser.add_argument(
         "--lambda_photo_text_kd",
         type=float,
         default=0.0,
-        help="Weight for photo-to-class-text relational distillation.",
+        help="Weight for batch photo-to-text relational distillation.",
     )
     parser.add_argument(
         "--text_kd_temperature",
         type=float,
         default=0.07,
-        help="Temperature for image-to-class-text relational distillation.",
+        help="Temperature for batch image-to-text relational distillation.",
     )
     parser.add_argument(
         "--exp_name",

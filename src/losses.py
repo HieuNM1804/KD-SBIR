@@ -34,15 +34,20 @@ def relational_kd_loss(
     return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
 
 
-def image_text_relational_kd_loss(
+def batch_image_text_relational_kd_loss(
     student_image,
     student_text,
     teacher_image,
     teacher_text,
+    labels,
     temperature=0.07,
 ):
-    """Match image-to-class-text similarity distributions across models."""
+    """Match image-to-text distributions over the samples in one batch."""
     student_device = student_image.device
+    student_text = student_text.index_select(
+        0,
+        labels.to(student_text.device),
+    )
     student_image = F.normalize(student_image.float(), dim=-1)
     student_text = F.normalize(student_text.float(), dim=-1)
     student_log_probs = F.log_softmax(
@@ -51,6 +56,10 @@ def image_text_relational_kd_loss(
     )
 
     with torch.no_grad():
+        teacher_text = teacher_text.index_select(
+            0,
+            labels.to(teacher_text.device),
+        )
         teacher_image = F.normalize(
             teacher_image.to(device=student_device, dtype=torch.float32),
             dim=-1,
@@ -143,19 +152,21 @@ def loss_fn(args, features):
     sketch_text_kd = torch.zeros((), device=photo_logits.device)
     photo_text_kd = torch.zeros((), device=photo_logits.device)
     if teacher_active and args.lambda_sketch_text_kd > 0:
-        sketch_text_kd = image_text_relational_kd_loss(
+        sketch_text_kd = batch_image_text_relational_kd_loss(
             sketch_features,
             student_text,
             teacher_sketch_features,
             teacher_sketch_text,
+            labels,
             args.text_kd_temperature,
         )
     if teacher_active and args.lambda_photo_text_kd > 0:
-        photo_text_kd = image_text_relational_kd_loss(
+        photo_text_kd = batch_image_text_relational_kd_loss(
             photo_features,
             student_text,
             teacher_photo_features,
             teacher_photo_text,
+            labels,
             args.text_kd_temperature,
         )
 

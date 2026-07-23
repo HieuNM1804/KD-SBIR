@@ -137,7 +137,7 @@ class CustomCLIP(nn.Module):
             f"temperature={cfg.kd_temperature}"
         )
         print(
-            "[Relational KD] image-text branches -> "
+            "[Relational KD] batch image-text branches -> "
             f"sketch_lambda={cfg.lambda_sketch_text_kd}, "
             f"photo_lambda={cfg.lambda_photo_text_kd}, "
             f"temperature={cfg.text_kd_temperature}"
