@@ -5,12 +5,12 @@ from torch.nn import functional as F
 
 
 class ResidualAdapter(nn.Module):
-    def __init__(self, feature_dim, bottleneck_dim=64):
+    def __init__(self, feature_dim, bottleneck_dim=64, init_gain=1.0):
         super().__init__()
         self.norm = nn.LayerNorm(feature_dim)
         self.down = nn.Linear(feature_dim, bottleneck_dim)
         self.up = nn.Linear(bottleneck_dim, feature_dim)
-        nn.init.xavier_uniform_(self.down.weight)
+        nn.init.xavier_uniform_(self.down.weight, gain=init_gain)
         nn.init.zeros_(self.down.bias)
         nn.init.zeros_(self.up.weight)
         nn.init.zeros_(self.up.bias)
@@ -21,7 +21,7 @@ class ResidualAdapter(nn.Module):
 
 
 class ModalityAdapters(nn.Module):
-    def __init__(self, feature_dim, bottleneck_dim):
+    def __init__(self, feature_dim, bottleneck_dim, init_gain=1.0):
         super().__init__()
-        self.sketch = ResidualAdapter(feature_dim, bottleneck_dim)
-        self.photo = ResidualAdapter(feature_dim, bottleneck_dim)
+        self.sketch = ResidualAdapter(feature_dim, bottleneck_dim, init_gain)
+        self.photo = ResidualAdapter(feature_dim, bottleneck_dim, init_gain)

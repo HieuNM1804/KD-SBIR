@@ -51,12 +51,14 @@ def _build_teacher_adapters(args, teacher):
         adapters = ModalityAdapters(
             feature_dim=feature_dim,
             bottleneck_dim=args.teacher_adapter_bottleneck,
+            init_gain=args.adapter_init_gain,
         )
     print(
         "[Teacher Adapter] initialized for joint training "
         f"(feature_dim={feature_dim}, "
         f"bottleneck={args.teacher_adapter_bottleneck}, "
-        f"seed={adapter_init_seed})"
+        f"seed={adapter_init_seed}, "
+        f"gain={args.adapter_init_gain})"
     )
     return adapters
 

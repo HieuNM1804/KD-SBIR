@@ -119,6 +119,12 @@ if __name__ == "__main__":
         help="Teacher-adapter initialization seed; defaults to --seed.",
     )
     parser.add_argument(
+        "--adapter_init_gain",
+        type=float,
+        default=1.0,
+        help="Gain for Xavier-uniform teacher-adapter initialization.",
+    )
+    parser.add_argument(
         "--lambda_cls",
         type=float,
         default=1.0,
