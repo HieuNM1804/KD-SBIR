@@ -34,31 +34,52 @@ def relational_kd_loss(
     return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
 
 
-def batch_hard_teacher_triplet_loss(
+def standard_teacher_triplet_loss(
     sketch_features,
     photo_features,
     labels,
     margin=0.2,
 ):
-    """Symmetric batch-hard triplet loss for the jointly trained teacher adapters."""
+    """Symmetric paired triplet loss without feature-based mining."""
     sketch_features = F.normalize(sketch_features.float(), dim=-1)
     photo_features = F.normalize(photo_features.float(), dim=-1)
     labels = labels.to(sketch_features.device)
 
-    distance = 1.0 - sketch_features @ photo_features.t()
-    positive_mask = labels[:, None].eq(labels[None, :])
-    negative_mask = ~positive_mask
+    batch_size = labels.numel()
+    if batch_size < 2:
+        return sketch_features.new_zeros(())
 
-    def one_direction(dist):
-        valid_negative = negative_mask.any(dim=-1)
-        hardest_positive = dist.masked_fill(~positive_mask, -torch.inf).max(dim=-1).values
-        hardest_negative = dist.masked_fill(~negative_mask, torch.inf).min(dim=-1).values
-        losses = F.relu(hardest_positive - hardest_negative + margin)
-        if valid_negative.any():
-            return losses[valid_negative].mean()
-        return dist.new_zeros(())
+    indices = torch.arange(batch_size, device=labels.device)
+    offsets = torch.arange(1, batch_size, device=labels.device)
+    candidates = (indices[:, None] + offsets[None, :]) % batch_size
+    is_negative = labels[candidates].ne(labels[:, None])
+    valid = is_negative.any(dim=-1)
+    if not valid.any():
+        return sketch_features.new_zeros(())
 
-    return 0.5 * (one_direction(distance) + one_direction(distance.t()))
+    first_negative = is_negative.to(torch.int64).argmax(dim=-1)
+    negative_indices = candidates.gather(
+        1,
+        first_negative[:, None],
+    ).squeeze(1)
+    anchors = indices[valid]
+    negatives = negative_indices[valid]
+
+    sketch_to_photo = F.triplet_margin_loss(
+        sketch_features[anchors],
+        photo_features[anchors],
+        photo_features[negatives],
+        margin=margin,
+        p=2,
+    )
+    photo_to_sketch = F.triplet_margin_loss(
+        photo_features[anchors],
+        sketch_features[anchors],
+        sketch_features[negatives],
+        margin=margin,
+        p=2,
+    )
+    return 0.5 * (sketch_to_photo + photo_to_sketch)
 
 
 def teacher_semantic_loss(
@@ -109,7 +130,7 @@ def loss_fn(args, features):
     teacher_triplet_loss = torch.zeros((), device=photo_logits.device)
     teacher_semantic = torch.zeros((), device=photo_logits.device)
     if joint_teacher_adapter:
-        teacher_triplet_loss = batch_hard_teacher_triplet_loss(
+        teacher_triplet_loss = standard_teacher_triplet_loss(
             teacher_sketch_features,
             teacher_photo_features,
             labels,
