@@ -243,6 +243,16 @@ if __name__ == "__main__":
             "pretraining skipped"
         )
 
+    model.cache_teacher_features(
+        train_loader.dataset,
+        batch_size=args.batch_size,
+        workers=args.workers,
+        cache_text=(
+            args.teacher_pretrain_epochs > 0 and not adapter_loaded
+        ),
+        show_progress=args.progress,
+    )
+
     trainer_kwargs = dict(
         accelerator="gpu",
         devices=1,
