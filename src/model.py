@@ -41,14 +41,22 @@ def _build_teacher_adapters(args, teacher):
         return None
 
     feature_dim = int(teacher.output_dim)
-    adapters = ModalityAdapters(
-        feature_dim=feature_dim,
-        bottleneck_dim=args.teacher_adapter_bottleneck,
+    adapter_init_seed = (
+        args.seed
+        if args.adapter_init_seed is None
+        else args.adapter_init_seed
     )
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(adapter_init_seed)
+        adapters = ModalityAdapters(
+            feature_dim=feature_dim,
+            bottleneck_dim=args.teacher_adapter_bottleneck,
+        )
     print(
         "[Teacher Adapter] initialized for joint training "
         f"(feature_dim={feature_dim}, "
-        f"bottleneck={args.teacher_adapter_bottleneck})"
+        f"bottleneck={args.teacher_adapter_bottleneck}, "
+        f"seed={adapter_init_seed})"
     )
     return adapters
 

@@ -113,6 +113,12 @@ if __name__ == "__main__":
         help="Random seed for Python, NumPy, PyTorch, and DataLoader workers.",
     )
     parser.add_argument(
+        "--adapter_init_seed",
+        type=int,
+        default=None,
+        help="Teacher-adapter initialization seed; defaults to --seed.",
+    )
+    parser.add_argument(
         "--lambda_cls",
         type=float,
         default=1.0,
