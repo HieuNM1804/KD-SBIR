@@ -11,7 +11,7 @@ from torchmetrics.functional.retrieval import (
 import open_clip
 
 from clip import clip
-from src.prompt_learner import TextEncoder
+from src.text_encoder import TextEncoder
 from src.losses import loss_fn
 from src.teacher_adapters import ModalityAdapters
 
@@ -97,9 +97,7 @@ class CustomCLIP(nn.Module):
         self.teacher_adapters = _build_teacher_adapters(cfg, strong_teacher)
         self._student_text_token_cache = {}
         self._teacher_text_cache = {}
-        print(
-            "[Student Prompt] fixed text template, no visual prompt"
-        )
+        print("[Student] fixed text template")
         print(
             "[Relational KD] sketch-photo branch -> "
             f"active={self.teacher_active}, lambda={cfg.lambda_kd}, "
@@ -133,14 +131,14 @@ class CustomCLIP(nn.Module):
         if cache_key in self._teacher_text_cache:
             return self._teacher_text_cache[cache_key]
 
-        sketch_prompts = [
+        sketch_texts = [
             f"a sketch of a {name.replace('_', ' ')}." for name in classnames
         ]
-        photo_prompts = [
+        photo_texts = [
             f"a photo of a {name.replace('_', ' ')}." for name in classnames
         ]
         tokens = self.model_distill.text_tokenizer(
-            sketch_prompts + photo_prompts
+            sketch_texts + photo_texts
         ).to(device)
         with torch.no_grad():
             text_features = F.normalize(
@@ -157,12 +155,12 @@ class CustomCLIP(nn.Module):
     def get_student_text_features(self, classnames):
         cache_key = tuple(classnames)
         if cache_key not in self._student_text_token_cache:
-            prompts = [
+            texts = [
                 f"a photo/sketch of {name.replace('_', ' ')}."
                 for name in classnames
             ]
             self._student_text_token_cache[cache_key] = torch.cat(
-                [clip.tokenize(prompt) for prompt in prompts]
+                [clip.tokenize(text) for text in texts]
             )
         text_device = self.text_encoder.positional_embedding.device
         tokens = self._student_text_token_cache[cache_key].to(text_device)

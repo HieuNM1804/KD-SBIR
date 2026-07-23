@@ -12,10 +12,10 @@ class TextEncoder(nn.Module):
         self.text_projection = clip_model.text_projection
         self.dtype = clip_model.dtype
 
-    def forward(self, tokenized_prompts):
+    def forward(self, tokenized_text):
         with torch.no_grad():
-            prompts = self.token_embedding(tokenized_prompts).type(self.dtype)
-        x = prompts + self.positional_embedding.type(self.dtype)
+            token_embeddings = self.token_embedding(tokenized_text).type(self.dtype)
+        x = token_embeddings + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND
         for block in self.resblocks:
             x = block(x)
@@ -23,10 +23,9 @@ class TextEncoder(nn.Module):
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_final(x).type(self.dtype)
 
-        # x.shape = [batch_size, n_ctx, transformer.width]
-        # take features from the eot embedding (eot_token is the highest number in each sequence)
+        # Take features from the end-of-text embedding.
         x = (
-            x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)]
+            x[torch.arange(x.shape[0]), tokenized_text.argmax(dim=-1)]
             @ self.text_projection
         )
 
