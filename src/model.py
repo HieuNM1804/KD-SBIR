@@ -80,14 +80,22 @@ def freeze_all_but_ln(m):
 
 
 class CustomCLIP(nn.Module):
-    def __init__(self, cfg, clip_model, classnames, teacher=None):
+    def __init__(
+        self,
+        cfg,
+        clip_model,
+        text_clip_model,
+        classnames,
+        teacher=None,
+    ):
         super().__init__()
         clip_model.apply(freeze_all_but_ln)
+        text_clip_model.apply(freeze_all_but_ln)
         self.dtype = clip_model.dtype
 
         self.ph_encoder = clip_model.visual
         self.sk_encoder = copy.deepcopy(clip_model.visual)
-        self.text_encoder = TextEncoder(clip_model)
+        self.text_encoder = TextEncoder(text_clip_model)
         self.logit_scale = clip_model.logit_scale
 
         # The pretrained teacher is reloaded when needed and must not be saved
@@ -240,6 +248,7 @@ class ZS_SBIR(pl.LightningModule):
         super().__init__()
         self.args = args
         clip_model = _load_clip_model(args.backbone)
+        text_clip_model = _load_clip_model(args.backbone)
 
         self.distance_fn = lambda x, y: F.cosine_similarity(x, y)
         self.best_metric = 1e-3
@@ -248,6 +257,7 @@ class ZS_SBIR(pl.LightningModule):
         self.model = CustomCLIP(
             cfg=args,
             clip_model=clip_model,
+            text_clip_model=text_clip_model,
             classnames=classnames,
             teacher=teacher,
         )
