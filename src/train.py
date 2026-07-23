@@ -198,6 +198,24 @@ if __name__ == "__main__":
     if args.teacher_pretrain_epochs < 0:
         parser.error("--teacher_pretrain_epochs must be non-negative.")
 
+    adapter_ckpt = None
+    if args.teacher_adapter_ckpt:
+        if not os.path.isfile(args.teacher_adapter_ckpt):
+            raise FileNotFoundError(
+                f"Teacher adapter checkpoint not found: "
+                f"{args.teacher_adapter_ckpt}"
+            )
+        adapter_ckpt = torch.load(
+            args.teacher_adapter_ckpt,
+            map_location="cpu",
+        )
+        args.teacher_adapter_bottleneck = int(
+            adapter_ckpt.get(
+                "bottleneck_dim",
+                args.teacher_adapter_bottleneck,
+            )
+        )
+
     checkpoint_callback = ModelCheckpoint(
         monitor="mAP",
         dirpath=f"saved_models/{args.exp_name}",
@@ -214,17 +232,8 @@ if __name__ == "__main__":
         ckpt = torch.load(args.ckpt_path, map_location="cpu")
         model.load_state_dict(ckpt["state_dict"], strict=False)
 
-    adapter_loaded = bool(args.teacher_adapter_ckpt)
+    adapter_loaded = adapter_ckpt is not None
     if adapter_loaded:
-        if not os.path.isfile(args.teacher_adapter_ckpt):
-            raise FileNotFoundError(
-                f"Teacher adapter checkpoint not found: "
-                f"{args.teacher_adapter_ckpt}"
-            )
-        adapter_ckpt = torch.load(
-            args.teacher_adapter_ckpt,
-            map_location="cpu",
-        )
         model.model.teacher_adapters.load_state_dict(
             adapter_ckpt["adapter_state_dict"],
             strict=True,
