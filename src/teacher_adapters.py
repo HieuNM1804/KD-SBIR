@@ -10,7 +10,7 @@ class ResidualAdapter(nn.Module):
         self.norm = nn.LayerNorm(feature_dim)
         self.down = nn.Linear(feature_dim, bottleneck_dim)
         self.up = nn.Linear(bottleneck_dim, feature_dim)
-        nn.init.orthogonal_(self.down.weight, gain=1.0)
+        nn.init.xavier_normal_(self.down.weight)
         nn.init.zeros_(self.down.bias)
         nn.init.zeros_(self.up.weight)
         nn.init.zeros_(self.up.bias)
