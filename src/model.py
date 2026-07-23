@@ -54,7 +54,11 @@ def _build_teacher_adapters(args, teacher):
 
 
 def _load_teacher(args):
-    if args.lambda_kd <= 0 and args.teacher_pretrain_epochs <= 0:
+    if (
+        args.lambda_kd <= 0
+        and args.teacher_pretrain_epochs <= 0
+        and not args.teacher_adapter_ckpt
+    ):
         return None
 
     print(f"[Teacher] Loading {DFN5B_MODEL} in FP16...")

@@ -133,7 +133,10 @@ if __name__ == "__main__":
         "--teacher_pretrain_epochs",
         type=int,
         default=3,
-        help="Epochs used to train teacher adapters before student distillation.",
+        help=(
+            "Epochs used to train teacher adapters before student distillation; "
+            "ignored when --teacher_adapter_ckpt is provided."
+        ),
     )
     parser.add_argument(
         "--workers",
@@ -155,6 +158,15 @@ if __name__ == "__main__":
     )
     parser.add_argument("--teacher_adapter_bottleneck", type=int, default=64)
     parser.add_argument("--teacher_adapter_lr", type=float, default=2e-5)
+    parser.add_argument(
+        "--teacher_adapter_ckpt",
+        type=str,
+        default="",
+        help=(
+            "Standalone teacher-adapter checkpoint. When provided, adapter "
+            "pretraining is skipped and the loaded adapter stays frozen."
+        ),
+    )
     parser.add_argument(
         "--lambda_teacher_retrieval",
         type=float,
@@ -202,6 +214,26 @@ if __name__ == "__main__":
         ckpt = torch.load(args.ckpt_path, map_location="cpu")
         model.load_state_dict(ckpt["state_dict"], strict=False)
 
+    adapter_loaded = bool(args.teacher_adapter_ckpt)
+    if adapter_loaded:
+        if not os.path.isfile(args.teacher_adapter_ckpt):
+            raise FileNotFoundError(
+                f"Teacher adapter checkpoint not found: "
+                f"{args.teacher_adapter_ckpt}"
+            )
+        adapter_ckpt = torch.load(
+            args.teacher_adapter_ckpt,
+            map_location="cpu",
+        )
+        model.model.teacher_adapters.load_state_dict(
+            adapter_ckpt["adapter_state_dict"],
+            strict=True,
+        )
+        print(
+            f"[Teacher Adapter] loaded {args.teacher_adapter_ckpt}; "
+            "pretraining skipped"
+        )
+
     trainer_kwargs = dict(
         accelerator="gpu",
         devices=1,
@@ -211,7 +243,7 @@ if __name__ == "__main__":
         enable_progress_bar=args.progress,
     )
 
-    if args.teacher_pretrain_epochs > 0:
+    if args.teacher_pretrain_epochs > 0 and not adapter_loaded:
         model.set_training_phase("adapter")
         adapter_logger = TensorBoardLogger(
             "tb_logs",
