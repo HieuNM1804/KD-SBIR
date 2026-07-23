@@ -192,6 +192,24 @@ if __name__ == "__main__":
         help="Temperature for the sketch-photo similarity distribution.",
     )
     parser.add_argument(
+        "--lambda_sketch_text_kd",
+        type=float,
+        default=0.0,
+        help="Weight for batch sketch-to-text relational distillation.",
+    )
+    parser.add_argument(
+        "--lambda_photo_text_kd",
+        type=float,
+        default=0.0,
+        help="Weight for batch photo-to-text relational distillation.",
+    )
+    parser.add_argument(
+        "--text_kd_temperature",
+        type=float,
+        default=0.07,
+        help="Temperature for batch image-to-text relational distillation.",
+    )
+    parser.add_argument(
         "--exp_name",
         type=str,
         default="no_student_triplet_worker_invariant",
@@ -252,6 +270,8 @@ if __name__ == "__main__":
         workers=args.workers,
         cache_text=(
             args.teacher_pretrain_epochs > 0 and not adapter_loaded
+            or args.lambda_sketch_text_kd > 0
+            or args.lambda_photo_text_kd > 0
         ),
         show_progress=args.progress,
     )

@@ -59,6 +59,8 @@ def _build_teacher_adapters(args, teacher):
 def _load_teacher(args):
     if (
         args.lambda_kd <= 0
+        and args.lambda_sketch_text_kd <= 0
+        and args.lambda_photo_text_kd <= 0
         and args.teacher_pretrain_epochs <= 0
         and not args.teacher_adapter_ckpt
     ):
@@ -233,6 +235,12 @@ class CustomCLIP(nn.Module):
             "[Relational KD] sketch-photo branch -> "
             f"active={self.teacher_active}, lambda={cfg.lambda_kd}, "
             f"temperature={cfg.kd_temperature}"
+        )
+        print(
+            "[Relational KD] batch image-text branches -> "
+            f"sketch_lambda={cfg.lambda_sketch_text_kd}, "
+            f"photo_lambda={cfg.lambda_photo_text_kd}, "
+            f"temperature={cfg.text_kd_temperature}"
         )
 
     @torch.no_grad()
@@ -420,7 +428,7 @@ class CustomCLIP(nn.Module):
         text_features = F.normalize(text_features, dim=-1)
         image_features = self.encode_student_image(image, modality)
         logits = self.logit_scale.exp() * image_features @ text_features.t()
-        return logits, image_features
+        return logits, image_features, text_features
 
     def forward_adapter(self, x):
         _, _, teacher_photo_base, teacher_sketch_base, label = x
@@ -443,6 +451,8 @@ class CustomCLIP(nn.Module):
             label,
             None,
             None,
+            None,
+            None,
             teacher_sketch_text,
             teacher_photo_text,
         )
@@ -455,15 +465,17 @@ class CustomCLIP(nn.Module):
             teacher_sketch_base,
             label,
         ) = x
-        photo_logits, photo_features = self.get_logits(
+        photo_logits, photo_features, student_photo_text = self.get_logits(
             photo_tensor, "photo"
         )
-        sk_logits, sketch_features = self.get_logits(
+        sk_logits, sketch_features, student_sketch_text = self.get_logits(
             sk_tensor, "sketch"
         )
 
         teacher_photo_features = photo_features.detach()
         teacher_sketch_features = sketch_features.detach()
+        teacher_sketch_text = None
+        teacher_photo_text = None
         if self.teacher_active:
             with torch.no_grad():
                 teacher_photo_features = self.adapt_teacher_feature(
@@ -474,6 +486,12 @@ class CustomCLIP(nn.Module):
                     teacher_sketch_base,
                     "sketch",
                 )
+                if (
+                    self._teacher_sketch_text is not None
+                    and self._teacher_photo_text is not None
+                ):
+                    teacher_sketch_text = self._teacher_sketch_text
+                    teacher_photo_text = self._teacher_photo_text
 
         return (
             photo_features,
@@ -483,8 +501,10 @@ class CustomCLIP(nn.Module):
             label,
             photo_logits,
             sk_logits,
-            None,
-            None,
+            student_photo_text,
+            student_sketch_text,
+            teacher_sketch_text,
+            teacher_photo_text,
         )
 
     def forward(self, x):
@@ -585,6 +605,8 @@ class ZS_SBIR(pl.LightningModule):
         for k, v in loss_dict.items():
             bar_names = {
                 "kd_sketch_photo": "KD_SP",
+                "kd_sketch_text": "KD_SK_TXT",
+                "kd_photo_text": "KD_PH_TXT",
                 "teacher_triplet": "T_TRI",
                 "teacher_semantic": "T_SEM",
             }

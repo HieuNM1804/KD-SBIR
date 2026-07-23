@@ -34,6 +34,49 @@ def relational_kd_loss(
     return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
 
 
+def batch_image_text_relational_kd_loss(
+    student_image,
+    student_text,
+    teacher_image,
+    teacher_text,
+    labels,
+    temperature=0.07,
+):
+    """Match teacher image-to-text relations for the samples in one batch."""
+    student_device = student_image.device
+    labels = labels.to(student_text.device)
+    student_text = student_text.index_select(0, labels)
+
+    # This loss regularizes only the text branch. Image features are optimized
+    # by classification and sketch-photo KD, but act as fixed anchors here.
+    student_image = F.normalize(student_image.detach().float(), dim=-1)
+    student_text = F.normalize(student_text.float(), dim=-1)
+    student_log_probs = F.log_softmax(
+        student_image @ student_text.t() / temperature,
+        dim=-1,
+    )
+
+    with torch.no_grad():
+        teacher_text = teacher_text.index_select(
+            0,
+            labels.to(teacher_text.device),
+        )
+        teacher_image = F.normalize(
+            teacher_image.to(device=student_device, dtype=torch.float32),
+            dim=-1,
+        )
+        teacher_text = F.normalize(
+            teacher_text.to(device=student_device, dtype=torch.float32),
+            dim=-1,
+        )
+        teacher_probs = F.softmax(
+            teacher_image @ teacher_text.t() / temperature,
+            dim=-1,
+        )
+
+    return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
+
+
 def batch_hard_teacher_triplet_loss(
     sketch_features,
     photo_features,
@@ -84,6 +127,8 @@ def loss_fn(args, features, phase):
         labels,
         photo_logits,
         sketch_logits,
+        student_photo_text,
+        student_sketch_text,
         teacher_sketch_text,
         teacher_photo_text,
     ) = features
@@ -112,6 +157,8 @@ def loss_fn(args, features, phase):
         return total_loss, {
             "cls": zero,
             "kd_sketch_photo": zero,
+            "kd_sketch_text": zero,
+            "kd_photo_text": zero,
             "teacher_triplet": teacher_triplet_loss,
             "teacher_semantic": teacher_semantic,
         }
@@ -133,14 +180,41 @@ def loss_fn(args, features, phase):
             teacher_photo_features,
             args.kd_temperature,
         )
+
+    sketch_text_kd = classification_loss.new_zeros(())
+    if args.lambda_sketch_text_kd > 0:
+        sketch_text_kd = batch_image_text_relational_kd_loss(
+            sketch_features,
+            student_sketch_text,
+            teacher_sketch_features,
+            teacher_sketch_text,
+            labels,
+            args.text_kd_temperature,
+        )
+
+    photo_text_kd = classification_loss.new_zeros(())
+    if args.lambda_photo_text_kd > 0:
+        photo_text_kd = batch_image_text_relational_kd_loss(
+            photo_features,
+            student_photo_text,
+            teacher_photo_features,
+            teacher_photo_text,
+            labels,
+            args.text_kd_temperature,
+        )
+
     total_loss = (
         args.lambda_cls * classification_loss
         + args.lambda_kd * kd_loss
+        + args.lambda_sketch_text_kd * sketch_text_kd
+        + args.lambda_photo_text_kd * photo_text_kd
     )
     zero = total_loss.new_zeros(())
     return total_loss, {
         "cls": classification_loss,
         "kd_sketch_photo": kd_loss,
+        "kd_sketch_text": sketch_text_kd,
+        "kd_photo_text": photo_text_kd,
         "teacher_triplet": zero,
         "teacher_semantic": zero,
     }
