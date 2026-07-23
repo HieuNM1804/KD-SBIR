@@ -15,17 +15,19 @@ def relational_kd_loss(
     student_device = student_sketch.device
     student_sketch = F.normalize(student_sketch.float(), dim=-1)
     student_photo = F.normalize(student_photo.float(), dim=-1)
-    teacher_sketch = F.normalize(
-        teacher_sketch.to(device=student_device, dtype=torch.float32), dim=-1
-    )
-    teacher_photo = F.normalize(
-        teacher_photo.to(device=student_device, dtype=torch.float32), dim=-1
-    )
 
     student_logits = student_sketch @ student_photo.t() / temperature
     student_log_probs = F.log_softmax(student_logits, dim=-1)
 
     with torch.no_grad():
+        teacher_sketch = F.normalize(
+            teacher_sketch.to(device=student_device, dtype=torch.float32),
+            dim=-1,
+        )
+        teacher_photo = F.normalize(
+            teacher_photo.to(device=student_device, dtype=torch.float32),
+            dim=-1,
+        )
         teacher_logits = teacher_sketch @ teacher_photo.t() / temperature
         teacher_probs = F.softmax(teacher_logits, dim=-1)
 

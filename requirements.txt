@@ -8,6 +8,4 @@ pillow
 ftfy
 regex
 tqdm
-matplotlib
-scikit-learn
 tensorboard

@@ -13,13 +13,10 @@ class TextEncoder(nn.Module):
         self.dtype = clip_model.dtype
 
     def forward(self, tokenized_text):
-        with torch.no_grad():
-            token_embeddings = self.token_embedding(tokenized_text).type(self.dtype)
+        token_embeddings = self.token_embedding(tokenized_text).type(self.dtype)
         x = token_embeddings + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND
-        for block in self.resblocks:
-            x = block(x)
-
+        x = self.resblocks(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_final(x).type(self.dtype)
 

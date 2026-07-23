@@ -223,7 +223,6 @@ class CLIP(nn.Module):
         x = self.ln_final(x).type(self.dtype)
 
         # Select the end-of-text representation from each sequence.
-        # take features from the eot embedding (eot_token is the highest number in each sequence)
         x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
 
         return x
@@ -321,9 +320,5 @@ def build_model(state_dict: dict):
             del state_dict[key]
 
     convert_weights(model)
-    try:
-        model.load_state_dict(state_dict)
-    except:
-        missing_keys, _ = model.load_state_dict(state_dict, strict=False)
-        print("Weights not found for some missing keys: ", missing_keys)
+    model.load_state_dict(state_dict)
     return model.eval()

@@ -14,7 +14,8 @@ CLIP_STD = [0.26862954, 0.26130258, 0.27577711]
 def sample_seed(global_seed, epoch, index):
     """Stable seed that does not depend on which DataLoader worker gets a sample."""
     key = f"{global_seed}:{epoch}:{index}".encode("utf-8")
-    return int.from_bytes(hashlib.blake2b(key, digest_size=8).digest(), "little") & ((1 << 63) - 1)
+    digest = hashlib.blake2b(key, digest_size=8).digest()
+    return int.from_bytes(digest, "little") & ((1 << 63) - 1)
 
 
 class WorkerInvariantSampler(torch.utils.data.Sampler):
@@ -61,22 +62,27 @@ def normal_transform():
 
 class TrainDataset(torch.utils.data.Dataset):
     def __init__(self, args):
-        self.args = args
-        self.transform1 = normal_transform()
-        self.transform2 = augmented_transform()
-        
-        unseen_classes = UNSEEN_CLASSES[self.args.dataset]
+        self.seed = args.seed
+        self.max_size = args.max_size
+        self.normal_transform = normal_transform()
+        self.augmented_transform = augmented_transform()
 
-        self.all_categories = os.listdir(os.path.join(self.args.root, 'sketch'))
-        self.all_categories = sorted(list(set(self.all_categories) - set(unseen_classes)))
-        
+        sketch_root = os.path.join(args.root, "sketch")
+        excluded = set(UNSEEN_CLASSES[args.dataset]) | {".ipynb_checkpoints"}
+        self.all_categories = sorted(set(os.listdir(sketch_root)) - excluded)
+        self.category_to_label = {
+            category: label for label, category in enumerate(self.all_categories)
+        }
         self.all_sketches_path = []
         self.all_photos_path = {}
 
         for category in self.all_categories:
-            sketch_paths = sorted(glob.glob(os.path.join(self.args.root, 'sketch', category, '*')))
-            photo_paths = sorted(glob.glob(os.path.join(self.args.root, 'photo', category, '*')))
-            
+            sketch_paths = sorted(
+                glob.glob(os.path.join(args.root, "sketch", category, "*"))
+            )
+            photo_paths = sorted(
+                glob.glob(os.path.join(args.root, "photo", category, "*"))
+            )
             self.all_sketches_path.extend(sketch_paths)
             self.all_photos_path[category] = photo_paths
 
@@ -89,57 +95,65 @@ class TrainDataset(torch.utils.data.Dataset):
         else:
             epoch, index = 0, sample_key
 
-        current_seed = sample_seed(self.args.seed, epoch, index)
+        current_seed = sample_seed(self.seed, epoch, index)
         photo_rng = np.random.default_rng(current_seed)
-        filepath = self.all_sketches_path[index]                
+        filepath = self.all_sketches_path[index]
         category = filepath.split(os.path.sep)[-2]
 
-        sk_path  = filepath
         photo_paths = self.all_photos_path[category]
         img_path = photo_paths[photo_rng.integers(len(photo_paths))]
 
-        sk_data  = ImageOps.pad(Image.open(sk_path).convert('RGB'),  size=(self.args.max_size, self.args.max_size))
-        img_data = ImageOps.pad(Image.open(img_path).convert('RGB'), size=(self.args.max_size, self.args.max_size))
+        sk_data = load_image(filepath, self.max_size)
+        img_data = load_image(img_path, self.max_size)
 
         # torchvision v1 random transforms use the process-global torch RNG.
         # Each worker is a separate process, and fork_rng restores its state
         # after this sample, so scheduling/prefetch cannot change augmentation.
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(current_seed)
-            sk_tensor = self.transform1(sk_data)
-            img_tensor = self.transform1(img_data)
-            sk_aug_tensor = self.transform2(sk_data)
-            img_aug_tensor = self.transform2(img_data)
-        
-        return img_tensor, sk_tensor, img_aug_tensor, sk_aug_tensor, self.all_categories.index(category)
+            sk_tensor = self.normal_transform(sk_data)
+            img_tensor = self.normal_transform(img_data)
+            sk_aug_tensor = self.augmented_transform(sk_data)
+            img_aug_tensor = self.augmented_transform(img_data)
+
+        return (
+            img_tensor,
+            sk_tensor,
+            img_aug_tensor,
+            sk_aug_tensor,
+            self.category_to_label[category],
+        )
 
 
 class ValidDataset(torch.utils.data.Dataset):
-    def __init__(self, args, mode='photo'):
-        super(ValidDataset, self).__init__()
-        self.args = args
-        self.mode = mode
+    def __init__(self, args, mode="photo"):
+        super().__init__()
+        self.max_size = args.max_size
         self.transform = normal_transform()
-        self.unseen_classes = UNSEEN_CLASSES[self.args.dataset]
-            
+        self.unseen_classes = UNSEEN_CLASSES[args.dataset]
+
         unseen_paths = []
         for category in self.unseen_classes:
-            if self.mode == 'photo':
-                paths = glob.glob(os.path.join(self.args.root, 'photo', category, '*'))
-            else:
-                paths = glob.glob(os.path.join(self.args.root, 'sketch', category, '*'))
+            paths = glob.glob(
+                os.path.join(args.root, mode, category, "*")
+            )
             unseen_paths.extend(sorted(paths))
 
-        self.paths = list(unseen_paths)
+        self.paths = unseen_paths
 
     def __getitem__(self, index):
-        filepath = self.paths[index]                
+        filepath = self.paths[index]
         category = filepath.split(os.path.sep)[-2]
-        
-        image = ImageOps.pad(Image.open(filepath).convert('RGB'),  size=(self.args.max_size, self.args.max_size))
+
+        image = load_image(filepath, self.max_size)
         image_tensor = self.transform(image)
-        
+
         return image_tensor, self.unseen_classes.index(category)
     
     def __len__(self):
         return len(self.paths)
+
+
+def load_image(path, size):
+    with Image.open(path) as image:
+        return ImageOps.pad(image.convert("RGB"), size=(size, size))
