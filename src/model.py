@@ -71,12 +71,11 @@ def _load_teacher(args):
     return teacher
 
 
-def freeze_all_but_ln(m):
-    if not isinstance(m, nn.LayerNorm):
-        if hasattr(m, "weight") and m.weight is not None:
-            m.weight.requires_grad_(False)
-        if hasattr(m, "bias") and m.bias is not None:
-            m.bias.requires_grad_(False)
+def freeze_clip_except_layer_norm(clip_model):
+    clip_model.requires_grad_(False)
+    for module in clip_model.modules():
+        if isinstance(module, nn.LayerNorm):
+            module.requires_grad_(True)
 
 
 class CustomCLIP(nn.Module):
@@ -88,7 +87,7 @@ class CustomCLIP(nn.Module):
         teacher=None,
     ):
         super().__init__()
-        clip_model.apply(freeze_all_but_ln)
+        freeze_clip_except_layer_norm(clip_model)
         self.dtype = clip_model.dtype
 
         self.ph_encoder = clip_model.visual
