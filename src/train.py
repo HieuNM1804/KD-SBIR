@@ -107,6 +107,12 @@ if __name__ == "__main__":
     parser.add_argument("--backbone", type=str, default="ViT-B/32")
     parser.add_argument("--max_size", type=int, default=224)
     parser.add_argument(
+        "--n_ctx",
+        type=int,
+        default=4,
+        help="Number of learnable visual prompt tokens for each modality.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,

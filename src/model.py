@@ -78,6 +78,22 @@ def freeze_clip_except_layer_norm(clip_model):
             module.requires_grad_(True)
 
 
+class VisualPromptLearner(nn.Module):
+    def __init__(self, n_ctx, width, seed):
+        super().__init__()
+        if n_ctx <= 0:
+            raise ValueError(f"n_ctx must be positive, got {n_ctx}.")
+
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(seed)
+        prompt = torch.empty(n_ctx, width)
+        nn.init.normal_(prompt, std=0.02, generator=generator)
+        self.prompt = nn.Parameter(prompt)
+
+    def forward(self):
+        return self.prompt
+
+
 class CustomCLIP(nn.Module):
     def __init__(
         self,
@@ -92,6 +108,17 @@ class CustomCLIP(nn.Module):
 
         self.ph_encoder = clip_model.visual
         self.sk_encoder = copy.deepcopy(clip_model.visual)
+        visual_width = self.ph_encoder.ln_pre.normalized_shape[0]
+        self.photo_visual_prompt = VisualPromptLearner(
+            cfg.n_ctx,
+            visual_width,
+            cfg.seed,
+        )
+        self.sketch_visual_prompt = VisualPromptLearner(
+            cfg.n_ctx,
+            visual_width,
+            cfg.seed + 1,
+        )
         self.text_encoder = TextEncoder(clip_model)
         self.logit_scale = clip_model.logit_scale
 
@@ -115,7 +142,10 @@ class CustomCLIP(nn.Module):
         self.register_buffer("_teacher_sketch_text", None, persistent=False)
         self.register_buffer("_teacher_photo_text", None, persistent=False)
 
-        print("[Student] fixed text template")
+        print(
+            "[Student] fixed text template; "
+            f"{cfg.n_ctx} learnable visual tokens per modality"
+        )
         print(
             "[Relational KD] sketch-photo branch -> "
             f"active={self.teacher_active}, lambda={cfg.lambda_kd}, "
@@ -175,10 +205,12 @@ class CustomCLIP(nn.Module):
     def encode_student_image(self, image, modality):
         if modality == "photo":
             image_encoder = self.ph_encoder
+            visual_prompt = self.photo_visual_prompt()
         else:
             image_encoder = self.sk_encoder
+            visual_prompt = self.sketch_visual_prompt()
 
-        features = image_encoder(image.type(self.dtype))
+        features = image_encoder(image.type(self.dtype), visual_prompt)
         return features / features.norm(dim=-1, keepdim=True)
 
     def get_logits(self, image, text_features, modality):

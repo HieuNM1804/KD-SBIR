@@ -103,7 +103,11 @@ class VisionTransformer(nn.Module):
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
-    def forward(self, x: torch.Tensor):
+    def forward(
+        self,
+        x: torch.Tensor,
+        prompt: torch.Tensor = None,
+    ):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
@@ -118,6 +122,16 @@ class VisionTransformer(nn.Module):
             dim=1,
         )  # shape = [*, grid ** 2 + 1, width]
         x = x + self.positional_embedding.to(x.dtype)
+
+        if prompt is not None:
+            if prompt.ndim != 2 or prompt.shape[1] != x.shape[2]:
+                raise ValueError(
+                    "Visual prompt must have shape "
+                    f"[n_ctx, {x.shape[2]}], got {tuple(prompt.shape)}."
+                )
+            prompt = prompt.to(device=x.device, dtype=x.dtype)
+            prompt = prompt.unsqueeze(0).expand(x.shape[0], -1, -1)
+            x = torch.cat((x, prompt), dim=1)
 
         x = self.ln_pre(x)
 
