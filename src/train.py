@@ -88,7 +88,12 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default="sketchy_1",
                         choices=sorted(UNSEEN_CLASSES), help="zero-shot split")
     parser.add_argument("--backbone", type=str, default="ViT-B/32")
-    parser.add_argument("--n_ctx", type=int, default=4)
+    parser.add_argument(
+        "--n_ctx",
+        type=int,
+        default=4,
+        help="Accepted for command compatibility; unused without visual prompts.",
+    )
     parser.add_argument("--max_size", type=int, default=224)
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for Python, NumPy, PyTorch, and DataLoader workers.")

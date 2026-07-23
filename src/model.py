@@ -85,9 +85,6 @@ class CustomCLIP(nn.Module):
         clip_model.apply(freeze_all_but_ln)
         clip_model_distill.apply(freeze_all_but_ln)
         self.dtype = clip_model.dtype
-        prompt_dim = clip_model.visual.ln_pre.weight.shape[0]
-        self.sk_prompt = nn.Parameter(torch.randn(cfg.n_ctx, prompt_dim))
-        self.img_prompt = nn.Parameter(torch.randn(cfg.n_ctx, prompt_dim))
         
         self.ph_encoder = copy.deepcopy(clip_model.visual)
         self.sk_encoder = copy.deepcopy(clip_model.visual)
@@ -101,8 +98,7 @@ class CustomCLIP(nn.Module):
         self._student_text_token_cache = {}
         self._teacher_text_cache = {}
         print(
-            "[Student Prompt] fixed text template, Sketch-LVM-style random "
-            f"visual tokens (n_ctx={cfg.n_ctx})"
+            "[Student Prompt] fixed text template, no visual prompt"
         )
         print(
             "[Relational KD] sketch-photo branch -> "
@@ -175,17 +171,13 @@ class CustomCLIP(nn.Module):
     def get_logits(self, img_tensor, classnames, type='photo'):
         if type=='photo':
             image_encoder = self.ph_encoder
-            visual_prompt = self.img_prompt
         else:
             image_encoder = self.sk_encoder
-            visual_prompt = self.sk_prompt
             
         logit_scale = self.logit_scale.exp()
         text_features = self.get_student_text_features(classnames)
 
-        image_features = image_encoder(
-            img_tensor.type(self.dtype), visual_prompt
-        )
+        image_features = image_encoder(img_tensor.type(self.dtype))
         
         image_features_normalize = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
