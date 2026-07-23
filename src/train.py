@@ -110,7 +110,10 @@ if __name__ == "__main__":
         "--n_ctx",
         type=int,
         default=4,
-        help="Number of learnable visual prompt tokens for each modality.",
+        help=(
+            "Number of learnable text context tokens projected to the visual "
+            "encoder for each modality."
+        ),
     )
     parser.add_argument(
         "--seed",

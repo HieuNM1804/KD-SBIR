@@ -12,9 +12,11 @@ class TextEncoder(nn.Module):
         self.text_projection = clip_model.text_projection
         self.dtype = clip_model.dtype
 
-    def forward(self, tokenized_text):
-        token_embeddings = self.token_embedding(tokenized_text).type(self.dtype)
-        x = token_embeddings + self.positional_embedding.type(self.dtype)
+    def forward(self, tokenized_text, prompt_embeddings=None):
+        if prompt_embeddings is None:
+            prompt_embeddings = self.token_embedding(tokenized_text)
+        x = prompt_embeddings.type(self.dtype)
+        x = x + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.resblocks(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
@@ -22,7 +24,10 @@ class TextEncoder(nn.Module):
 
         # Take features from the end-of-text embedding.
         x = (
-            x[torch.arange(x.shape[0]), tokenized_text.argmax(dim=-1)]
+            x[
+                torch.arange(x.shape[0], device=x.device),
+                tokenized_text.argmax(dim=-1),
+            ]
             @ self.text_projection
         )
 
