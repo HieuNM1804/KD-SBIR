@@ -75,7 +75,7 @@ def teacher_semantic_loss(
     )
 
 
-def loss_fn(args, features):
+def loss_fn(args, features, phase):
     (
         photo_features,
         sketch_features,
@@ -84,31 +84,12 @@ def loss_fn(args, features):
         labels,
         photo_logits,
         sketch_logits,
-        teacher_active,
-        joint_teacher_adapter,
         teacher_sketch_text,
         teacher_photo_text,
     ) = features
 
-    labels = labels.to(photo_logits.device)
-    classification_loss = (
-        F.cross_entropy(photo_logits, labels)
-        + F.cross_entropy(sketch_logits, labels)
-    )
-
-    kd_loss = torch.zeros((), device=photo_logits.device)
-    if teacher_active and args.lambda_kd > 0:
-        kd_loss = relational_kd_loss(
-            sketch_features,
-            photo_features,
-            teacher_sketch_features,
-            teacher_photo_features,
-            args.kd_temperature,
-        )
-
-    teacher_triplet_loss = torch.zeros((), device=photo_logits.device)
-    teacher_semantic = torch.zeros((), device=photo_logits.device)
-    if joint_teacher_adapter:
+    if phase == "adapter":
+        labels = labels.to(teacher_photo_features.device)
         teacher_triplet_loss = batch_hard_teacher_triplet_loss(
             teacher_sketch_features,
             teacher_photo_features,
@@ -123,16 +104,43 @@ def loss_fn(args, features):
             teacher_photo_text,
             args.teacher_temperature,
         )
+        total_loss = (
+            args.lambda_teacher_retrieval * teacher_triplet_loss
+            + args.lambda_teacher_semantic * teacher_semantic
+        )
+        zero = total_loss.new_zeros(())
+        return total_loss, {
+            "cls": zero,
+            "kd_sketch_photo": zero,
+            "teacher_triplet": teacher_triplet_loss,
+            "teacher_semantic": teacher_semantic,
+        }
 
+    if phase != "student":
+        raise ValueError(f"Unknown training phase: {phase}.")
+
+    labels = labels.to(photo_logits.device)
+    classification_loss = (
+        F.cross_entropy(photo_logits, labels)
+        + F.cross_entropy(sketch_logits, labels)
+    )
+    kd_loss = classification_loss.new_zeros(())
+    if args.lambda_kd > 0:
+        kd_loss = relational_kd_loss(
+            sketch_features,
+            photo_features,
+            teacher_sketch_features,
+            teacher_photo_features,
+            args.kd_temperature,
+        )
     total_loss = (
         args.lambda_cls * classification_loss
         + args.lambda_kd * kd_loss
-        + args.lambda_teacher_retrieval * teacher_triplet_loss
-        + args.lambda_teacher_semantic * teacher_semantic
     )
+    zero = total_loss.new_zeros(())
     return total_loss, {
         "cls": classification_loss,
         "kd_sketch_photo": kd_loss,
-        "teacher_triplet": teacher_triplet_loss,
-        "teacher_semantic": teacher_semantic,
+        "teacher_triplet": zero,
+        "teacher_semantic": zero,
     }

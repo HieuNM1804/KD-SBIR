@@ -37,7 +37,7 @@ def _load_clip_model(backbone):
 
 
 def _build_teacher_adapters(args, teacher):
-    if not args.joint_teacher_adapter:
+    if teacher is None:
         return None
 
     feature_dim = int(teacher.output_dim)
@@ -46,7 +46,7 @@ def _build_teacher_adapters(args, teacher):
         bottleneck_dim=args.teacher_adapter_bottleneck,
     )
     print(
-        "[Teacher Adapter] initialized for joint training "
+        "[Teacher Adapter] initialized for pretraining "
         f"(feature_dim={feature_dim}, "
         f"bottleneck={args.teacher_adapter_bottleneck})"
     )
@@ -54,7 +54,7 @@ def _build_teacher_adapters(args, teacher):
 
 
 def _load_teacher(args):
-    if args.lambda_kd <= 0 and not args.joint_teacher_adapter:
+    if args.lambda_kd <= 0 and args.teacher_pretrain_epochs <= 0:
         return None
 
     print(f"[Teacher] Loading {DFN5B_MODEL} in FP16...")
@@ -65,8 +65,7 @@ def _load_teacher(args):
         device=device,
     )
     teacher.eval().requires_grad_(False)
-    if args.joint_teacher_adapter:
-        teacher.text_tokenizer = open_clip.get_tokenizer(DFN5B_MODEL)
+    teacher.text_tokenizer = open_clip.get_tokenizer(DFN5B_MODEL)
     teacher.output_dim = DFN5B_OUTPUT_DIM
     return teacher
 
@@ -126,7 +125,6 @@ class CustomCLIP(nn.Module):
         # inside every student checkpoint.
         object.__setattr__(self, "_teacher", teacher)
         self.teacher_active = teacher is not None
-        self.joint_teacher_adapter = cfg.joint_teacher_adapter
         self.teacher_adapters = _build_teacher_adapters(cfg, teacher)
 
         self.classnames = tuple(classnames)
@@ -141,6 +139,22 @@ class CustomCLIP(nn.Module):
         )
         self.register_buffer("_teacher_sketch_text", None, persistent=False)
         self.register_buffer("_teacher_photo_text", None, persistent=False)
+
+        adapter_ids = {
+            id(parameter)
+            for parameter in (
+                self.teacher_adapters.parameters()
+                if self.teacher_adapters is not None
+                else ()
+            )
+        }
+        self._student_trainable_parameters = tuple(
+            parameter
+            for parameter in self.parameters()
+            if parameter.requires_grad and id(parameter) not in adapter_ids
+        )
+        self.training_phase = "student"
+        self.set_training_phase(self.training_phase)
 
         print(
             "[Student] fixed text template; "
@@ -157,8 +171,38 @@ class CustomCLIP(nn.Module):
         if self._teacher is not None:
             self._teacher.eval()
         if self.teacher_adapters is not None:
-            self.teacher_adapters.train(mode and self.joint_teacher_adapter)
+            self.teacher_adapters.train(
+                mode and self.training_phase == "adapter"
+            )
         return self
+
+    def set_training_phase(self, phase):
+        if phase not in {"adapter", "student"}:
+            raise ValueError(f"Unknown training phase: {phase}.")
+        if phase == "adapter" and self.teacher_adapters is None:
+            raise RuntimeError("Teacher adapter pretraining requires a teacher.")
+
+        self.training_phase = phase
+        train_student = phase == "student"
+        for parameter in self._student_trainable_parameters:
+            parameter.requires_grad_(train_student)
+
+        if self.teacher_adapters is not None:
+            self.teacher_adapters.requires_grad_(not train_student)
+            self.teacher_adapters.train(
+                self.training and not train_student
+            )
+
+        print(
+            f"[Training Phase] {phase}: "
+            f"student={'trainable' if train_student else 'frozen'}, "
+            f"teacher_adapter={'frozen' if train_student else 'trainable'}"
+        )
+
+    def trainable_parameters(self):
+        if self.training_phase == "adapter":
+            return tuple(self.teacher_adapters.parameters())
+        return self._student_trainable_parameters
 
     def adapt_teacher_feature(self, feature, modality):
         if self.teacher_adapters is None:
@@ -218,7 +262,60 @@ class CustomCLIP(nn.Module):
         logits = self.logit_scale.exp() * image_features @ text_features.t()
         return logits, image_features
 
-    def forward(self, x):
+    def encode_teacher_images(
+        self,
+        photo_aug_tensor,
+        sketch_aug_tensor,
+        adapter_grad,
+    ):
+        with torch.no_grad():
+            teacher_photo_base = self._teacher.encode_image(
+                photo_aug_tensor.half()
+            )
+            teacher_sketch_base = self._teacher.encode_image(
+                sketch_aug_tensor.half()
+            )
+
+        if adapter_grad:
+            teacher_photo = self.adapt_teacher_feature(
+                teacher_photo_base, "photo"
+            )
+            teacher_sketch = self.adapt_teacher_feature(
+                teacher_sketch_base, "sketch"
+            )
+        else:
+            with torch.no_grad():
+                teacher_photo = self.adapt_teacher_feature(
+                    teacher_photo_base, "photo"
+                )
+                teacher_sketch = self.adapt_teacher_feature(
+                    teacher_sketch_base, "sketch"
+                )
+        return teacher_photo, teacher_sketch
+
+    def forward_adapter(self, x):
+        _, _, photo_aug_tensor, sketch_aug_tensor, label = x
+        teacher_photo, teacher_sketch = self.encode_teacher_images(
+            photo_aug_tensor,
+            sketch_aug_tensor,
+            adapter_grad=True,
+        )
+        teacher_sketch_text, teacher_photo_text = (
+            self.get_teacher_text_features()
+        )
+        return (
+            None,
+            None,
+            teacher_photo,
+            teacher_sketch,
+            label,
+            None,
+            None,
+            teacher_sketch_text,
+            teacher_photo_text,
+        )
+
+    def forward_student(self, x):
         photo_tensor, sk_tensor, photo_aug_tensor, sk_aug_tensor, label = x
         text_features = self.get_student_text_features()
         text_features = text_features / text_features.norm(
@@ -233,26 +330,14 @@ class CustomCLIP(nn.Module):
 
         teacher_photo_features = photo_features.detach()
         teacher_sketch_features = sketch_features.detach()
-        teacher_sketch_text = None
-        teacher_photo_text = None
         if self.teacher_active:
-            with torch.no_grad():
-                teacher_photo_base = self._teacher.encode_image(
-                    photo_aug_tensor.half()
+            teacher_photo_features, teacher_sketch_features = (
+                self.encode_teacher_images(
+                    photo_aug_tensor,
+                    sk_aug_tensor,
+                    adapter_grad=False,
                 )
-                teacher_sketch_base = self._teacher.encode_image(
-                    sk_aug_tensor.half()
-                )
-            teacher_photo_features = self.adapt_teacher_feature(
-                teacher_photo_base, "photo"
             )
-            teacher_sketch_features = self.adapt_teacher_feature(
-                teacher_sketch_base, "sketch"
-            )
-            if self.joint_teacher_adapter:
-                teacher_sketch_text, teacher_photo_text = (
-                    self.get_teacher_text_features()
-                )
 
         return (
             photo_features,
@@ -262,11 +347,14 @@ class CustomCLIP(nn.Module):
             label,
             photo_logits,
             sk_logits,
-            self.teacher_active,
-            self.joint_teacher_adapter,
-            teacher_sketch_text,
-            teacher_photo_text,
+            None,
+            None,
         )
+
+    def forward(self, x):
+        if self.training_phase == "adapter":
+            return self.forward_adapter(x)
+        return self.forward_student(x)
 
     def extract_feature(self, image, modality):
         return self.encode_student_image(image, modality)
@@ -290,42 +378,36 @@ class ZS_SBIR(pl.LightningModule):
             classnames=classnames,
             teacher=teacher,
         )
+        self.training_phase = "student"
 
         self.val_step_outputs_sk = []
         self.val_step_outputs_ph = []
-        
+
+    def set_training_phase(self, phase):
+        self.training_phase = phase
+        self.model.set_training_phase(phase)
+
     def configure_optimizers(self):
-        adapter_params = (
-            [p for p in self.model.teacher_adapters.parameters() if p.requires_grad]
-            if self.model.teacher_adapters is not None
-            else []
-        )
-        adapter_param_ids = {id(p) for p in adapter_params}
-        student_params = [
-            p for p in self.model.parameters()
-            if p.requires_grad and id(p) not in adapter_param_ids
+        parameters = [
+            parameter
+            for parameter in self.model.trainable_parameters()
+            if parameter.requires_grad
         ]
-        param_groups = [{"params": student_params, "lr": self.args.lr}]
-        if adapter_params:
-            param_groups.append(
-                {"params": adapter_params, "lr": self.args.teacher_adapter_lr}
-            )
+        learning_rate = (
+            self.args.teacher_adapter_lr
+            if self.training_phase == "adapter"
+            else self.args.lr
+        )
         optimizer = torch.optim.SGD(
-            params=param_groups,
-            lr=self.args.lr,
+            params=parameters,
+            lr=learning_rate,
             weight_decay=1e-3,
             momentum=0.9,
         )
-        trainable = sum(
-            p.numel()
-            for group in optimizer.param_groups
-            for p in group["params"]
-            if p.requires_grad
-        )
+        trainable = sum(parameter.numel() for parameter in parameters)
         print(
-            "[Optimizer] SGD "
-            f"lr={self.args.lr}, momentum=0.9, weight_decay=1e-3, "
-            f"teacher_adapter_lr={self.args.teacher_adapter_lr if adapter_params else 'off'}, "
+            f"[Optimizer:{self.training_phase}] SGD "
+            f"lr={learning_rate}, momentum=0.9, weight_decay=1e-3, "
             f"trainable_params={trainable:,}"
         )
         
@@ -342,7 +424,11 @@ class ZS_SBIR(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         features = self(batch)
-        loss, loss_dict = loss_fn(self.args, features)
+        loss, loss_dict = loss_fn(
+            self.args,
+            features,
+            phase=self.training_phase,
+        )
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         for k, v in loss_dict.items():
             bar_names = {

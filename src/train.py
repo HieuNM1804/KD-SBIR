@@ -130,6 +130,12 @@ if __name__ == "__main__":
     parser.add_argument("--test_batch_size", type=int, default=1024)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument(
+        "--teacher_pretrain_epochs",
+        type=int,
+        default=3,
+        help="Epochs used to train teacher adapters before student distillation.",
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=4,
@@ -146,18 +152,6 @@ if __name__ == "__main__":
         action="store_false",
         dest="progress",
         help="Disable the tqdm progress bar.",
-    )
-    parser.add_argument(
-        "--joint_teacher_adapter",
-        action="store_true",
-        default=True,
-        help="Train DFN5B sketch/photo adapters jointly with the student.",
-    )
-    parser.add_argument(
-        "--no_joint_teacher_adapter",
-        action="store_false",
-        dest="joint_teacher_adapter",
-        help="Disable joint teacher-adapter training for ablations.",
     )
     parser.add_argument("--teacher_adapter_bottleneck", type=int, default=64)
     parser.add_argument("--teacher_adapter_lr", type=float, default=2e-5)
@@ -189,7 +183,8 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    logger = TensorBoardLogger("tb_logs", name=args.exp_name)
+    if args.teacher_pretrain_epochs < 0:
+        parser.error("--teacher_pretrain_epochs must be non-negative.")
 
     checkpoint_callback = ModelCheckpoint(
         monitor="mAP",
@@ -201,25 +196,75 @@ if __name__ == "__main__":
     )
 
     train_loader, val_sketch_loader, val_photo_loader = get_loaders(args)
-    progress_bar = TQDMProgressBar(refresh_rate=20)
-
-    trainer = Trainer(
-        accelerator="gpu",
-        devices=1,
-        min_epochs=1,
-        max_epochs=args.epochs,
-        benchmark=False,
-        deterministic=True,
-        logger=logger,
-        check_val_every_n_epoch=1,
-        enable_progress_bar=args.progress,
-        callbacks=[checkpoint_callback, progress_bar],
-    )
-
     model = ZS_SBIR(args=args, classnames=train_loader.dataset.all_categories)
     if os.path.isfile(args.ckpt_path):
-        print(f"Resuming training from {args.ckpt_path}")
+        print(f"Loading model weights from {args.ckpt_path}")
         ckpt = torch.load(args.ckpt_path, map_location="cpu")
         model.load_state_dict(ckpt["state_dict"], strict=False)
 
-    trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])
+    trainer_kwargs = dict(
+        accelerator="gpu",
+        devices=1,
+        min_epochs=1,
+        benchmark=False,
+        deterministic=True,
+        enable_progress_bar=args.progress,
+    )
+
+    if args.teacher_pretrain_epochs > 0:
+        model.set_training_phase("adapter")
+        adapter_logger = TensorBoardLogger(
+            "tb_logs",
+            name=args.exp_name,
+            version="adapter_pretrain",
+        )
+        adapter_trainer = Trainer(
+            **trainer_kwargs,
+            max_epochs=args.teacher_pretrain_epochs,
+            logger=adapter_logger,
+            limit_val_batches=0,
+            enable_checkpointing=False,
+            callbacks=[TQDMProgressBar(refresh_rate=20)],
+        )
+        adapter_trainer.fit(model, train_loader)
+
+        adapter_dir = os.path.join("saved_models", args.exp_name)
+        os.makedirs(adapter_dir, exist_ok=True)
+        adapter_path = os.path.join(adapter_dir, "teacher_adapter_last.pt")
+        adapter_state = {
+            name: tensor.detach().cpu()
+            for name, tensor in model.model.teacher_adapters.state_dict().items()
+        }
+        torch.save(
+            {
+                "adapter_state_dict": adapter_state,
+                "epochs": args.teacher_pretrain_epochs,
+                "bottleneck_dim": args.teacher_adapter_bottleneck,
+            },
+            adapter_path,
+        )
+        print(f"[Teacher Adapter] saved to {adapter_path}")
+
+    # Reset sample order so student results do not depend on pretraining length.
+    train_loader.sampler.epoch = 0
+    model.set_training_phase("student")
+    student_logger = TensorBoardLogger(
+        "tb_logs",
+        name=args.exp_name,
+        version="student_distill",
+    )
+    student_trainer = Trainer(
+        **trainer_kwargs,
+        max_epochs=args.epochs,
+        logger=student_logger,
+        check_val_every_n_epoch=1,
+        callbacks=[
+            checkpoint_callback,
+            TQDMProgressBar(refresh_rate=20),
+        ],
+    )
+    student_trainer.fit(
+        model,
+        train_loader,
+        [val_sketch_loader, val_photo_loader],
+    )
