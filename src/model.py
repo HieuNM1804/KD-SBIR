@@ -78,20 +78,82 @@ def freeze_clip_except_layer_norm(clip_model):
             module.requires_grad_(True)
 
 
-class VisualPromptLearner(nn.Module):
-    def __init__(self, n_ctx, width, seed):
+class MultiModalPromptLearner(nn.Module):
+    def __init__(
+        self,
+        n_ctx,
+        text_width,
+        visual_width,
+        classnames,
+        token_embedding,
+        modality,
+        seed,
+    ):
         super().__init__()
         if n_ctx <= 0:
             raise ValueError(f"n_ctx must be positive, got {n_ctx}.")
 
+        prompt_prefix = (
+            "a photo of a" if modality == "photo" else "a sketch of a"
+        )
         generator = torch.Generator(device="cpu")
         generator.manual_seed(seed)
-        prompt = torch.empty(n_ctx, width)
-        nn.init.normal_(prompt, std=0.02, generator=generator)
-        self.prompt = nn.Parameter(prompt)
+        context = torch.empty(n_ctx, text_width)
+        nn.init.normal_(context, std=0.02, generator=generator)
+        with torch.no_grad():
+            prefix_tokens = clip.tokenize(prompt_prefix)
+            prefix_embedding = token_embedding(prefix_tokens).float()
+            initialized_tokens = min(n_ctx, 4)
+            context[:initialized_tokens] = prefix_embedding[
+                0, 1 : 1 + initialized_tokens
+            ]
+        self.ctx = nn.Parameter(context)
+
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(seed + 1000)
+            self.projection = nn.Linear(text_width, visual_width)
+
+        placeholders = " ".join(["X"] * n_ctx)
+        raw_prompts = [
+            f"{placeholders} {name.replace('_', ' ')}."
+            for name in classnames
+        ]
+        tokenized_prompts = clip.tokenize(raw_prompts)
+        with torch.no_grad():
+            embeddings = token_embedding(tokenized_prompts).detach()
+        self.register_buffer(
+            "tokenized_prompts",
+            tokenized_prompts,
+            persistent=False,
+        )
+        self.register_buffer(
+            "token_prefix",
+            embeddings[:, :1],
+            persistent=False,
+        )
+        self.register_buffer(
+            "token_suffix",
+            embeddings[:, 1 + n_ctx :],
+            persistent=False,
+        )
+
+    def text_prompts(self):
+        context = self.ctx.to(dtype=self.token_prefix.dtype)
+        context = context.unsqueeze(0).expand(
+            self.token_prefix.shape[0], -1, -1
+        )
+        prompts = torch.cat(
+            (self.token_prefix, context, self.token_suffix),
+            dim=1,
+        )
+        return self.tokenized_prompts, prompts
+
+    def visual_prompt(self):
+        return self.projection(self.ctx)
 
     def forward(self):
-        return self.prompt
+        tokenized_prompts, text_prompts = self.text_prompts()
+        return tokenized_prompts, text_prompts, self.visual_prompt()
 
 
 class CustomCLIP(nn.Module):
@@ -109,14 +171,24 @@ class CustomCLIP(nn.Module):
         self.ph_encoder = clip_model.visual
         self.sk_encoder = copy.deepcopy(clip_model.visual)
         visual_width = self.ph_encoder.ln_pre.normalized_shape[0]
-        self.photo_visual_prompt = VisualPromptLearner(
+        text_width = clip_model.ln_final.normalized_shape[0]
+        self.classnames = tuple(classnames)
+        self.photo_prompt_learner = MultiModalPromptLearner(
             cfg.n_ctx,
+            text_width,
             visual_width,
+            self.classnames,
+            clip_model.token_embedding,
+            "photo",
             cfg.seed,
         )
-        self.sketch_visual_prompt = VisualPromptLearner(
+        self.sketch_prompt_learner = MultiModalPromptLearner(
             cfg.n_ctx,
+            text_width,
             visual_width,
+            self.classnames,
+            clip_model.token_embedding,
+            "sketch",
             cfg.seed + 1,
         )
         self.text_encoder = TextEncoder(clip_model)
@@ -129,22 +201,12 @@ class CustomCLIP(nn.Module):
         self.joint_teacher_adapter = cfg.joint_teacher_adapter
         self.teacher_adapters = _build_teacher_adapters(cfg, teacher)
 
-        self.classnames = tuple(classnames)
-        student_texts = [
-            f"a photo/sketch of {name.replace('_', ' ')}."
-            for name in self.classnames
-        ]
-        self.register_buffer(
-            "_student_text_tokens",
-            clip.tokenize(student_texts),
-            persistent=False,
-        )
         self.register_buffer("_teacher_sketch_text", None, persistent=False)
         self.register_buffer("_teacher_photo_text", None, persistent=False)
 
         print(
-            "[Student] fixed text template; "
-            f"{cfg.n_ctx} learnable visual tokens per modality"
+            "[Student] modality-specific text prompts projected to visual; "
+            f"{cfg.n_ctx} learnable context tokens per modality"
         )
         print(
             "[Relational KD] sketch-photo branch -> "
@@ -199,36 +261,44 @@ class CustomCLIP(nn.Module):
             self._teacher_photo_text,
         )
 
-    def get_student_text_features(self):
-        return self.text_encoder(self._student_text_tokens)
+    def get_prompt_learner(self, modality):
+        if modality == "photo":
+            return self.photo_prompt_learner
+        return self.sketch_prompt_learner
+
+    def get_student_text_features(self, modality):
+        prompt_learner = self.get_prompt_learner(modality)
+        tokenized_prompts, text_prompts = (
+            prompt_learner.text_prompts()
+        )
+        return self.text_encoder(tokenized_prompts, text_prompts)
 
     def encode_student_image(self, image, modality):
         if modality == "photo":
             image_encoder = self.ph_encoder
-            visual_prompt = self.photo_visual_prompt()
         else:
             image_encoder = self.sk_encoder
-            visual_prompt = self.sketch_visual_prompt()
+        visual_prompt = self.get_prompt_learner(
+            modality
+        ).visual_prompt()
 
         features = image_encoder(image.type(self.dtype), visual_prompt)
         return features / features.norm(dim=-1, keepdim=True)
 
-    def get_logits(self, image, text_features, modality):
+    def get_logits(self, image, modality):
+        text_features = self.get_student_text_features(modality)
+        text_features = F.normalize(text_features, dim=-1)
         image_features = self.encode_student_image(image, modality)
         logits = self.logit_scale.exp() * image_features @ text_features.t()
         return logits, image_features
 
     def forward(self, x):
         photo_tensor, sk_tensor, photo_aug_tensor, sk_aug_tensor, label = x
-        text_features = self.get_student_text_features()
-        text_features = text_features / text_features.norm(
-            dim=-1, keepdim=True
-        )
         photo_logits, photo_features = self.get_logits(
-            photo_tensor, text_features, "photo"
+            photo_tensor, "photo"
         )
         sk_logits, sketch_features = self.get_logits(
-            sk_tensor, text_features, "sketch"
+            sk_tensor, "sketch"
         )
 
         teacher_photo_features = photo_features.detach()
