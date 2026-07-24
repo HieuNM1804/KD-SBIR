@@ -45,11 +45,63 @@ def normal_transform():
     ])
 
 
+def teacher_photo_transform():
+    return transforms.Compose([
+        transforms.RandomResizedCrop(
+            224,
+            scale=(0.85, 1.0),
+            ratio=(0.9, 1.1),
+            interpolation=transforms.InterpolationMode.BICUBIC,
+        ),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.RandomApply([
+            transforms.ColorJitter(
+                brightness=0.2,
+                contrast=0.2,
+                saturation=0.2,
+                hue=0.05,
+            ),
+        ], p=0.5),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
+    ])
+
+
+def teacher_sketch_transform():
+    return transforms.Compose([
+        transforms.RandomResizedCrop(
+            224,
+            scale=(0.9, 1.0),
+            ratio=(0.95, 1.05),
+            interpolation=transforms.InterpolationMode.BICUBIC,
+        ),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.RandomApply([
+            transforms.RandomAffine(
+                degrees=7,
+                translate=(0.03, 0.03),
+                scale=(0.95, 1.05),
+                fill=255,
+            ),
+        ], p=0.5),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
+    ])
+
+
+def apply_transform_with_seed(transform, image, seed):
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(seed)
+        return transform(image)
+
+
 class TrainDataset(torch.utils.data.Dataset):
     def __init__(self, args):
         self.seed = args.seed
         self.max_size = args.max_size
         self.normal_transform = normal_transform()
+        self.teacher_photo_transform = teacher_photo_transform()
+        self.teacher_sketch_transform = teacher_sketch_transform()
 
         sketch_root = os.path.join(args.root, "sketch")
         excluded = set(UNSEEN_CLASSES[args.dataset]) | {".ipynb_checkpoints"}
@@ -59,10 +111,6 @@ class TrainDataset(torch.utils.data.Dataset):
         }
         self.all_sketches_path = []
         self.all_photos_path = {}
-        self.all_photo_paths = []
-        self.photo_path_to_index = {}
-        self.teacher_sketch_features = None
-        self.teacher_photo_features = None
 
         for category in self.all_categories:
             sketch_paths = sorted(
@@ -73,17 +121,6 @@ class TrainDataset(torch.utils.data.Dataset):
             )
             self.all_sketches_path.extend(sketch_paths)
             self.all_photos_path[category] = photo_paths
-            for path in photo_paths:
-                self.photo_path_to_index[path] = len(self.all_photo_paths)
-                self.all_photo_paths.append(path)
-
-    def set_teacher_features(self, sketch_features, photo_features):
-        if len(sketch_features) != len(self.all_sketches_path):
-            raise ValueError("Sketch feature cache has the wrong length.")
-        if len(photo_features) != len(self.all_photo_paths):
-            raise ValueError("Photo feature cache has the wrong length.")
-        self.teacher_sketch_features = sketch_features
-        self.teacher_photo_features = photo_features
 
     def __len__(self):
         return len(self.all_sketches_path)
@@ -106,37 +143,24 @@ class TrainDataset(torch.utils.data.Dataset):
         img_data = load_image(img_path, self.max_size)
         sk_tensor = self.normal_transform(sk_data)
         img_tensor = self.normal_transform(img_data)
-
-        if self.teacher_sketch_features is None:
-            teacher_sketch_feature = torch.empty(0)
-            teacher_photo_feature = torch.empty(0)
-        else:
-            teacher_sketch_feature = self.teacher_sketch_features[index]
-            teacher_photo_feature = self.teacher_photo_features[
-                self.photo_path_to_index[img_path]
-            ]
+        teacher_photo_tensor = apply_transform_with_seed(
+            self.teacher_photo_transform,
+            img_data,
+            sample_seed(self.seed + 1, epoch, index),
+        )
+        teacher_sketch_tensor = apply_transform_with_seed(
+            self.teacher_sketch_transform,
+            sk_data,
+            sample_seed(self.seed + 2, epoch, index),
+        )
 
         return (
             img_tensor,
             sk_tensor,
-            teacher_photo_feature,
-            teacher_sketch_feature,
+            teacher_photo_tensor,
+            teacher_sketch_tensor,
             self.category_to_label[category],
         )
-
-
-class TeacherFeatureDataset(torch.utils.data.Dataset):
-    def __init__(self, paths, max_size):
-        self.paths = paths
-        self.max_size = max_size
-        self.transform = normal_transform()
-
-    def __len__(self):
-        return len(self.paths)
-
-    def __getitem__(self, index):
-        image = load_image(self.paths[index], self.max_size)
-        return self.transform(image)
 
 
 class ValidDataset(torch.utils.data.Dataset):

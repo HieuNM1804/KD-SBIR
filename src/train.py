@@ -225,11 +225,4 @@ if __name__ == "__main__":
         ckpt = torch.load(args.ckpt_path, map_location="cpu")
         model.load_state_dict(ckpt["state_dict"], strict=False)
 
-    model.cache_teacher_features(
-        train_loader.dataset,
-        batch_size=args.batch_size,
-        workers=args.workers,
-        show_progress=args.progress,
-    )
-
     trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])

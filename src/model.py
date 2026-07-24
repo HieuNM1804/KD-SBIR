@@ -8,12 +8,9 @@ from torchmetrics.functional.retrieval import (
     retrieval_precision,
 )
 import open_clip
-from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
 
 from clip import clip
 from clip.model import build_model
-from src.dataset import TeacherFeatureDataset
 from src.text_encoder import TextEncoder
 from src.losses import loss_fn
 from src.teacher_adapters import ModalityAdapters
@@ -216,83 +213,9 @@ class CustomCLIP(nn.Module):
             f"active={self.teacher_active}, lambda={cfg.lambda_kd}, "
             f"temperature={cfg.kd_temperature}"
         )
-
-    @torch.no_grad()
-    def cache_teacher_features(
-        self,
-        train_dataset,
-        batch_size,
-        workers,
-        show_progress,
-    ):
-        if self._teacher is None:
-            return
-
-        sketch_count = len(train_dataset.all_sketches_path)
-        paths = (
-            train_dataset.all_sketches_path
-            + train_dataset.all_photo_paths
-        )
-        feature_dataset = TeacherFeatureDataset(
-            paths,
-            train_dataset.max_size,
-        )
-        loader = DataLoader(
-            feature_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=workers,
-            pin_memory=True,
-            persistent_workers=False,
-            prefetch_factor=4 if workers > 0 else None,
-        )
-
-        feature_cache = torch.empty(
-            len(paths),
-            DFN5B_OUTPUT_DIM,
-            dtype=torch.float16,
-        )
-        teacher_device = next(self._teacher.parameters()).device
-        offset = 0
-        batches = tqdm(
-            loader,
-            desc="Caching DFN5B features",
-            disable=not show_progress,
-        )
-        for images in batches:
-            images = images.to(
-                device=teacher_device,
-                dtype=torch.float16,
-                non_blocking=True,
-            )
-            features = self._teacher.encode_image(images)
-            end = offset + len(features)
-            feature_cache[offset:end].copy_(features.cpu())
-            offset = end
-
-        train_dataset.set_teacher_features(
-            feature_cache[:sketch_count],
-            feature_cache[sketch_count:],
-        )
-        if self.joint_teacher_adapter:
-            self.get_teacher_text_features()
-
-        teacher = self._teacher
-        object.__setattr__(self, "_teacher", None)
-        del images, features
-        del teacher
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        cache_size_mb = (
-            feature_cache.numel()
-            * feature_cache.element_size()
-            / 1024**2
-        )
         print(
-            "[Teacher Cache] encoded each seen image once; "
-            f"images={len(paths):,}, memory={cache_size_mb:.1f} MB. "
-            "DFN5B released."
+            "[Teacher Augmentation] dynamic photo/sketch views; "
+            "DFN5B image encoder runs every training batch"
         )
 
     def train(self, mode=True):
@@ -377,8 +300,8 @@ class CustomCLIP(nn.Module):
         (
             photo_tensor,
             sk_tensor,
-            teacher_photo_base,
-            teacher_sketch_base,
+            teacher_photo_tensor,
+            teacher_sketch_tensor,
             label,
         ) = x
         photo_logits, photo_features = self.get_logits(
@@ -393,6 +316,13 @@ class CustomCLIP(nn.Module):
         teacher_sketch_text = None
         teacher_photo_text = None
         if self.teacher_active:
+            with torch.no_grad():
+                teacher_photo_base = self._teacher.encode_image(
+                    teacher_photo_tensor.half()
+                )
+                teacher_sketch_base = self._teacher.encode_image(
+                    teacher_sketch_tensor.half()
+                )
             teacher_photo_features = self.adapt_teacher_feature(
                 teacher_photo_base, "photo"
             )
@@ -443,20 +373,6 @@ class ZS_SBIR(pl.LightningModule):
 
         self.val_step_outputs_sk = []
         self.val_step_outputs_ph = []
-
-    def cache_teacher_features(
-        self,
-        train_dataset,
-        batch_size,
-        workers,
-        show_progress,
-    ):
-        self.model.cache_teacher_features(
-            train_dataset,
-            batch_size,
-            workers,
-            show_progress,
-        )
         
     def configure_optimizers(self):
         adapter_params = (
