@@ -130,6 +130,18 @@ if __name__ == "__main__":
         default=1.0,
         help="Weight for CE(photo, text) + CE(sketch, text).",
     )
+    parser.add_argument(
+        "--lambda_nt_xent",
+        type=float,
+        default=1.0,
+        help="Weight for student sketch-photo NT-Xent.",
+    )
+    parser.add_argument(
+        "--nt_xent_temperature",
+        type=float,
+        default=0.07,
+        help="Temperature for student sketch-photo NT-Xent.",
+    )
 
     parser.add_argument("--lr", type=float, default=4e-5)
     parser.add_argument("--batch_size", type=int, default=64)
@@ -191,7 +203,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--exp_name",
         type=str,
-        default="independent_random_text_visual_prompts_layernorm",
+        default="independent_random_prompts_layernorm_nt_xent",
     )
 
     args = parser.parse_args()
@@ -199,6 +211,10 @@ if __name__ == "__main__":
         parser.error("--n_ctx_text must be greater than or equal to 0.")
     if args.n_ctx_visual < 0:
         parser.error("--n_ctx_visual must be greater than or equal to 0.")
+    if args.lambda_nt_xent < 0:
+        parser.error("--lambda_nt_xent must be greater than or equal to 0.")
+    if args.nt_xent_temperature <= 0:
+        parser.error("--nt_xent_temperature must be greater than 0.")
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
 
     checkpoint_callback = ModelCheckpoint(
