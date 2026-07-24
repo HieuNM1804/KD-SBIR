@@ -34,42 +34,6 @@ def relational_kd_loss(
     return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
 
 
-def nt_xent_loss(
-    features_view1,
-    features_view2,
-    temperature=0.07,
-):
-    """Symmetric SimCLR NT-Xent between paired sketch/photo features."""
-    features_view1 = F.normalize(features_view1.float(), dim=-1)
-    features_view2 = F.normalize(features_view2.float(), dim=-1)
-
-    batch_size = features_view1.shape[0]
-    device = features_view1.device
-    features = torch.cat([features_view1, features_view2], dim=0)
-
-    logits = features @ features.t()
-    self_mask = torch.eye(
-        2 * batch_size,
-        dtype=torch.bool,
-        device=device,
-    )
-    logits = logits.masked_fill(self_mask, float("-inf"))
-    logits = logits / temperature
-
-    labels = torch.cat(
-        [
-            torch.arange(
-                batch_size,
-                2 * batch_size,
-                device=device,
-            ),
-            torch.arange(batch_size, device=device),
-        ],
-        dim=0,
-    )
-    return F.cross_entropy(logits, labels)
-
-
 def batch_hard_teacher_triplet_loss(
     sketch_features,
     photo_features,
@@ -142,14 +106,6 @@ def loss_fn(args, features):
         + F.cross_entropy(sketch_logits, labels)
     )
 
-    nt_xent = torch.zeros((), device=photo_logits.device)
-    if args.lambda_nt_xent > 0:
-        nt_xent = nt_xent_loss(
-            sketch_features,
-            photo_features,
-            args.nt_xent_temperature,
-        )
-
     kd_loss = torch.zeros((), device=photo_logits.device)
     if teacher_active and args.lambda_kd > 0:
         kd_loss = relational_kd_loss(
@@ -180,14 +136,12 @@ def loss_fn(args, features):
 
     total_loss = (
         args.lambda_cls * classification_loss
-        + args.lambda_nt_xent * nt_xent
         + args.lambda_kd * kd_loss
         + args.lambda_teacher_retrieval * teacher_triplet_loss
         + args.lambda_teacher_semantic * teacher_semantic
     )
     return total_loss, {
         "cls": classification_loss,
-        "nt_xent": nt_xent,
         "kd_sketch_photo": kd_loss,
         "teacher_triplet": teacher_triplet_loss,
         "teacher_semantic": teacher_semantic,

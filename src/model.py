@@ -539,7 +539,6 @@ class ZS_SBIR(pl.LightningModule):
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         for k, v in loss_dict.items():
             bar_names = {
-                "nt_xent": "NTX",
                 "kd_sketch_photo": "KD_SP",
                 "teacher_triplet": "T_TRI",
                 "teacher_semantic": "T_SEM",
