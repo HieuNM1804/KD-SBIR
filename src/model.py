@@ -16,6 +16,7 @@ from clip.model import build_model
 from src.dataset import TeacherFeatureDataset
 from src.text_encoder import TextEncoder
 from src.losses import loss_fn
+from src.teacher_adapters import ModalityAdapters
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -38,8 +39,25 @@ def _load_clip_model(backbone):
     return build_model(state_dict)
 
 
+def _build_teacher_adapters(args, teacher):
+    if not args.joint_teacher_adapter:
+        return None
+
+    feature_dim = int(teacher.output_dim)
+    adapters = ModalityAdapters(
+        feature_dim=feature_dim,
+        bottleneck_dim=args.teacher_adapter_bottleneck,
+    )
+    print(
+        "[Teacher Adapter] initialized for joint training "
+        f"(feature_dim={feature_dim}, "
+        f"bottleneck={args.teacher_adapter_bottleneck})"
+    )
+    return adapters
+
+
 def _load_teacher(args):
-    if args.lambda_kd <= 0:
+    if args.lambda_kd <= 0 and not args.joint_teacher_adapter:
         return None
 
     print(f"[Teacher] Loading {DFN5B_MODEL} in FP16...")
@@ -50,6 +68,8 @@ def _load_teacher(args):
         device=device,
     )
     teacher.eval().requires_grad_(False)
+    if args.joint_teacher_adapter:
+        teacher.text_tokenizer = open_clip.get_tokenizer(DFN5B_MODEL)
     teacher.output_dim = DFN5B_OUTPUT_DIM
     return teacher
 
@@ -202,6 +222,11 @@ class CustomCLIP(nn.Module):
         # inside every student checkpoint.
         object.__setattr__(self, "_teacher", teacher)
         self.teacher_active = teacher is not None
+        self.joint_teacher_adapter = cfg.joint_teacher_adapter
+        self.teacher_adapters = _build_teacher_adapters(cfg, teacher)
+
+        self.register_buffer("_teacher_sketch_text", None, persistent=False)
+        self.register_buffer("_teacher_photo_text", None, persistent=False)
 
         print(
             "[Student] independent random tail-text and visual prompts; "
@@ -271,6 +296,8 @@ class CustomCLIP(nn.Module):
             feature_cache[:sketch_count],
             feature_cache[sketch_count:],
         )
+        if self.joint_teacher_adapter:
+            self.get_teacher_text_features()
 
         teacher = self._teacher
         object.__setattr__(self, "_teacher", None)
@@ -294,7 +321,48 @@ class CustomCLIP(nn.Module):
         super().train(mode)
         if self._teacher is not None:
             self._teacher.eval()
+        if self.teacher_adapters is not None:
+            self.teacher_adapters.train(mode and self.joint_teacher_adapter)
         return self
+
+    def adapt_teacher_feature(self, feature, modality):
+        if self.teacher_adapters is None:
+            return feature
+        feature = F.normalize(feature.float(), dim=-1)
+        adapter = (
+            self.teacher_adapters.photo
+            if modality == "photo"
+            else self.teacher_adapters.sketch
+        )
+        return adapter(feature)
+
+    def get_teacher_text_features(self):
+        if self._teacher_sketch_text is not None:
+            return self._teacher_sketch_text, self._teacher_photo_text
+
+        sketch_texts = [
+            f"a sketch of a {name.replace('_', ' ')}."
+            for name in self.classnames
+        ]
+        photo_texts = [
+            f"a photo of a {name.replace('_', ' ')}."
+            for name in self.classnames
+        ]
+        teacher_device = next(self._teacher.parameters()).device
+        tokens = self._teacher.text_tokenizer(
+            sketch_texts + photo_texts
+        ).to(teacher_device)
+        with torch.no_grad():
+            text_features = F.normalize(
+                self._teacher.encode_text(tokens).float(), dim=-1
+            )
+        class_count = len(self.classnames)
+        self._teacher_sketch_text = text_features[:class_count]
+        self._teacher_photo_text = text_features[class_count:]
+        return (
+            self._teacher_sketch_text,
+            self._teacher_photo_text,
+        )
 
     def get_text_prompt(self, modality):
         if modality == "photo":
@@ -341,15 +409,34 @@ class CustomCLIP(nn.Module):
             sk_tensor, "sketch"
         )
 
+        teacher_photo_features = photo_features.detach()
+        teacher_sketch_features = sketch_features.detach()
+        teacher_sketch_text = None
+        teacher_photo_text = None
+        if self.teacher_active:
+            teacher_photo_features = self.adapt_teacher_feature(
+                teacher_photo_base, "photo"
+            )
+            teacher_sketch_features = self.adapt_teacher_feature(
+                teacher_sketch_base, "sketch"
+            )
+            if self.joint_teacher_adapter:
+                teacher_sketch_text, teacher_photo_text = (
+                    self.get_teacher_text_features()
+                )
+
         return (
             photo_features,
             sketch_features,
-            teacher_photo_base,
-            teacher_sketch_base,
+            teacher_photo_features,
+            teacher_sketch_features,
             label,
             photo_logits,
             sk_logits,
             self.teacher_active,
+            self.joint_teacher_adapter,
+            teacher_sketch_text,
+            teacher_photo_text,
         )
 
     def extract_feature(self, image, modality):
@@ -361,6 +448,8 @@ class ZS_SBIR(pl.LightningModule):
         super().__init__()
         self.args = args
         clip_model = _load_clip_model(args.backbone)
+        # Preserve the baseline RNG state before teacher-adapter initialization.
+        text_clip_model = _load_clip_model(args.backbone)
 
         self.distance_fn = lambda x, y: F.cosine_similarity(x, y)
         self.best_metric = 1e-3
@@ -391,21 +480,47 @@ class ZS_SBIR(pl.LightningModule):
         )
         
     def configure_optimizers(self):
-        trainable_params = [
+        adapter_params = (
+            [
+                parameter
+                for parameter in self.model.teacher_adapters.parameters()
+                if parameter.requires_grad
+            ]
+            if self.model.teacher_adapters is not None
+            else []
+        )
+        adapter_param_ids = {id(parameter) for parameter in adapter_params}
+        student_params = [
             parameter
             for parameter in self.model.parameters()
             if parameter.requires_grad
+            and id(parameter) not in adapter_param_ids
         ]
+        param_groups = [{"params": student_params, "lr": self.args.lr}]
+        if adapter_params:
+            param_groups.append(
+                {
+                    "params": adapter_params,
+                    "lr": self.args.teacher_adapter_lr,
+                }
+            )
         optimizer = torch.optim.SGD(
-            params=trainable_params,
+            params=param_groups,
             lr=self.args.lr,
             weight_decay=1e-3,
             momentum=0.9,
         )
-        trainable = sum(parameter.numel() for parameter in trainable_params)
+        trainable = sum(
+            parameter.numel()
+            for group in optimizer.param_groups
+            for parameter in group["params"]
+            if parameter.requires_grad
+        )
         print(
             "[Optimizer] SGD "
             f"lr={self.args.lr}, momentum=0.9, weight_decay=1e-3, "
+            f"teacher_adapter_lr="
+            f"{self.args.teacher_adapter_lr if adapter_params else 'off'}, "
             f"trainable_params={trainable:,}"
         )
         
@@ -427,6 +542,8 @@ class ZS_SBIR(pl.LightningModule):
         for k, v in loss_dict.items():
             bar_names = {
                 "kd_sketch_photo": "KD_SP",
+                "teacher_triplet": "T_TRI",
+                "teacher_semantic": "T_SEM",
             }
             show_on_bar = k in bar_names
             bar_name = bar_names.get(k, k)
