@@ -16,7 +16,6 @@ from clip.model import build_model
 from src.dataset import TeacherFeatureDataset
 from src.text_encoder import TextEncoder
 from src.losses import loss_fn
-from src.teacher_adapters import ModalityAdapters
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -39,25 +38,8 @@ def _load_clip_model(backbone):
     return build_model(state_dict)
 
 
-def _build_teacher_adapters(args, teacher):
-    if not args.joint_teacher_adapter:
-        return None
-
-    feature_dim = int(teacher.output_dim)
-    adapters = ModalityAdapters(
-        feature_dim=feature_dim,
-        bottleneck_dim=args.teacher_adapter_bottleneck,
-    )
-    print(
-        "[Teacher Adapter] initialized for joint training "
-        f"(feature_dim={feature_dim}, "
-        f"bottleneck={args.teacher_adapter_bottleneck})"
-    )
-    return adapters
-
-
 def _load_teacher(args):
-    if args.lambda_kd <= 0 and not args.joint_teacher_adapter:
+    if args.lambda_kd <= 0:
         return None
 
     print(f"[Teacher] Loading {DFN5B_MODEL} in FP16...")
@@ -68,8 +50,6 @@ def _load_teacher(args):
         device=device,
     )
     teacher.eval().requires_grad_(False)
-    if args.joint_teacher_adapter:
-        teacher.text_tokenizer = open_clip.get_tokenizer(DFN5B_MODEL)
     teacher.output_dim = DFN5B_OUTPUT_DIM
     return teacher
 
@@ -81,82 +61,95 @@ def freeze_clip_except_layer_norm(clip_model):
             module.requires_grad_(True)
 
 
-class MultiModalPromptLearner(nn.Module):
+def _random_parameter(rows, width, seed):
+    if rows == 0:
+        return None
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    parameter = torch.empty(rows, width)
+    nn.init.normal_(parameter, std=0.02, generator=generator)
+    return nn.Parameter(parameter)
+
+
+class TextTailPromptLearner(nn.Module):
     def __init__(
         self,
-        n_ctx,
+        n_ctx_text,
         text_width,
-        visual_width,
         classnames,
         token_embedding,
         modality,
         seed,
     ):
         super().__init__()
-        if n_ctx <= 0:
-            raise ValueError(f"n_ctx must be positive, got {n_ctx}.")
-
-        prompt_prefix = (
-            "a photo of a" if modality == "photo" else "a sketch of a"
-        )
-        generator = torch.Generator(device="cpu")
-        generator.manual_seed(seed)
-        context = torch.empty(n_ctx, text_width)
-        nn.init.normal_(context, std=0.02, generator=generator)
-        with torch.no_grad():
-            prefix_tokens = clip.tokenize(prompt_prefix)
-            prefix_embedding = token_embedding(prefix_tokens).float()
-            initialized_tokens = min(n_ctx, 4)
-            context[:initialized_tokens] = prefix_embedding[
-                0, 1 : 1 + initialized_tokens
-            ]
-        self.ctx = nn.Parameter(context)
-
-        with torch.random.fork_rng(devices=[]):
-            torch.manual_seed(seed + 1000)
-            self.projection = nn.Linear(text_width, visual_width)
-
-        placeholders = " ".join(["X"] * n_ctx)
-        raw_prompts = [
-            f"{placeholders} {name.replace('_', ' ')}."
+        self.ctx = _random_parameter(n_ctx_text, text_width, seed)
+        modality_name = "photo" if modality == "photo" else "sketch"
+        class_phrases = [
+            f"a {modality_name} of a {name.replace('_', ' ')}"
             for name in classnames
         ]
-        tokenized_prompts = clip.tokenize(raw_prompts)
+        placeholders = " ".join(["X"] * n_ctx_text)
+        raw_prompts = [
+            f"{phrase} {placeholders}." if placeholders else f"{phrase}."
+            for phrase in class_phrases
+        ]
+        try:
+            tokenized_prompts = clip.tokenize(raw_prompts)
+        except RuntimeError as error:
+            raise ValueError(
+                f"n_ctx_text={n_ctx_text} exceeds CLIP's text context length."
+            ) from error
+
         with torch.no_grad():
-            embeddings = token_embedding(tokenized_prompts).detach()
+            prompt_embeddings = token_embedding(tokenized_prompts).detach()
         self.register_buffer(
             "tokenized_prompts",
             tokenized_prompts,
             persistent=False,
         )
         self.register_buffer(
-            "token_prefix",
-            embeddings[:, :1],
+            "prompt_embeddings",
+            prompt_embeddings,
             persistent=False,
         )
-        self.register_buffer(
-            "token_suffix",
-            embeddings[:, 1 + n_ctx :],
-            persistent=False,
-        )
-
-    def text_prompts(self):
-        context = self.ctx.to(dtype=self.token_prefix.dtype)
-        context = context.unsqueeze(0).expand(
-            self.token_prefix.shape[0], -1, -1
-        )
-        prompts = torch.cat(
-            (self.token_prefix, context, self.token_suffix),
-            dim=1,
-        )
-        return self.tokenized_prompts, prompts
-
-    def visual_prompt(self):
-        return self.projection(self.ctx)
+        if n_ctx_text > 0:
+            context_starts = [
+                int(clip.tokenize(phrase).argmax())
+                for phrase in class_phrases
+            ]
+            self.register_buffer(
+                "context_starts",
+                torch.tensor(context_starts, dtype=torch.long),
+                persistent=False,
+            )
+        else:
+            self.register_buffer(
+                "context_starts",
+                None,
+                persistent=False,
+            )
 
     def forward(self):
-        tokenized_prompts, text_prompts = self.text_prompts()
-        return tokenized_prompts, text_prompts, self.visual_prompt()
+        if self.ctx is None:
+            return self.tokenized_prompts, self.prompt_embeddings
+
+        prompts = self.prompt_embeddings.clone()
+        offsets = torch.arange(self.ctx.shape[0], device=prompts.device)
+        context_indices = self.context_starts[:, None] + offsets[None, :]
+        batch_indices = torch.arange(
+            prompts.shape[0], device=prompts.device
+        )[:, None]
+        context = self.ctx.to(dtype=prompts.dtype)
+        prompts[batch_indices, context_indices] = context.unsqueeze(0)
+        return self.tokenized_prompts, prompts
+
+
+class VisualPromptLearner(nn.Module):
+    def __init__(self, n_ctx_visual, visual_width, seed):
+        super().__init__()
+        self.ctx = _random_parameter(n_ctx_visual, visual_width, seed)
+
+    def forward(self):
+        return self.ctx
 
 
 class CustomCLIP(nn.Module):
@@ -176,23 +169,31 @@ class CustomCLIP(nn.Module):
         visual_width = self.ph_encoder.ln_pre.normalized_shape[0]
         text_width = clip_model.ln_final.normalized_shape[0]
         self.classnames = tuple(classnames)
-        self.photo_prompt_learner = MultiModalPromptLearner(
-            cfg.n_ctx,
+        self.photo_text_prompt = TextTailPromptLearner(
+            cfg.n_ctx_text,
             text_width,
-            visual_width,
             self.classnames,
             clip_model.token_embedding,
             "photo",
-            cfg.seed,
+            cfg.seed + 101,
         )
-        self.sketch_prompt_learner = MultiModalPromptLearner(
-            cfg.n_ctx,
+        self.sketch_text_prompt = TextTailPromptLearner(
+            cfg.n_ctx_text,
             text_width,
-            visual_width,
             self.classnames,
             clip_model.token_embedding,
             "sketch",
-            cfg.seed + 1,
+            cfg.seed + 102,
+        )
+        self.photo_visual_prompt = VisualPromptLearner(
+            cfg.n_ctx_visual,
+            visual_width,
+            cfg.seed + 201,
+        )
+        self.sketch_visual_prompt = VisualPromptLearner(
+            cfg.n_ctx_visual,
+            visual_width,
+            cfg.seed + 202,
         )
         self.text_encoder = TextEncoder(clip_model)
         self.logit_scale = clip_model.logit_scale
@@ -201,15 +202,11 @@ class CustomCLIP(nn.Module):
         # inside every student checkpoint.
         object.__setattr__(self, "_teacher", teacher)
         self.teacher_active = teacher is not None
-        self.joint_teacher_adapter = cfg.joint_teacher_adapter
-        self.teacher_adapters = _build_teacher_adapters(cfg, teacher)
-
-        self.register_buffer("_teacher_sketch_text", None, persistent=False)
-        self.register_buffer("_teacher_photo_text", None, persistent=False)
 
         print(
-            "[Student] modality-specific text prompts projected to visual; "
-            f"{cfg.n_ctx} learnable context tokens per modality"
+            "[Student] independent random tail-text and visual prompts; "
+            f"n_ctx_text={cfg.n_ctx_text}, "
+            f"n_ctx_visual={cfg.n_ctx_visual}"
         )
         print(
             "[Relational KD] sketch-photo branch -> "
@@ -274,8 +271,6 @@ class CustomCLIP(nn.Module):
             feature_cache[:sketch_count],
             feature_cache[sketch_count:],
         )
-        if self.joint_teacher_adapter:
-            self.get_teacher_text_features()
 
         teacher = self._teacher
         object.__setattr__(self, "_teacher", None)
@@ -299,59 +294,20 @@ class CustomCLIP(nn.Module):
         super().train(mode)
         if self._teacher is not None:
             self._teacher.eval()
-        if self.teacher_adapters is not None:
-            self.teacher_adapters.train(mode and self.joint_teacher_adapter)
         return self
 
-    def adapt_teacher_feature(self, feature, modality):
-        if self.teacher_adapters is None:
-            return feature
-        feature = F.normalize(feature.float(), dim=-1)
-        adapter = (
-            self.teacher_adapters.photo
-            if modality == "photo"
-            else self.teacher_adapters.sketch
-        )
-        return adapter(feature)
-
-    def get_teacher_text_features(self):
-        if self._teacher_sketch_text is not None:
-            return self._teacher_sketch_text, self._teacher_photo_text
-
-        sketch_texts = [
-            f"a sketch of a {name.replace('_', ' ')}."
-            for name in self.classnames
-        ]
-        photo_texts = [
-            f"a photo of a {name.replace('_', ' ')}."
-            for name in self.classnames
-        ]
-        teacher_device = next(self._teacher.parameters()).device
-        tokens = self._teacher.text_tokenizer(
-            sketch_texts + photo_texts
-        ).to(teacher_device)
-        with torch.no_grad():
-            text_features = F.normalize(
-                self._teacher.encode_text(tokens).float(), dim=-1
-            )
-        class_count = len(self.classnames)
-        self._teacher_sketch_text = text_features[:class_count]
-        self._teacher_photo_text = text_features[class_count:]
-        return (
-            self._teacher_sketch_text,
-            self._teacher_photo_text,
-        )
-
-    def get_prompt_learner(self, modality):
+    def get_text_prompt(self, modality):
         if modality == "photo":
-            return self.photo_prompt_learner
-        return self.sketch_prompt_learner
+            return self.photo_text_prompt
+        return self.sketch_text_prompt
+
+    def get_visual_prompt(self, modality):
+        if modality == "photo":
+            return self.photo_visual_prompt()
+        return self.sketch_visual_prompt()
 
     def get_student_text_features(self, modality):
-        prompt_learner = self.get_prompt_learner(modality)
-        tokenized_prompts, text_prompts = (
-            prompt_learner.text_prompts()
-        )
+        tokenized_prompts, text_prompts = self.get_text_prompt(modality)()
         return self.text_encoder(tokenized_prompts, text_prompts)
 
     def encode_student_image(self, image, modality):
@@ -359,10 +315,7 @@ class CustomCLIP(nn.Module):
             image_encoder = self.ph_encoder
         else:
             image_encoder = self.sk_encoder
-        visual_prompt = self.get_prompt_learner(
-            modality
-        ).visual_prompt()
-
+        visual_prompt = self.get_visual_prompt(modality)
         features = image_encoder(image.type(self.dtype), visual_prompt)
         return features / features.norm(dim=-1, keepdim=True)
 
@@ -388,34 +341,15 @@ class CustomCLIP(nn.Module):
             sk_tensor, "sketch"
         )
 
-        teacher_photo_features = photo_features.detach()
-        teacher_sketch_features = sketch_features.detach()
-        teacher_sketch_text = None
-        teacher_photo_text = None
-        if self.teacher_active:
-            teacher_photo_features = self.adapt_teacher_feature(
-                teacher_photo_base, "photo"
-            )
-            teacher_sketch_features = self.adapt_teacher_feature(
-                teacher_sketch_base, "sketch"
-            )
-            if self.joint_teacher_adapter:
-                teacher_sketch_text, teacher_photo_text = (
-                    self.get_teacher_text_features()
-                )
-
         return (
             photo_features,
             sketch_features,
-            teacher_photo_features,
-            teacher_sketch_features,
+            teacher_photo_base,
+            teacher_sketch_base,
             label,
             photo_logits,
             sk_logits,
             self.teacher_active,
-            self.joint_teacher_adapter,
-            teacher_sketch_text,
-            teacher_photo_text,
         )
 
     def extract_feature(self, image, modality):
@@ -427,8 +361,6 @@ class ZS_SBIR(pl.LightningModule):
         super().__init__()
         self.args = args
         clip_model = _load_clip_model(args.backbone)
-        # Intentionally unused: preserve the historical RNG consumption.
-        text_clip_model = _load_clip_model(args.backbone)
 
         self.distance_fn = lambda x, y: F.cosine_similarity(x, y)
         self.best_metric = 1e-3
@@ -459,37 +391,21 @@ class ZS_SBIR(pl.LightningModule):
         )
         
     def configure_optimizers(self):
-        adapter_params = (
-            [p for p in self.model.teacher_adapters.parameters() if p.requires_grad]
-            if self.model.teacher_adapters is not None
-            else []
-        )
-        adapter_param_ids = {id(p) for p in adapter_params}
-        student_params = [
-            p for p in self.model.parameters()
-            if p.requires_grad and id(p) not in adapter_param_ids
+        trainable_params = [
+            parameter
+            for parameter in self.model.parameters()
+            if parameter.requires_grad
         ]
-        param_groups = [{"params": student_params, "lr": self.args.lr}]
-        if adapter_params:
-            param_groups.append(
-                {"params": adapter_params, "lr": self.args.teacher_adapter_lr}
-            )
         optimizer = torch.optim.SGD(
-            params=param_groups,
+            params=trainable_params,
             lr=self.args.lr,
             weight_decay=1e-3,
             momentum=0.9,
         )
-        trainable = sum(
-            p.numel()
-            for group in optimizer.param_groups
-            for p in group["params"]
-            if p.requires_grad
-        )
+        trainable = sum(parameter.numel() for parameter in trainable_params)
         print(
             "[Optimizer] SGD "
             f"lr={self.args.lr}, momentum=0.9, weight_decay=1e-3, "
-            f"teacher_adapter_lr={self.args.teacher_adapter_lr if adapter_params else 'off'}, "
             f"trainable_params={trainable:,}"
         )
         
@@ -511,8 +427,6 @@ class ZS_SBIR(pl.LightningModule):
         for k, v in loss_dict.items():
             bar_names = {
                 "kd_sketch_photo": "KD_SP",
-                "teacher_triplet": "T_TRI",
-                "teacher_semantic": "T_SEM",
             }
             show_on_bar = k in bar_names
             bar_name = bar_names.get(k, k)

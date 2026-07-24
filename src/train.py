@@ -107,13 +107,16 @@ if __name__ == "__main__":
     parser.add_argument("--backbone", type=str, default="ViT-B/32")
     parser.add_argument("--max_size", type=int, default=224)
     parser.add_argument(
-        "--n_ctx",
+        "--n_ctx_text",
         type=int,
         default=4,
-        help=(
-            "Number of learnable text context tokens projected to the visual "
-            "encoder for each modality."
-        ),
+        help="Number of random learnable tail-context tokens per text modality.",
+    )
+    parser.add_argument(
+        "--n_ctx_visual",
+        type=int,
+        default=4,
+        help="Number of independent random visual prompt tokens per modality.",
     )
     parser.add_argument(
         "--seed",
@@ -151,29 +154,6 @@ if __name__ == "__main__":
         help="Disable the tqdm progress bar.",
     )
     parser.add_argument(
-        "--joint_teacher_adapter",
-        action="store_true",
-        default=True,
-        help="Train DFN5B sketch/photo adapters jointly with the student.",
-    )
-    parser.add_argument(
-        "--no_joint_teacher_adapter",
-        action="store_false",
-        dest="joint_teacher_adapter",
-        help="Disable joint teacher-adapter training for ablations.",
-    )
-    parser.add_argument("--teacher_adapter_bottleneck", type=int, default=64)
-    parser.add_argument("--teacher_adapter_lr", type=float, default=2e-5)
-    parser.add_argument(
-        "--lambda_teacher_retrieval",
-        type=float,
-        default=1.5,
-        help="Weight for the teacher-adapter retrieval loss.",
-    )
-    parser.add_argument("--lambda_teacher_semantic", type=float, default=1.0)
-    parser.add_argument("--teacher_temperature", type=float, default=0.07)
-    parser.add_argument("--teacher_triplet_margin", type=float, default=0.2)
-    parser.add_argument(
         "--lambda_kd",
         type=float,
         default=3.0,
@@ -188,10 +168,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--exp_name",
         type=str,
-        default="no_student_triplet_worker_invariant",
+        default="independent_random_text_visual_prompts_layernorm",
     )
 
     args = parser.parse_args()
+    if args.n_ctx_text < 0:
+        parser.error("--n_ctx_text must be greater than or equal to 0.")
+    if args.n_ctx_visual < 0:
+        parser.error("--n_ctx_visual must be greater than or equal to 0.")
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
 
     checkpoint_callback = ModelCheckpoint(

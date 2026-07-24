@@ -4,10 +4,18 @@
     --dataset sketchy_2 \
     --epochs 5 \
     --workers 4 \
+    --n_ctx_text 4 \
+    --n_ctx_visual 8 \
+    --lambda_kd 3.0 \
     --seed 42 \
-    --exp_name sketchy2_no_student_triplet_worker_invariant
+    --exp_name sketchy2_independent_prompts
 ```
 
-With the same `--seed`, `--workers 4`, `--workers 5`, and other worker counts
-produce the same batch order, positive-photo selection, and augmentation. The
-worker count only changes data-loading throughput.
+Text prompts are random learnable tokens appended after each class name and
+before the period. Visual prompts are initialized independently and are not
+projected from text. Both `--n_ctx_text` and `--n_ctx_visual` accept zero.
+
+Training uses fixed resize/normalize transforms without augmentation. The only
+losses are classification and DFN5B sketch-photo relational distillation.
+Within the student CLIP backbone, only LayerNorm parameters are trainable;
+prompt parameters are trained separately.
