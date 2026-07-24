@@ -448,8 +448,6 @@ class ZS_SBIR(pl.LightningModule):
         super().__init__()
         self.args = args
         clip_model = _load_clip_model(args.backbone)
-        # Preserve the baseline RNG state before teacher-adapter initialization.
-        text_clip_model = _load_clip_model(args.backbone)
 
         self.distance_fn = lambda x, y: F.cosine_similarity(x, y)
         self.best_metric = 1e-3
