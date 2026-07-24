@@ -34,6 +34,39 @@ def relational_kd_loss(
     return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
 
 
+def photo_text_relational_kd_loss(
+    student_photo,
+    student_text,
+    teacher_photo,
+    teacher_text,
+    temperature=0.07,
+):
+    """Distill teacher RGB-to-class-text relations into the student text branch."""
+    student_device = student_photo.device
+    student_photo = F.normalize(student_photo.detach().float(), dim=-1)
+    student_text = F.normalize(student_text.float(), dim=-1)
+    student_log_probs = F.log_softmax(
+        student_photo @ student_text.t() / temperature,
+        dim=-1,
+    )
+
+    with torch.no_grad():
+        teacher_photo = F.normalize(
+            teacher_photo.to(device=student_device, dtype=torch.float32),
+            dim=-1,
+        )
+        teacher_text = F.normalize(
+            teacher_text.to(device=student_device, dtype=torch.float32),
+            dim=-1,
+        )
+        teacher_probs = F.softmax(
+            teacher_photo @ teacher_text.t() / temperature,
+            dim=-1,
+        )
+
+    return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
+
+
 def batch_hard_teacher_triplet_loss(
     sketch_features,
     photo_features,
@@ -84,6 +117,7 @@ def loss_fn(args, features):
         labels,
         photo_logits,
         sketch_logits,
+        student_photo_text,
         teacher_active,
         joint_teacher_adapter,
         teacher_sketch_text,
@@ -104,6 +138,16 @@ def loss_fn(args, features):
             teacher_sketch_features,
             teacher_photo_features,
             args.kd_temperature,
+        )
+
+    photo_text_kd = torch.zeros((), device=photo_logits.device)
+    if teacher_active and args.lambda_photo_text_kd > 0:
+        photo_text_kd = photo_text_relational_kd_loss(
+            photo_features,
+            student_photo_text,
+            teacher_photo_features,
+            teacher_photo_text,
+            args.text_kd_temperature,
         )
 
     teacher_triplet_loss = torch.zeros((), device=photo_logits.device)
@@ -127,12 +171,14 @@ def loss_fn(args, features):
     total_loss = (
         args.lambda_cls * classification_loss
         + args.lambda_kd * kd_loss
+        + args.lambda_photo_text_kd * photo_text_kd
         + args.lambda_teacher_retrieval * teacher_triplet_loss
         + args.lambda_teacher_semantic * teacher_semantic
     )
     return total_loss, {
         "cls": classification_loss,
         "kd_sketch_photo": kd_loss,
+        "kd_photo_text": photo_text_kd,
         "teacher_triplet": teacher_triplet_loss,
         "teacher_semantic": teacher_semantic,
     }

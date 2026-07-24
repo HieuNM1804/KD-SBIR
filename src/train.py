@@ -186,6 +186,18 @@ if __name__ == "__main__":
         help="Temperature for the sketch-photo similarity distribution.",
     )
     parser.add_argument(
+        "--lambda_photo_text_kd",
+        type=float,
+        default=0.0,
+        help="Weight for RGB photo-to-class-text relational distillation.",
+    )
+    parser.add_argument(
+        "--text_kd_temperature",
+        type=float,
+        default=0.07,
+        help="Temperature for RGB photo-to-class-text distillation.",
+    )
+    parser.add_argument(
         "--exp_name",
         type=str,
         default="no_student_triplet_worker_invariant",

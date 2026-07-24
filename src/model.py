@@ -57,7 +57,11 @@ def _build_teacher_adapters(args, teacher):
 
 
 def _load_teacher(args):
-    if args.lambda_kd <= 0 and not args.joint_teacher_adapter:
+    if (
+        args.lambda_kd <= 0
+        and args.lambda_photo_text_kd <= 0
+        and not args.joint_teacher_adapter
+    ):
         return None
 
     print(f"[Teacher] Loading {DFN5B_MODEL} in FP16...")
@@ -68,7 +72,7 @@ def _load_teacher(args):
         device=device,
     )
     teacher.eval().requires_grad_(False)
-    if args.joint_teacher_adapter:
+    if args.joint_teacher_adapter or args.lambda_photo_text_kd > 0:
         teacher.text_tokenizer = open_clip.get_tokenizer(DFN5B_MODEL)
     teacher.output_dim = DFN5B_OUTPUT_DIM
     return teacher
@@ -202,6 +206,10 @@ class CustomCLIP(nn.Module):
         object.__setattr__(self, "_teacher", teacher)
         self.teacher_active = teacher is not None
         self.joint_teacher_adapter = cfg.joint_teacher_adapter
+        self.teacher_text_active = (
+            self.joint_teacher_adapter
+            or cfg.lambda_photo_text_kd > 0
+        )
         self.teacher_adapters = _build_teacher_adapters(cfg, teacher)
 
         self.register_buffer("_teacher_sketch_text", None, persistent=False)
@@ -215,6 +223,11 @@ class CustomCLIP(nn.Module):
             "[Relational KD] sketch-photo branch -> "
             f"active={self.teacher_active}, lambda={cfg.lambda_kd}, "
             f"temperature={cfg.kd_temperature}"
+        )
+        print(
+            "[Relational KD] RGB photo-text branch -> "
+            f"lambda={cfg.lambda_photo_text_kd}, "
+            f"temperature={cfg.text_kd_temperature}"
         )
 
     @torch.no_grad()
@@ -274,7 +287,7 @@ class CustomCLIP(nn.Module):
             feature_cache[:sketch_count],
             feature_cache[sketch_count:],
         )
-        if self.joint_teacher_adapter:
+        if self.teacher_text_active:
             self.get_teacher_text_features()
 
         teacher = self._teacher
@@ -371,7 +384,7 @@ class CustomCLIP(nn.Module):
         text_features = F.normalize(text_features, dim=-1)
         image_features = self.encode_student_image(image, modality)
         logits = self.logit_scale.exp() * image_features @ text_features.t()
-        return logits, image_features
+        return logits, image_features, text_features
 
     def forward(self, x):
         (
@@ -381,10 +394,10 @@ class CustomCLIP(nn.Module):
             teacher_sketch_base,
             label,
         ) = x
-        photo_logits, photo_features = self.get_logits(
+        photo_logits, photo_features, student_photo_text = self.get_logits(
             photo_tensor, "photo"
         )
-        sk_logits, sketch_features = self.get_logits(
+        sk_logits, sketch_features, _ = self.get_logits(
             sk_tensor, "sketch"
         )
 
@@ -399,7 +412,7 @@ class CustomCLIP(nn.Module):
             teacher_sketch_features = self.adapt_teacher_feature(
                 teacher_sketch_base, "sketch"
             )
-            if self.joint_teacher_adapter:
+            if self.teacher_text_active:
                 teacher_sketch_text, teacher_photo_text = (
                     self.get_teacher_text_features()
                 )
@@ -412,6 +425,7 @@ class CustomCLIP(nn.Module):
             label,
             photo_logits,
             sk_logits,
+            student_photo_text,
             self.teacher_active,
             self.joint_teacher_adapter,
             teacher_sketch_text,
@@ -511,6 +525,7 @@ class ZS_SBIR(pl.LightningModule):
         for k, v in loss_dict.items():
             bar_names = {
                 "kd_sketch_photo": "KD_SP",
+                "kd_photo_text": "KD_PH_TXT",
                 "teacher_triplet": "T_TRI",
                 "teacher_semantic": "T_SEM",
             }
