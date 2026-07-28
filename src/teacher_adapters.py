@@ -1,5 +1,3 @@
-"""Trainable modality adapters for the frozen DFN5B teacher."""
-
 import torch.nn as nn
 from torch.nn import functional as F
 
@@ -15,9 +13,9 @@ class ResidualAdapter(nn.Module):
         nn.init.zeros_(self.up.weight)
         nn.init.zeros_(self.up.bias)
 
-    def forward(self, features):
-        residual = self.up(F.gelu(self.down(self.norm(features))))
-        return F.normalize(features + residual, dim=-1)
+    def forward(self, x):
+        residual = self.up(F.gelu(self.down(self.norm(x))))
+        return F.normalize(x + residual, dim=-1)
 
 
 class ModalityAdapters(nn.Module):
