@@ -4,7 +4,7 @@ import hashlib
 import numpy as np
 import torch
 from torchvision import transforms
-from PIL import Image, ImageOps
+from PIL import Image
 from src.data_config import UNSEEN_CLASSES
 
 CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073]
@@ -37,9 +37,9 @@ class WorkerInvariantSampler(torch.utils.data.Sampler):
         return len(self.dataset)
 
 
-def normal_transform():
+def normal_transform(size=224):
     return transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize((size, size)),
         transforms.ToTensor(),
         transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
     ])
@@ -49,7 +49,7 @@ class TrainDataset(torch.utils.data.Dataset):
     def __init__(self, args):
         self.seed = args.seed
         self.max_size = args.max_size
-        self.normal_transform = normal_transform()
+        self.normal_transform = normal_transform(self.max_size)
 
         sketch_root = os.path.join(args.root, "sketch")
         excluded = set(UNSEEN_CLASSES[args.dataset]) | {".ipynb_checkpoints"}
@@ -129,7 +129,7 @@ class TeacherFeatureDataset(torch.utils.data.Dataset):
     def __init__(self, paths, max_size):
         self.paths = paths
         self.max_size = max_size
-        self.transform = normal_transform()
+        self.transform = normal_transform(self.max_size)
 
     def __len__(self):
         return len(self.paths)
@@ -143,7 +143,7 @@ class ValidDataset(torch.utils.data.Dataset):
     def __init__(self, args, mode="photo"):
         super().__init__()
         self.max_size = args.max_size
-        self.transform = normal_transform()
+        self.transform = normal_transform(self.max_size)
         self.unseen_classes = UNSEEN_CLASSES[args.dataset]
 
         unseen_paths = []
@@ -168,6 +168,6 @@ class ValidDataset(torch.utils.data.Dataset):
         return len(self.paths)
 
 
-def load_image(path, size):
+def load_image(path, _size):
     with Image.open(path) as image:
-        return ImageOps.pad(image.convert("RGB"), size=(size, size))
+        return image.convert("RGB")
