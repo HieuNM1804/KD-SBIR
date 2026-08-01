@@ -109,6 +109,7 @@ class VisionTransformer(nn.Module):
         self,
         x: torch.Tensor,
         prompt: torch.Tensor = None,
+        compound_prompts=None,
     ):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
@@ -125,12 +126,14 @@ class VisionTransformer(nn.Module):
         )  # shape = [*, grid ** 2 + 1, width]
         x = x + self.positional_embedding.to(x.dtype)
 
+        prompt_length = 0
         if prompt is not None:
             if prompt.ndim != 2 or prompt.shape[1] != x.shape[2]:
                 raise ValueError(
                     "Visual prompt must have shape "
                     f"[n_ctx, {x.shape[2]}], got {tuple(prompt.shape)}."
                 )
+            prompt_length = prompt.shape[0]
             prompt = prompt.to(device=x.device, dtype=x.dtype)
             prompt = prompt.unsqueeze(0).expand(x.shape[0], -1, -1)
             x = torch.cat((x[:, :1], prompt, x[:, 1:]), dim=1)
@@ -138,7 +141,32 @@ class VisionTransformer(nn.Module):
         x = self.ln_pre(x)
 
         x = x.permute(1, 0, 2)  # NLD -> LND
-        x = self.transformer(x)
+        compound_prompts = compound_prompts or []
+        for layer_index, block in enumerate(self.transformer.resblocks):
+            deep_index = layer_index - 1
+            if prompt_length and 0 <= deep_index < len(compound_prompts):
+                deep_prompt = compound_prompts[deep_index].to(
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                if deep_prompt.shape != (prompt_length, x.shape[2]):
+                    raise ValueError(
+                        "Deep visual prompt must have shape "
+                        f"[{prompt_length}, {x.shape[2]}], "
+                        f"got {tuple(deep_prompt.shape)}."
+                    )
+                deep_prompt = deep_prompt.unsqueeze(1).expand(
+                    -1, x.shape[1], -1
+                )
+                x = torch.cat(
+                    (
+                        x[:1],
+                        deep_prompt,
+                        x[1 + prompt_length :],
+                    ),
+                    dim=0,
+                )
+            x = block(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
 
         x = self.ln_post(x[:, 0, :])

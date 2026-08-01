@@ -90,7 +90,7 @@ def _random_parameter(rows, width, seed):
     return nn.Parameter(parameter)
 
 
-class TextTailPromptLearner(nn.Module):
+class IndependentTextPromptLearner(nn.Module):
     def __init__(
         self,
         n_ctx_text,
@@ -99,18 +99,48 @@ class TextTailPromptLearner(nn.Module):
         token_embedding,
         modality,
         seed,
+        prompt_depth,
     ):
         super().__init__()
-        self.ctx = _random_parameter(n_ctx_text, text_width, seed)
+        self.n_ctx = n_ctx_text
         modality_name = "photo" if modality == "photo" else "sketch"
-        class_phrases = [
-            f"a {modality_name} of a {name.replace('_', ' ')}"
-            for name in classnames
-        ]
-        placeholders = " ".join(["X"] * n_ctx_text)
+        classnames = [name.replace("_", " ") for name in classnames]
+
+        if n_ctx_text == 0:
+            prompt_prefix = f"a {modality_name} of a"
+            ctx = None
+        elif n_ctx_text <= 3:
+            init_phrase = f"a {modality_name} of"
+            init_tokens = clip.tokenize(init_phrase)
+            with torch.no_grad():
+                embeddings = token_embedding(init_tokens).detach()
+            ctx = embeddings[0, 1 : 1 + n_ctx_text].clone()
+            prompt_prefix = f"a {modality_name} of a"
+        else:
+            ctx = _random_parameter(
+                n_ctx_text,
+                text_width,
+                seed,
+            ).detach()
+            prompt_prefix = " ".join(["X"] * n_ctx_text)
+
+        self.ctx = nn.Parameter(ctx) if ctx is not None else None
+        self.compound_prompts = nn.ParameterList()
+        for layer_index in range(1, prompt_depth):
+            if n_ctx_text == 0:
+                break
+            if n_ctx_text <= 3:
+                deep_ctx = ctx.clone()
+            else:
+                deep_ctx = _random_parameter(
+                    n_ctx_text,
+                    text_width,
+                    seed + layer_index,
+                ).detach()
+            self.compound_prompts.append(nn.Parameter(deep_ctx))
+
         raw_prompts = [
-            f"{phrase} {placeholders}." if placeholders else f"{phrase}."
-            for phrase in class_phrases
+            f"{prompt_prefix} {name}." for name in classnames
         ]
         try:
             tokenized_prompts = clip.tokenize(raw_prompts)
@@ -131,45 +161,41 @@ class TextTailPromptLearner(nn.Module):
             prompt_embeddings,
             persistent=False,
         )
-        if n_ctx_text > 0:
-            context_starts = [
-                int(clip.tokenize(phrase).argmax())
-                for phrase in class_phrases
-            ]
-            self.register_buffer(
-                "context_starts",
-                torch.tensor(context_starts, dtype=torch.long),
-                persistent=False,
-            )
-        else:
-            self.register_buffer(
-                "context_starts",
-                None,
-                persistent=False,
-            )
 
     def forward(self):
         if self.ctx is None:
-            return self.tokenized_prompts, self.prompt_embeddings
+            return self.tokenized_prompts, self.prompt_embeddings, []
 
         prompts = self.prompt_embeddings.clone()
-        offsets = torch.arange(self.ctx.shape[0], device=prompts.device)
-        context_indices = self.context_starts[:, None] + offsets[None, :]
-        batch_indices = torch.arange(
-            prompts.shape[0], device=prompts.device
-        )[:, None]
         context = self.ctx.to(dtype=prompts.dtype)
-        prompts[batch_indices, context_indices] = context.unsqueeze(0)
-        return self.tokenized_prompts, prompts
+        prompts[:, 1 : 1 + self.n_ctx] = context.unsqueeze(0)
+        return self.tokenized_prompts, prompts, list(self.compound_prompts)
 
 
-class VisualPromptLearner(nn.Module):
-    def __init__(self, n_ctx_visual, visual_width, seed):
+class IndependentVisualPromptLearner(nn.Module):
+    def __init__(
+        self,
+        n_ctx_visual,
+        visual_width,
+        seed,
+        prompt_depth,
+    ):
         super().__init__()
         self.ctx = _random_parameter(n_ctx_visual, visual_width, seed)
+        self.compound_prompts = nn.ParameterList(
+            [
+                _random_parameter(
+                    n_ctx_visual,
+                    visual_width,
+                    seed + layer_index,
+                )
+                for layer_index in range(1, prompt_depth)
+                if n_ctx_visual > 0
+            ]
+        )
 
     def forward(self):
-        return self.ctx
+        return self.ctx, list(self.compound_prompts)
 
 
 class CustomCLIP(nn.Module):
@@ -188,32 +214,41 @@ class CustomCLIP(nn.Module):
         self.sk_encoder = copy.deepcopy(clip_model.visual)
         visual_width = self.ph_encoder.ln_pre.normalized_shape[0]
         text_width = clip_model.ln_final.normalized_shape[0]
+        prompt_depth = min(
+            cfg.prompt_depth,
+            clip_model.visual.transformer.layers,
+            clip_model.transformer.layers,
+        )
         self.classnames = tuple(classnames)
-        self.photo_text_prompt = TextTailPromptLearner(
+        self.photo_text_prompt = IndependentTextPromptLearner(
             cfg.n_ctx_text,
             text_width,
             self.classnames,
             clip_model.token_embedding,
             "photo",
             cfg.seed + 101,
+            prompt_depth,
         )
-        self.sketch_text_prompt = TextTailPromptLearner(
+        self.sketch_text_prompt = IndependentTextPromptLearner(
             cfg.n_ctx_text,
             text_width,
             self.classnames,
             clip_model.token_embedding,
             "sketch",
             cfg.seed + 102,
+            prompt_depth,
         )
-        self.photo_visual_prompt = VisualPromptLearner(
+        self.photo_visual_prompt = IndependentVisualPromptLearner(
             cfg.n_ctx_visual,
             visual_width,
             cfg.seed + 201,
+            prompt_depth,
         )
-        self.sketch_visual_prompt = VisualPromptLearner(
+        self.sketch_visual_prompt = IndependentVisualPromptLearner(
             cfg.n_ctx_visual,
             visual_width,
             cfg.seed + 202,
+            prompt_depth,
         )
         self.text_encoder = TextEncoder(clip_model)
         self.logit_scale = clip_model.logit_scale
@@ -229,9 +264,10 @@ class CustomCLIP(nn.Module):
         self.register_buffer("_teacher_photo_text", None, persistent=False)
 
         print(
-            "[Student] independent random tail-text and visual prompts; "
+            "[Student] independent deep text and visual prompts; "
             f"n_ctx_text={cfg.n_ctx_text}, "
-            f"n_ctx_visual={cfg.n_ctx_visual}"
+            f"n_ctx_visual={cfg.n_ctx_visual}, "
+            f"prompt_depth={prompt_depth}; no cross-modal projection"
         )
         print(
             "[Relational KD] sketch-photo branch -> "
@@ -375,16 +411,26 @@ class CustomCLIP(nn.Module):
         return self.sketch_visual_prompt()
 
     def get_student_text_features(self, modality):
-        tokenized_prompts, text_prompts = self.get_text_prompt(modality)()
-        return self.text_encoder(tokenized_prompts, text_prompts)
+        tokenized_prompts, text_prompts, compound_prompts = (
+            self.get_text_prompt(modality)()
+        )
+        return self.text_encoder(
+            tokenized_prompts,
+            text_prompts,
+            compound_prompts,
+        )
 
     def encode_student_image(self, image, modality):
         if modality == "photo":
             image_encoder = self.ph_encoder
         else:
             image_encoder = self.sk_encoder
-        visual_prompt = self.get_visual_prompt(modality)
-        features = image_encoder(image.type(self.dtype), visual_prompt)
+        visual_prompt, compound_prompts = self.get_visual_prompt(modality)
+        features = image_encoder(
+            image.type(self.dtype),
+            visual_prompt,
+            compound_prompts,
+        )
         return features / features.norm(dim=-1, keepdim=True)
 
     def get_logits(self, image, modality):

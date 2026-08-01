@@ -110,13 +110,29 @@ if __name__ == "__main__":
         "--n_ctx_text",
         type=int,
         default=4,
-        help="Number of random learnable tail-context tokens per text modality.",
+        help=(
+            "Number of independent deep text-prompt tokens per modality. "
+            "Values 1..3 initialize from 'a photo/sketch of'; values >=4 "
+            "use Normal(0, 0.02). Set 0 to disable text prompts."
+        ),
     )
     parser.add_argument(
         "--n_ctx_visual",
         type=int,
         default=4,
-        help="Number of independent random visual prompt tokens per modality.",
+        help=(
+            "Number of independent random deep visual-prompt tokens per "
+            "modality; 0 disables visual prompts."
+        ),
+    )
+    parser.add_argument(
+        "--prompt_depth",
+        type=int,
+        default=12,
+        help=(
+            "Number of text and visual transformer layers receiving "
+            "independent prompts."
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -199,6 +215,8 @@ if __name__ == "__main__":
         parser.error("--n_ctx_text must be greater than or equal to 0.")
     if args.n_ctx_visual < 0:
         parser.error("--n_ctx_visual must be greater than or equal to 0.")
+    if args.prompt_depth < 1:
+        parser.error("--prompt_depth must be greater than or equal to 1.")
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
 
     checkpoint_callback = ModelCheckpoint(

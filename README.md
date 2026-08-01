@@ -1,20 +1,33 @@
 ```bash
 !python -m src.train \
-    --root /content/sketchy/Sketchy \
+    --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
     --dataset sketchy_2 \
-    --epochs 5 \
-    --workers 4 \
-    --n_ctx_text 4 \
-    --n_ctx_visual 8 \
-    --lambda_kd 3.0 \
+    --epochs 20 \
+    --workers 8 \
+    --batch_size 64 \
+    --test_batch_size 1024 \
+    --n_ctx_text 3 \
+    --n_ctx_visual 3 \
+    --prompt_depth 12 \
+    --lambda_cls 1.0 \
+    --lambda_kd 25.0 \
+    --lr 1e-3 \
     --teacher_adapter_lr 2e-5 \
     --seed 42 \
     --exp_name sketchy2_independent_prompts
 ```
 
-Text prompts are random learnable tokens appended after each class name and
-before the period. Visual prompts are initialized independently and are not
-projected from text. Both `--n_ctx_text` and `--n_ctx_visual` accept zero.
+Photo and sketch have separate deep prompts in both the text and visual
+transformers. Every prompted layer has its own independent parameters; there
+is no text-to-visual projection or token sharing. Text prompts with one to
+three tokens are initialized from CLIP's token embeddings for `a photo of`
+and `a sketch of`. With four or more tokens, the complete text prompt is
+initialized from `Normal(0, 0.02)`. Visual prompts are always initialized
+independently from `Normal(0, 0.02)`.
+
+`--prompt_depth` controls how many transformer layers receive prompts.
+Both `--n_ctx_text` and `--n_ctx_visual` accept zero for branch-specific
+ablations.
 
 Training uses fixed resize/normalize transforms without augmentation. The
 student losses are classification and DFN5B sketch-photo relational
