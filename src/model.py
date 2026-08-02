@@ -85,11 +85,8 @@ def _load_teacher(args):
     return teacher
 
 
-def freeze_clip_except_layer_norm(clip_model):
+def freeze_clip(clip_model):
     clip_model.requires_grad_(False)
-    for module in clip_model.modules():
-        if isinstance(module, nn.LayerNorm):
-            module.requires_grad_(True)
 
 
 def _random_parameter(rows, width, seed):
@@ -218,7 +215,7 @@ class CustomCLIP(nn.Module):
         teacher=None,
     ):
         super().__init__()
-        freeze_clip_except_layer_norm(clip_model)
+        freeze_clip(clip_model)
         self.dtype = clip_model.dtype
 
         self.ph_encoder = clip_model.visual
@@ -276,7 +273,7 @@ class CustomCLIP(nn.Module):
         self.register_buffer("_teacher_photo_text", None, persistent=False)
 
         print(
-            "[Student] independent deep text and visual prompts; "
+            "[Student] frozen CLIP with independent deep text and visual prompts; "
             f"n_ctx_text={cfg.n_ctx_text}, "
             f"n_ctx_visual={cfg.n_ctx_visual}, "
             f"prompt_depth={prompt_depth}; no cross-modal projection"
