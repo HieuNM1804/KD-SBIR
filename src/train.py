@@ -205,9 +205,27 @@ if __name__ == "__main__":
         help="Temperature for the sketch-photo similarity distribution.",
     )
     parser.add_argument(
+        "--lambda_photo_text_kd",
+        type=float,
+        default=0.0,
+        help="Weight for DFN5B-to-student photo-text logit distillation.",
+    )
+    parser.add_argument(
+        "--lambda_sketch_text_kd",
+        type=float,
+        default=0.0,
+        help="Weight for DFN5B-to-student sketch-text logit distillation.",
+    )
+    parser.add_argument(
+        "--image_text_kd_temperature",
+        type=float,
+        default=0.1,
+        help="Temperature for image-text class-distribution distillation.",
+    )
+    parser.add_argument(
         "--exp_name",
         type=str,
-        default="independent_random_text_visual_prompts_layernorm",
+        default="independent_deep_prompts_image_text_kd",
     )
 
     args = parser.parse_args()
@@ -217,6 +235,10 @@ if __name__ == "__main__":
         parser.error("--n_ctx_visual must be greater than or equal to 0.")
     if args.prompt_depth < 1:
         parser.error("--prompt_depth must be greater than or equal to 1.")
+    if args.lambda_photo_text_kd < 0 or args.lambda_sketch_text_kd < 0:
+        parser.error("Image-text KD weights must be non-negative.")
+    if args.image_text_kd_temperature <= 0:
+        parser.error("--image_text_kd_temperature must be greater than 0.")
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
 
     checkpoint_callback = ModelCheckpoint(

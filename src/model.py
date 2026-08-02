@@ -28,6 +28,13 @@ DFN5B_PRETRAINED = "dfn5b"
 DFN5B_OUTPUT_DIM = 1024
 
 
+def _image_text_kd_active(args):
+    return (
+        args.lambda_photo_text_kd > 0
+        or args.lambda_sketch_text_kd > 0
+    )
+
+
 def _load_clip_model(backbone):
     model_path = clip.download_model(backbone)
     try:
@@ -57,7 +64,11 @@ def _build_teacher_adapters(args, teacher):
 
 
 def _load_teacher(args):
-    if args.lambda_kd <= 0 and not args.joint_teacher_adapter:
+    if (
+        args.lambda_kd <= 0
+        and not args.joint_teacher_adapter
+        and not _image_text_kd_active(args)
+    ):
         return None
 
     print(f"[Teacher] Loading {DFN5B_MODEL} in FP16...")
@@ -68,7 +79,7 @@ def _load_teacher(args):
         device=device,
     )
     teacher.eval().requires_grad_(False)
-    if args.joint_teacher_adapter:
+    if args.joint_teacher_adapter or _image_text_kd_active(args):
         teacher.text_tokenizer = open_clip.get_tokenizer(DFN5B_MODEL)
     teacher.output_dim = DFN5B_OUTPUT_DIM
     return teacher
@@ -258,6 +269,7 @@ class CustomCLIP(nn.Module):
         object.__setattr__(self, "_teacher", teacher)
         self.teacher_active = teacher is not None
         self.joint_teacher_adapter = cfg.joint_teacher_adapter
+        self.image_text_kd_active = _image_text_kd_active(cfg)
         self.teacher_adapters = _build_teacher_adapters(cfg, teacher)
 
         self.register_buffer("_teacher_sketch_text", None, persistent=False)
@@ -273,6 +285,12 @@ class CustomCLIP(nn.Module):
             "[Relational KD] sketch-photo branch -> "
             f"active={self.teacher_active}, lambda={cfg.lambda_kd}, "
             f"temperature={cfg.kd_temperature}"
+        )
+        print(
+            "[Image-Text KD] "
+            f"photo_lambda={cfg.lambda_photo_text_kd}, "
+            f"sketch_lambda={cfg.lambda_sketch_text_kd}, "
+            f"temperature={cfg.image_text_kd_temperature}"
         )
 
     @torch.no_grad()
@@ -332,7 +350,7 @@ class CustomCLIP(nn.Module):
             feature_cache[:sketch_count],
             feature_cache[sketch_count:],
         )
-        if self.joint_teacher_adapter:
+        if self.joint_teacher_adapter or self.image_text_kd_active:
             self.get_teacher_text_features()
 
         teacher = self._teacher
@@ -438,7 +456,7 @@ class CustomCLIP(nn.Module):
         text_features = F.normalize(text_features, dim=-1)
         image_features = self.encode_student_image(image, modality)
         logits = self.logit_scale.exp() * image_features @ text_features.t()
-        return logits, image_features
+        return logits, image_features, text_features
 
     def forward(self, x):
         (
@@ -448,10 +466,10 @@ class CustomCLIP(nn.Module):
             teacher_sketch_base,
             label,
         ) = x
-        photo_logits, photo_features = self.get_logits(
+        photo_logits, photo_features, student_photo_text = self.get_logits(
             photo_tensor, "photo"
         )
-        sk_logits, sketch_features = self.get_logits(
+        sk_logits, sketch_features, student_sketch_text = self.get_logits(
             sk_tensor, "sketch"
         )
 
@@ -466,7 +484,7 @@ class CustomCLIP(nn.Module):
             teacher_sketch_features = self.adapt_teacher_feature(
                 teacher_sketch_base, "sketch"
             )
-            if self.joint_teacher_adapter:
+            if self.joint_teacher_adapter or self.image_text_kd_active:
                 teacher_sketch_text, teacher_photo_text = (
                     self.get_teacher_text_features()
                 )
@@ -481,6 +499,8 @@ class CustomCLIP(nn.Module):
             sk_logits,
             self.teacher_active,
             self.joint_teacher_adapter,
+            student_sketch_text,
+            student_photo_text,
             teacher_sketch_text,
             teacher_photo_text,
         )
@@ -583,15 +603,19 @@ class ZS_SBIR(pl.LightningModule):
         features = self(batch)
         loss, loss_dict = loss_fn(self.args, features)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
-        for k, v in loss_dict.items():
-            bar_names = {
-                "kd_sketch_photo": "KD_SP",
-                "teacher_triplet": "T_TRI",
-                "teacher_semantic": "T_SEM",
-            }
-            show_on_bar = k in bar_names
-            bar_name = bar_names.get(k, k)
-            self.log(bar_name, v, on_step=True, on_epoch=False, prog_bar=show_on_bar)
+        bar_names = {
+            "cls": "CE",
+            "kd_sketch_photo": "KD_II",
+            "image_text_kd": "KD_IT",
+        }
+        for key, bar_name in bar_names.items():
+            self.log(
+                bar_name,
+                loss_dict[key],
+                on_step=True,
+                on_epoch=False,
+                prog_bar=True,
+            )
         return loss
     
     def validation_step(self, batch, batch_idx, dataloader_idx):
