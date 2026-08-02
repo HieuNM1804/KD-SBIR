@@ -651,21 +651,27 @@ class ZS_SBIR(pl.LightningModule):
             p_k = 200 if self.args.dataset == "quickdraw" else 100
 
         for idx, sketch_feature in enumerate(query_features):
-            distance = self.distance_fn(
+            cosine = self.distance_fn(
                 sketch_feature.unsqueeze(0), gallery_features
             ).cpu()
+            # TorchMetrics treats non-positive predictions as non-relevant.
+            # Map cosine from [-1, 1] to (0, 1] without changing its ranking.
+            score = ((cosine + 1.0) * 0.5).clamp(
+                min=torch.finfo(cosine.dtype).eps,
+                max=1.0,
+            )
             target = photo_labels.eq(sketch_labels[idx])
 
             if map_k:
                 top_k = min(map_k, len(gallery_features))
                 ap[idx] = retrieval_average_precision(
-                    distance, target, top_k=top_k
+                    score, target, top_k=top_k
                 )
             else:
-                ap[idx] = retrieval_average_precision(distance, target)
+                ap[idx] = retrieval_average_precision(score, target)
 
             precision_at_k[idx] = retrieval_precision(
-                distance, target, top_k=p_k
+                score, target, top_k=p_k
             )
 
         mAP = ap.mean()
