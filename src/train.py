@@ -140,13 +140,6 @@ if __name__ == "__main__":
         default=42,
         help="Random seed for Python, NumPy, PyTorch, and DataLoader workers.",
     )
-    parser.add_argument(
-        "--lambda_cls",
-        type=float,
-        default=1.0,
-        help="Weight for CE(photo, text) + CE(sketch, text).",
-    )
-
     parser.add_argument("--lr", type=float, default=4e-5)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--test_batch_size", type=int, default=1024)
@@ -225,7 +218,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--exp_name",
         type=str,
-        default="independent_deep_prompts_image_text_kd",
+        default="teacher_kd_without_student_classification",
     )
 
     args = parser.parse_args()

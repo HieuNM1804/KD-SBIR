@@ -228,23 +228,34 @@ class CustomCLIP(nn.Module):
             clip_model.transformer.layers,
         )
         self.classnames = tuple(classnames)
-        self.photo_text_prompt = IndependentTextPromptLearner(
-            cfg.n_ctx_text,
-            text_width,
-            self.classnames,
-            clip_model.token_embedding,
-            "photo",
-            cfg.seed + 101,
-            prompt_depth,
+        self.photo_text_kd_active = cfg.lambda_photo_text_kd > 0
+        self.sketch_text_kd_active = cfg.lambda_sketch_text_kd > 0
+        self.image_text_kd_active = _image_text_kd_active(cfg)
+        self.photo_text_prompt = (
+            IndependentTextPromptLearner(
+                cfg.n_ctx_text,
+                text_width,
+                self.classnames,
+                clip_model.token_embedding,
+                "photo",
+                cfg.seed + 101,
+                prompt_depth,
+            )
+            if self.photo_text_kd_active
+            else None
         )
-        self.sketch_text_prompt = IndependentTextPromptLearner(
-            cfg.n_ctx_text,
-            text_width,
-            self.classnames,
-            clip_model.token_embedding,
-            "sketch",
-            cfg.seed + 102,
-            prompt_depth,
+        self.sketch_text_prompt = (
+            IndependentTextPromptLearner(
+                cfg.n_ctx_text,
+                text_width,
+                self.classnames,
+                clip_model.token_embedding,
+                "sketch",
+                cfg.seed + 102,
+                prompt_depth,
+            )
+            if self.sketch_text_kd_active
+            else None
         )
         self.photo_visual_prompt = IndependentVisualPromptLearner(
             cfg.n_ctx_visual,
@@ -258,15 +269,15 @@ class CustomCLIP(nn.Module):
             cfg.seed + 202,
             prompt_depth,
         )
-        self.text_encoder = TextEncoder(clip_model)
-        self.logit_scale = clip_model.logit_scale
+        self.text_encoder = (
+            TextEncoder(clip_model) if self.image_text_kd_active else None
+        )
 
         # The pretrained teacher is reloaded when needed and must not be saved
         # inside every student checkpoint.
         object.__setattr__(self, "_teacher", teacher)
         self.teacher_active = teacher is not None
         self.joint_teacher_adapter = cfg.joint_teacher_adapter
-        self.image_text_kd_active = _image_text_kd_active(cfg)
         self.teacher_adapters = _build_teacher_adapters(cfg, teacher)
 
         self.register_buffer("_teacher_sketch_text", None, persistent=False)
@@ -448,13 +459,6 @@ class CustomCLIP(nn.Module):
         )
         return features / features.norm(dim=-1, keepdim=True)
 
-    def get_logits(self, image, modality):
-        text_features = self.get_student_text_features(modality)
-        text_features = F.normalize(text_features, dim=-1)
-        image_features = self.encode_student_image(image, modality)
-        logits = self.logit_scale.exp() * image_features @ text_features.t()
-        return logits, image_features, text_features
-
     def forward(self, x):
         (
             photo_tensor,
@@ -463,11 +467,17 @@ class CustomCLIP(nn.Module):
             teacher_sketch_base,
             label,
         ) = x
-        photo_logits, photo_features, student_photo_text = self.get_logits(
-            photo_tensor, "photo"
+        photo_features = self.encode_student_image(photo_tensor, "photo")
+        sketch_features = self.encode_student_image(sk_tensor, "sketch")
+        student_photo_text = (
+            F.normalize(self.get_student_text_features("photo"), dim=-1)
+            if self.photo_text_kd_active
+            else None
         )
-        sk_logits, sketch_features, student_sketch_text = self.get_logits(
-            sk_tensor, "sketch"
+        student_sketch_text = (
+            F.normalize(self.get_student_text_features("sketch"), dim=-1)
+            if self.sketch_text_kd_active
+            else None
         )
 
         teacher_photo_features = photo_features.detach()
@@ -492,8 +502,6 @@ class CustomCLIP(nn.Module):
             teacher_photo_features,
             teacher_sketch_features,
             label,
-            photo_logits,
-            sk_logits,
             self.teacher_active,
             self.joint_teacher_adapter,
             student_sketch_text,
@@ -601,7 +609,6 @@ class ZS_SBIR(pl.LightningModule):
         loss, loss_dict = loss_fn(self.args, features)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         bar_names = {
-            "cls": "CE",
             "kd_sketch_photo": "KD_II",
             "image_text_kd": "KD_IT",
         }

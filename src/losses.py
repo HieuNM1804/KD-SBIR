@@ -134,8 +134,6 @@ def loss_fn(args, features):
         teacher_photo_features,
         teacher_sketch_features,
         labels,
-        photo_logits,
-        sketch_logits,
         teacher_active,
         joint_teacher_adapter,
         student_sketch_text,
@@ -144,13 +142,9 @@ def loss_fn(args, features):
         teacher_photo_text,
     ) = features
 
-    labels = labels.to(photo_logits.device)
-    classification_loss = (
-        F.cross_entropy(photo_logits, labels)
-        + F.cross_entropy(sketch_logits, labels)
-    )
+    labels = labels.to(photo_features.device)
 
-    kd_loss = torch.zeros((), device=photo_logits.device)
+    kd_loss = torch.zeros((), device=photo_features.device)
     if teacher_active and args.lambda_kd > 0:
         kd_loss = relational_kd_loss(
             sketch_features,
@@ -160,7 +154,7 @@ def loss_fn(args, features):
             args.kd_temperature,
         )
 
-    zero = torch.zeros((), device=photo_logits.device)
+    zero = torch.zeros((), device=photo_features.device)
     photo_text_kd = zero
     sketch_text_kd = zero
     active_image_text_losses = []
@@ -207,15 +201,13 @@ def loss_fn(args, features):
         )
 
     total_loss = (
-        args.lambda_cls * classification_loss
-        + args.lambda_kd * kd_loss
+        args.lambda_kd * kd_loss
         + args.lambda_photo_text_kd * photo_text_kd
         + args.lambda_sketch_text_kd * sketch_text_kd
         + args.lambda_teacher_retrieval * teacher_triplet_loss
         + args.lambda_teacher_semantic * teacher_semantic
     )
     return total_loss, {
-        "cls": classification_loss,
         "kd_sketch_photo": kd_loss,
         "image_text_kd": image_text_kd,
         "teacher_triplet": teacher_triplet_loss,
