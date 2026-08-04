@@ -218,9 +218,8 @@ class CustomCLIP(nn.Module):
         freeze_clip(clip_model)
         self.dtype = clip_model.dtype
 
-        self.ph_encoder = clip_model.visual
-        self.sk_encoder = copy.deepcopy(clip_model.visual)
-        visual_width = self.ph_encoder.ln_pre.normalized_shape[0]
+        self.visual_encoder = clip_model.visual
+        visual_width = self.visual_encoder.ln_pre.normalized_shape[0]
         text_width = clip_model.ln_final.normalized_shape[0]
         prompt_depth = min(
             cfg.prompt_depth,
@@ -447,12 +446,8 @@ class CustomCLIP(nn.Module):
         )
 
     def encode_student_image(self, image, modality):
-        if modality == "photo":
-            image_encoder = self.ph_encoder
-        else:
-            image_encoder = self.sk_encoder
         visual_prompt, compound_prompts = self.get_visual_prompt(modality)
-        features = image_encoder(
+        features = self.visual_encoder(
             image.type(self.dtype),
             visual_prompt,
             compound_prompts,
