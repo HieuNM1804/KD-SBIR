@@ -17,6 +17,7 @@ class TextEncoder(nn.Module):
         tokenized_text,
         prompt_embeddings=None,
         compound_prompts=None,
+        prompt_positions=None,
     ):
         # L = 77 tokens, D = 512 (embedding dimension), N = 64 (batch size)
         # tokenized_text : [N, L]
@@ -29,6 +30,8 @@ class TextEncoder(nn.Module):
         prompt_length = (
             compound_prompts[0].shape[0] if compound_prompts else 0
         )
+        if compound_prompts and prompt_positions is None:
+            raise ValueError("Deep text prompts require prompt positions.")
         for layer_index, block in enumerate(self.resblocks):
             deep_index = layer_index - 1
             if 0 <= deep_index < len(compound_prompts):
@@ -45,14 +48,14 @@ class TextEncoder(nn.Module):
                 deep_prompt = deep_prompt.unsqueeze(1).expand(
                     -1, x.shape[1], -1
                 )
-                x = torch.cat(
-                    (
-                        x[:1],
-                        deep_prompt,
-                        x[1 + prompt_length :],
-                    ),
-                    dim=0,
+                x = x.permute(1, 0, 2).scatter(
+                    1,
+                    prompt_positions.to(x.device)
+                    .unsqueeze(-1)
+                    .expand(-1, -1, x.shape[2]),
+                    deep_prompt.permute(1, 0, 2),
                 )
+                x = x.permute(1, 0, 2)
             x = block(x)
         x = x.permute(1, 0, 2)  # [L, N, D] -> [N, L, D]
         x = self.ln_final(x).type(self.dtype)  # [N, L, D]

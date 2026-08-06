@@ -115,7 +115,6 @@ class IndependentTextPromptLearner(nn.Module):
         classnames = [name.replace("_", " ") for name in classnames]
 
         if n_ctx_text == 0:
-            prompt_prefix = f"a {modality_name} of a"
             ctx = None
         elif n_ctx_text <= 3:
             init_phrase = f"a {modality_name} of"
@@ -123,14 +122,12 @@ class IndependentTextPromptLearner(nn.Module):
             with torch.no_grad():
                 embeddings = token_embedding(init_tokens).detach()
             ctx = embeddings[0, 1 : 1 + n_ctx_text].clone()
-            prompt_prefix = f"a {modality_name} of a"
         else:
             ctx = _random_parameter(
                 n_ctx_text,
                 text_width,
                 seed,
             ).detach()
-            prompt_prefix = " ".join(["X"] * n_ctx_text)
 
         self.ctx = nn.Parameter(ctx) if ctx is not None else None
         self.compound_prompts = nn.ParameterList()
@@ -147,15 +144,36 @@ class IndependentTextPromptLearner(nn.Module):
                 ).detach()
             self.compound_prompts.append(nn.Parameter(deep_ctx))
 
+        base_prompts = [
+            f"a {modality_name} of a {name}" for name in classnames
+        ]
+        placeholders = " ".join(["X"] * n_ctx_text)
         raw_prompts = [
-            f"{prompt_prefix} {name}." for name in classnames
+            f"{base} {placeholders}." if placeholders else f"{base}."
+            for base in base_prompts
         ]
         try:
             tokenized_prompts = clip.tokenize(raw_prompts)
+            base_tokens = clip.tokenize(base_prompts)
         except RuntimeError as error:
             raise ValueError(
                 f"n_ctx_text={n_ctx_text} exceeds CLIP's text context length."
             ) from error
+
+        if n_ctx_text:
+            prompt_starts = base_tokens.argmax(dim=-1)
+            prompt_positions = prompt_starts[:, None] + torch.arange(
+                n_ctx_text
+            )[None, :]
+            eot_positions = tokenized_prompts.argmax(dim=-1)
+            if torch.any(prompt_positions[:, -1] >= eot_positions):
+                raise ValueError(
+                    f"n_ctx_text={n_ctx_text} leaves no room for the end-of-text token."
+                )
+        else:
+            prompt_positions = torch.empty(
+                len(classnames), 0, dtype=torch.long
+            )
 
         with torch.no_grad():
             prompt_embeddings = token_embedding(tokenized_prompts).detach()
@@ -169,15 +187,33 @@ class IndependentTextPromptLearner(nn.Module):
             prompt_embeddings,
             persistent=False,
         )
+        self.register_buffer(
+            "prompt_positions",
+            prompt_positions,
+            persistent=False,
+        )
 
     def forward(self):
         if self.ctx is None:
-            return self.tokenized_prompts, self.prompt_embeddings, []
+            return (
+                self.tokenized_prompts,
+                self.prompt_embeddings,
+                [],
+                self.prompt_positions,
+            )
 
         prompts = self.prompt_embeddings.clone()
         context = self.ctx.to(dtype=prompts.dtype)
-        prompts[:, 1 : 1 + self.n_ctx] = context.unsqueeze(0)
-        return self.tokenized_prompts, prompts, list(self.compound_prompts)
+        batch_indices = torch.arange(
+            prompts.shape[0], device=prompts.device
+        )[:, None]
+        prompts[batch_indices, self.prompt_positions] = context.unsqueeze(0)
+        return (
+            self.tokenized_prompts,
+            prompts,
+            list(self.compound_prompts),
+            self.prompt_positions,
+        )
 
 
 class IndependentVisualPromptLearner(nn.Module):
@@ -436,13 +472,14 @@ class CustomCLIP(nn.Module):
         return self.sketch_visual_prompt()
 
     def get_student_text_features(self, modality):
-        tokenized_prompts, text_prompts, compound_prompts = (
+        tokenized_prompts, text_prompts, compound_prompts, prompt_positions = (
             self.get_text_prompt(modality)()
         )
         return self.text_encoder(
             tokenized_prompts,
             text_prompts,
             compound_prompts,
+            prompt_positions,
         )
 
     def encode_student_image(self, image, modality):
