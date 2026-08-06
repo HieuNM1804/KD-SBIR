@@ -136,7 +136,7 @@ class VisionTransformer(nn.Module):
             prompt_length = prompt.shape[0]
             prompt = prompt.to(device=x.device, dtype=x.dtype)
             prompt = prompt.unsqueeze(0).expand(x.shape[0], -1, -1)
-            x = torch.cat((x[:, :1], prompt, x[:, 1:]), dim=1)
+            x = torch.cat((x, prompt), dim=1)
 
         x = self.ln_pre(x)
 
@@ -160,9 +160,8 @@ class VisionTransformer(nn.Module):
                 )
                 x = torch.cat(
                     (
-                        x[:1],
+                        x[:-prompt_length],
                         deep_prompt,
-                        x[1 + prompt_length :],
                     ),
                     dim=0,
                 )
