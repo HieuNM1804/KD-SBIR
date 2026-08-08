@@ -263,8 +263,13 @@ class CustomCLIP(nn.Module):
             clip_model.transformer.layers,
         )
         self.classnames = tuple(classnames)
-        self.photo_text_kd_active = cfg.lambda_photo_text_kd > 0
-        self.sketch_text_kd_active = cfg.lambda_sketch_text_kd > 0
+        self.classification_active = cfg.lambda_cls > 0
+        self.photo_text_active = (
+            self.classification_active or cfg.lambda_photo_text_kd > 0
+        )
+        self.sketch_text_active = (
+            self.classification_active or cfg.lambda_sketch_text_kd > 0
+        )
         self.image_text_kd_active = _image_text_kd_active(cfg)
         self.photo_text_prompt = (
             IndependentTextPromptLearner(
@@ -276,7 +281,7 @@ class CustomCLIP(nn.Module):
                 cfg.seed + 101,
                 prompt_depth,
             )
-            if self.photo_text_kd_active
+            if self.photo_text_active
             else None
         )
         self.sketch_text_prompt = (
@@ -289,7 +294,7 @@ class CustomCLIP(nn.Module):
                 cfg.seed + 102,
                 prompt_depth,
             )
-            if self.sketch_text_kd_active
+            if self.sketch_text_active
             else None
         )
         self.photo_visual_prompt = IndependentVisualPromptLearner(
@@ -305,8 +310,11 @@ class CustomCLIP(nn.Module):
             prompt_depth,
         )
         self.text_encoder = (
-            TextEncoder(clip_model) if self.image_text_kd_active else None
+            TextEncoder(clip_model)
+            if self.photo_text_active or self.sketch_text_active
+            else None
         )
+        self.logit_scale = clip_model.logit_scale
 
         # The pretrained teacher is reloaded when needed and must not be saved
         # inside every student checkpoint.
@@ -328,6 +336,10 @@ class CustomCLIP(nn.Module):
             "[Relational KD] sketch-photo branch -> "
             f"active={self.teacher_active}, lambda={cfg.lambda_kd}, "
             f"temperature={cfg.kd_temperature}"
+        )
+        print(
+            "[Classification] "
+            f"active={self.classification_active}, lambda={cfg.lambda_cls}"
         )
         print(
             "[Image-Text KD] "
@@ -503,12 +515,26 @@ class CustomCLIP(nn.Module):
         sketch_features = self.encode_student_image(sk_tensor, "sketch")
         student_photo_text = (
             F.normalize(self.get_student_text_features("photo"), dim=-1)
-            if self.photo_text_kd_active
+            if self.photo_text_active
             else None
         )
         student_sketch_text = (
             F.normalize(self.get_student_text_features("sketch"), dim=-1)
-            if self.sketch_text_kd_active
+            if self.sketch_text_active
+            else None
+        )
+        photo_logits = (
+            self.logit_scale.exp()
+            * photo_features
+            @ student_photo_text.t()
+            if self.classification_active
+            else None
+        )
+        sketch_logits = (
+            self.logit_scale.exp()
+            * sketch_features
+            @ student_sketch_text.t()
+            if self.classification_active
             else None
         )
 
@@ -534,6 +560,8 @@ class CustomCLIP(nn.Module):
             teacher_photo_features,
             teacher_sketch_features,
             label,
+            photo_logits,
+            sketch_logits,
             self.teacher_active,
             self.joint_teacher_adapter,
             student_sketch_text,
@@ -641,6 +669,7 @@ class ZS_SBIR(pl.LightningModule):
         loss, loss_dict = loss_fn(self.args, features)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         bar_names = {
+            "cls": "CE",
             "kd_sketch_photo": "KD_II",
             "image_text_kd": "KD_IT",
         }

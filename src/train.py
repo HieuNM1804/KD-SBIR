@@ -140,6 +140,12 @@ if __name__ == "__main__":
         default=42,
         help="Random seed for Python, NumPy, PyTorch, and DataLoader workers.",
     )
+    parser.add_argument(
+        "--lambda_cls",
+        type=float,
+        default=1.0,
+        help="Weight for CE(photo, text) + CE(sketch, text).",
+    )
     parser.add_argument("--lr", type=float, default=4e-5)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--test_batch_size", type=int, default=1024)
@@ -218,7 +224,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--exp_name",
         type=str,
-        default="teacher_kd_without_student_classification",
+        default="tail_prompts_four_student_losses",
     )
 
     args = parser.parse_args()
@@ -228,6 +234,8 @@ if __name__ == "__main__":
         parser.error("--n_ctx_visual must be greater than or equal to 0.")
     if args.prompt_depth < 1:
         parser.error("--prompt_depth must be greater than or equal to 1.")
+    if args.lambda_cls < 0:
+        parser.error("--lambda_cls must be non-negative.")
     if args.lambda_photo_text_kd < 0 or args.lambda_sketch_text_kd < 0:
         parser.error("Image-text KD weights must be non-negative.")
     if args.image_text_kd_temperature <= 0:
