@@ -147,20 +147,26 @@ class IndependentTextPromptLearner(nn.Module):
         base_prompts = [
             f"a {modality_name} of a {name}" for name in classnames
         ]
-        placeholders = " ".join(["X"] * n_ctx_text)
-        raw_prompts = [
-            f"{base} {placeholders}." if placeholders else f"{base}."
-            for base in base_prompts
-        ]
+        if n_ctx_text <= 3:
+            raw_prompts = [f"{base}." for base in base_prompts]
+        else:
+            placeholders = " ".join(["X"] * n_ctx_text)
+            raw_prompts = [
+                f"{base} {placeholders}." for base in base_prompts
+            ]
         try:
             tokenized_prompts = clip.tokenize(raw_prompts)
-            base_tokens = clip.tokenize(base_prompts)
         except RuntimeError as error:
             raise ValueError(
                 f"n_ctx_text={n_ctx_text} exceeds CLIP's text context length."
             ) from error
 
-        if n_ctx_text:
+        if 0 < n_ctx_text <= 3:
+            prompt_positions = torch.arange(
+                1, 1 + n_ctx_text
+            ).expand(len(classnames), -1)
+        elif n_ctx_text > 3:
+            base_tokens = clip.tokenize(base_prompts)
             prompt_starts = base_tokens.argmax(dim=-1)
             prompt_positions = prompt_starts[:, None] + torch.arange(
                 n_ctx_text
