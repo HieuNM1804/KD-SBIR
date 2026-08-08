@@ -1,4 +1,8 @@
 import copy
+import hashlib
+import os
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
@@ -13,9 +17,17 @@ from tqdm.auto import tqdm
 
 from clip import clip
 from clip.model import build_model
-from src.dataset import TeacherFeatureDataset
+from src.dataset import (
+    TeacherAdapterDataset,
+    TeacherFeatureDataset,
+    WorkerInvariantSampler,
+)
 from src.text_encoder import TextEncoder
-from src.losses import loss_fn
+from src.losses import (
+    batch_hard_teacher_triplet_loss,
+    loss_fn,
+    teacher_semantic_loss,
+)
 from src.teacher_adapters import ModalityAdapters
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -35,6 +47,14 @@ def _image_text_kd_active(args):
     )
 
 
+def _persistent_teacher_cache_available(args):
+    return (
+        bool(args.teacher_cache_path)
+        and not args.rebuild_teacher_cache
+        and Path(args.teacher_cache_path).is_file()
+    )
+
+
 def _load_clip_model(backbone):
     model_path = clip.download_model(backbone)
     try:
@@ -47,7 +67,7 @@ def _load_clip_model(backbone):
 
 
 def _build_teacher_adapters(args, teacher):
-    if not args.joint_teacher_adapter:
+    if not args.joint_teacher_adapter or teacher is None:
         return None
 
     feature_dim = int(teacher.output_dim)
@@ -64,6 +84,13 @@ def _build_teacher_adapters(args, teacher):
 
 
 def _load_teacher(args):
+    if _persistent_teacher_cache_available(args):
+        print(
+            "[Teacher Cache] persistent cache found; "
+            "skipping DFN5B loading."
+        )
+        return None
+
     if (
         args.lambda_kd <= 0
         and not args.joint_teacher_adapter
@@ -257,6 +284,7 @@ class CustomCLIP(nn.Module):
         teacher=None,
     ):
         super().__init__()
+        self.cfg = cfg
         freeze_clip(clip_model)
         self.dtype = clip_model.dtype
 
@@ -325,8 +353,11 @@ class CustomCLIP(nn.Module):
         # The pretrained teacher is reloaded when needed and must not be saved
         # inside every student checkpoint.
         object.__setattr__(self, "_teacher", teacher)
-        self.teacher_active = teacher is not None
-        self.joint_teacher_adapter = cfg.joint_teacher_adapter
+        self.persistent_teacher_cache = _persistent_teacher_cache_available(cfg)
+        self.teacher_active = teacher is not None or self.persistent_teacher_cache
+        self.joint_teacher_adapter = (
+            cfg.joint_teacher_adapter and not self.persistent_teacher_cache
+        )
         self.teacher_adapters = _build_teacher_adapters(cfg, teacher)
 
         self.register_buffer("_teacher_sketch_text", None, persistent=False)
@@ -354,7 +385,251 @@ class CustomCLIP(nn.Module):
             f"temperature={cfg.image_text_kd_temperature}"
         )
 
+    @staticmethod
+    def _path_fingerprint(paths, root):
+        digest = hashlib.sha256()
+        for path in paths:
+            relative = os.path.relpath(path, root).replace("\\", "/")
+            digest.update(relative.encode("utf-8"))
+            digest.update(b"\0")
+        return digest.hexdigest()
+
+    def _teacher_cache_metadata(self, train_dataset):
+        cfg = self.cfg
+        return {
+            "format_version": 1,
+            "teacher_model": DFN5B_MODEL,
+            "teacher_pretrained": DFN5B_PRETRAINED,
+            "dataset": cfg.dataset,
+            "max_size": train_dataset.max_size,
+            "classnames": list(self.classnames),
+            "sketch_count": len(train_dataset.all_sketches_path),
+            "photo_count": len(train_dataset.all_photo_paths),
+            "sketch_fingerprint": self._path_fingerprint(
+                train_dataset.all_sketches_path, cfg.root
+            ),
+            "photo_fingerprint": self._path_fingerprint(
+                train_dataset.all_photo_paths, cfg.root
+            ),
+            "adapter_bottleneck": cfg.teacher_adapter_bottleneck,
+            "adapter_lr": cfg.teacher_adapter_lr,
+            "pretrain_epochs": cfg.teacher_pretrain_epochs,
+            "pretrain_batch_size": cfg.teacher_pretrain_batch_size,
+            "lambda_retrieval": cfg.lambda_teacher_retrieval,
+            "lambda_semantic": cfg.lambda_teacher_semantic,
+            "temperature": cfg.teacher_temperature,
+            "triplet_margin": cfg.teacher_triplet_margin,
+            "seed": cfg.seed,
+        }
+
+    def _load_persistent_teacher_cache(self, train_dataset):
+        cache_path = Path(self.cfg.teacher_cache_path)
+        try:
+            payload = torch.load(
+                cache_path,
+                map_location="cpu",
+                weights_only=True,
+            )
+        except TypeError:
+            payload = torch.load(cache_path, map_location="cpu")
+
+        expected = self._teacher_cache_metadata(train_dataset)
+        actual = payload.get("metadata", {})
+        mismatches = [
+            key
+            for key, expected_value in expected.items()
+            if actual.get(key) != expected_value
+        ]
+        required_tensors = (
+            "teacher_sketch_features",
+            "teacher_photo_features",
+            "teacher_sketch_text",
+            "teacher_photo_text",
+        )
+        missing = [key for key in required_tensors if key not in payload]
+        if mismatches or missing:
+            details = []
+            if mismatches:
+                details.append("metadata: " + ", ".join(mismatches))
+            if missing:
+                details.append("tensors: " + ", ".join(missing))
+            raise RuntimeError(
+                f"Teacher cache {cache_path} is incompatible ({'; '.join(details)}). "
+                "Use another --teacher_cache_path or pass "
+                "--rebuild_teacher_cache."
+            )
+
+        train_dataset.set_teacher_features(
+            payload["teacher_sketch_features"],
+            payload["teacher_photo_features"],
+        )
+        self._teacher_sketch_text = payload["teacher_sketch_text"]
+        self._teacher_photo_text = payload["teacher_photo_text"]
+        self.teacher_active = True
+        self.joint_teacher_adapter = False
+        self.teacher_adapters = None
+        object.__setattr__(self, "_teacher", None)
+        cache_size_mb = cache_path.stat().st_size / 1024**2
+        print(
+            f"[Teacher Cache] loaded {cache_path} ({cache_size_mb:.1f} MB); "
+            "skipped DFN5B encoding and teacher pretraining."
+        )
+
+    def _pretrain_teacher_adapters(
+        self,
+        train_dataset,
+        workers,
+        show_progress,
+    ):
+        if self.teacher_adapters is None:
+            raise RuntimeError(
+                "Teacher pretraining requires --joint_teacher_adapter."
+            )
+
+        cfg = self.cfg
+        teacher_device = next(self._teacher.parameters()).device
+        self.teacher_adapters.to(device=teacher_device, dtype=torch.float32)
+        self.teacher_adapters.requires_grad_(True).train()
+        teacher_sketch_text, teacher_photo_text = (
+            self.get_teacher_text_features()
+        )
+        adapter_dataset = TeacherAdapterDataset(train_dataset)
+        loader = DataLoader(
+            adapter_dataset,
+            batch_size=cfg.teacher_pretrain_batch_size,
+            shuffle=False,
+            sampler=WorkerInvariantSampler(adapter_dataset, cfg.seed),
+            drop_last=True,
+            num_workers=workers,
+            pin_memory=True,
+            persistent_workers=workers > 0,
+            prefetch_factor=4 if workers > 0 else None,
+            generator=torch.Generator().manual_seed(cfg.seed),
+        )
+        optimizer = torch.optim.SGD(
+            self.teacher_adapters.parameters(),
+            lr=cfg.teacher_adapter_lr,
+            momentum=0.9,
+            weight_decay=1e-3,
+        )
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=5,
+            gamma=0.1,
+        )
+
+        for epoch in range(cfg.teacher_pretrain_epochs):
+            retrieval_total = 0.0
+            semantic_total = 0.0
+            steps = 0
+            batches = tqdm(
+                loader,
+                desc=(
+                    "Teacher adapter pretrain "
+                    f"{epoch + 1}/{cfg.teacher_pretrain_epochs}"
+                ),
+                disable=not show_progress,
+            )
+            with torch.enable_grad():
+                for photo_base, sketch_base, labels in batches:
+                    photo_base = photo_base.to(
+                        teacher_device, dtype=torch.float32, non_blocking=True
+                    )
+                    sketch_base = sketch_base.to(
+                        teacher_device, dtype=torch.float32, non_blocking=True
+                    )
+                    labels = labels.to(teacher_device, non_blocking=True)
+                    photo_features = self.adapt_teacher_feature(
+                        photo_base, "photo"
+                    )
+                    sketch_features = self.adapt_teacher_feature(
+                        sketch_base, "sketch"
+                    )
+                    retrieval = batch_hard_teacher_triplet_loss(
+                        sketch_features,
+                        photo_features,
+                        labels,
+                        cfg.teacher_triplet_margin,
+                    )
+                    semantic = teacher_semantic_loss(
+                        sketch_features,
+                        photo_features,
+                        labels,
+                        teacher_sketch_text,
+                        teacher_photo_text,
+                        cfg.teacher_temperature,
+                    )
+                    loss = (
+                        cfg.lambda_teacher_retrieval * retrieval
+                        + cfg.lambda_teacher_semantic * semantic
+                    )
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    optimizer.step()
+
+                    retrieval_total += retrieval.detach().item()
+                    semantic_total += semantic.detach().item()
+                    steps += 1
+                    if show_progress:
+                        batches.set_postfix(
+                            T_TRI=f"{retrieval.item():.3f}",
+                            T_SEM=f"{semantic.item():.3f}",
+                        )
+            scheduler.step()
+            if steps == 0:
+                raise RuntimeError(
+                    "Teacher pretraining produced no complete batches."
+                )
+            print(
+                f"[Teacher Pretrain] epoch={epoch + 1}, "
+                f"retrieval={retrieval_total / steps:.6f}, "
+                f"semantic={semantic_total / steps:.6f}"
+            )
+
+        self.teacher_adapters.eval().requires_grad_(False)
+
     @torch.no_grad()
+    def _materialize_adapted_features(self, features, modality):
+        teacher_device = next(self._teacher.parameters()).device
+        output = torch.empty_like(features, dtype=torch.float16)
+        batch_size = self.cfg.teacher_pretrain_batch_size
+        for start in range(0, len(features), batch_size):
+            end = min(start + batch_size, len(features))
+            batch = features[start:end].to(
+                teacher_device, dtype=torch.float32, non_blocking=True
+            )
+            adapted = self.adapt_teacher_feature(batch, modality)
+            output[start:end].copy_(adapted.to(dtype=torch.float16).cpu())
+        return output
+
+    def _save_persistent_teacher_cache(
+        self,
+        train_dataset,
+        sketch_features,
+        photo_features,
+        adapter_state,
+    ):
+        if not self.cfg.teacher_cache_path:
+            return
+
+        cache_path = Path(self.cfg.teacher_cache_path)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = cache_path.with_name(cache_path.name + ".tmp")
+        payload = {
+            "metadata": self._teacher_cache_metadata(train_dataset),
+            "teacher_sketch_features": sketch_features.cpu(),
+            "teacher_photo_features": photo_features.cpu(),
+            "teacher_sketch_text": self._teacher_sketch_text.detach().cpu(),
+            "teacher_photo_text": self._teacher_photo_text.detach().cpu(),
+            "adapter_state_dict": adapter_state,
+        }
+        torch.save(payload, temporary_path)
+        os.replace(temporary_path, cache_path)
+        cache_size_mb = cache_path.stat().st_size / 1024**2
+        print(
+            f"[Teacher Cache] saved {cache_path} ({cache_size_mb:.1f} MB)."
+        )
+
     def cache_teacher_features(
         self,
         train_dataset,
@@ -362,6 +637,9 @@ class CustomCLIP(nn.Module):
         workers,
         show_progress,
     ):
+        if self.persistent_teacher_cache:
+            self._load_persistent_teacher_cache(train_dataset)
+            return
         if self._teacher is None:
             return
 
@@ -389,6 +667,11 @@ class CustomCLIP(nn.Module):
             DFN5B_OUTPUT_DIM,
             dtype=torch.float16,
         )
+        cache_size_mb = (
+            feature_cache.numel()
+            * feature_cache.element_size()
+            / 1024**2
+        )
         teacher_device = next(self._teacher.parameters()).device
         offset = 0
         batches = tqdm(
@@ -396,16 +679,17 @@ class CustomCLIP(nn.Module):
             desc="Caching DFN5B features",
             disable=not show_progress,
         )
-        for images in batches:
-            images = images.to(
-                device=teacher_device,
-                dtype=torch.float16,
-                non_blocking=True,
-            )
-            features = self._teacher.encode_image(images)
-            end = offset + len(features)
-            feature_cache[offset:end].copy_(features.cpu())
-            offset = end
+        with torch.no_grad():
+            for images in batches:
+                images = images.to(
+                    device=teacher_device,
+                    dtype=torch.float16,
+                    non_blocking=True,
+                )
+                features = self._teacher.encode_image(images)
+                end = offset + len(features)
+                feature_cache[offset:end].copy_(features.cpu())
+                offset = end
 
         train_dataset.set_teacher_features(
             feature_cache[:sketch_count],
@@ -414,6 +698,36 @@ class CustomCLIP(nn.Module):
         if self.joint_teacher_adapter or self.image_text_kd_active:
             self.get_teacher_text_features()
 
+        if self.cfg.teacher_pretrain_epochs > 0:
+            self._pretrain_teacher_adapters(
+                train_dataset,
+                workers,
+                show_progress,
+            )
+            adapter_state = {
+                key: value.detach().cpu()
+                for key, value in self.teacher_adapters.state_dict().items()
+            }
+            adapted_sketch = self._materialize_adapted_features(
+                feature_cache[:sketch_count], "sketch"
+            )
+            adapted_photo = self._materialize_adapted_features(
+                feature_cache[sketch_count:], "photo"
+            )
+            train_dataset.set_teacher_features(
+                adapted_sketch,
+                adapted_photo,
+            )
+            self._save_persistent_teacher_cache(
+                train_dataset,
+                adapted_sketch,
+                adapted_photo,
+                adapter_state,
+            )
+            self.joint_teacher_adapter = False
+            self.teacher_adapters = None
+            del feature_cache
+
         teacher = self._teacher
         object.__setattr__(self, "_teacher", None)
         del images, features
@@ -421,11 +735,6 @@ class CustomCLIP(nn.Module):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        cache_size_mb = (
-            feature_cache.numel()
-            * feature_cache.element_size()
-            / 1024**2
-        )
         print(
             "[Teacher Cache] encoded each seen image once; "
             f"images={len(paths):,}, memory={cache_size_mb:.1f} MB. "

@@ -183,6 +183,35 @@ if __name__ == "__main__":
     parser.add_argument("--teacher_adapter_bottleneck", type=int, default=64)
     parser.add_argument("--teacher_adapter_lr", type=float, default=2e-5)
     parser.add_argument(
+        "--teacher_pretrain_epochs",
+        type=int,
+        default=0,
+        help=(
+            "Pretrain teacher adapters for this many epochs, then freeze and "
+            "materialize their adapted features before student training."
+        ),
+    )
+    parser.add_argument(
+        "--teacher_pretrain_batch_size",
+        type=int,
+        default=64,
+        help="Feature-only batch size used during teacher-adapter pretraining.",
+    )
+    parser.add_argument(
+        "--teacher_cache_path",
+        type=str,
+        default="",
+        help=(
+            "Optional .pt file for persistent adapted teacher features and "
+            "text targets. Existing compatible files skip DFN5B entirely."
+        ),
+    )
+    parser.add_argument(
+        "--rebuild_teacher_cache",
+        action="store_true",
+        help="Ignore and overwrite an existing persistent teacher cache.",
+    )
+    parser.add_argument(
         "--lambda_teacher_retrieval",
         type=float,
         default=1.5,
@@ -236,6 +265,31 @@ if __name__ == "__main__":
         parser.error("--prompt_depth must be greater than or equal to 1.")
     if args.lambda_cls < 0:
         parser.error("--lambda_cls must be non-negative.")
+    if args.teacher_pretrain_epochs < 0:
+        parser.error("--teacher_pretrain_epochs must be non-negative.")
+    if args.teacher_pretrain_batch_size < 2:
+        parser.error("--teacher_pretrain_batch_size must be at least 2.")
+    if args.teacher_pretrain_epochs > 0 and not args.joint_teacher_adapter:
+        parser.error(
+            "Teacher pretraining cannot be combined with "
+            "--no_joint_teacher_adapter."
+        )
+    cache_exists = bool(args.teacher_cache_path) and os.path.isfile(
+        args.teacher_cache_path
+    )
+    if (
+        args.teacher_cache_path
+        and (args.rebuild_teacher_cache or not cache_exists)
+        and args.teacher_pretrain_epochs == 0
+    ):
+        parser.error(
+            "Creating a persistent teacher cache requires "
+            "--teacher_pretrain_epochs greater than 0."
+        )
+    if args.rebuild_teacher_cache and not args.teacher_cache_path:
+        parser.error(
+            "--rebuild_teacher_cache requires --teacher_cache_path."
+        )
     if args.lambda_photo_text_kd < 0 or args.lambda_sketch_text_kd < 0:
         parser.error("Image-text KD weights must be non-negative.")
     if args.image_text_kd_temperature <= 0:
@@ -275,7 +329,7 @@ if __name__ == "__main__":
 
     model.cache_teacher_features(
         train_loader.dataset,
-        batch_size=args.batch_size,
+        batch_size=args.teacher_pretrain_batch_size,
         workers=args.workers,
         show_progress=args.progress,
     )
