@@ -13,11 +13,16 @@
     --lambda_kd 7.0 \
     --lambda_photo_text_kd 1.0 \
     --lambda_sketch_text_kd 1.0 \
-    --image_text_kd_temperature 0.07 \
+    --photo_text_kd_temperature 0.07 \
+    --sketch_text_kd_temperature 0.07 \
     --lr 1e-3 \
+    --momentum 0.9 \
+    --weight_decay 1e-3 \
     --teacher_pretrain_epochs 3 \
     --teacher_pretrain_batch_size 64 \
     --teacher_adapter_lr 2e-5 \
+    --teacher_momentum 0.9 \
+    --teacher_weight_decay 1e-3 \
     --teacher_cache_path /kaggle/working/teacher_cache/sketchy2.pt \
     --seed 42 \
     --exp_name sketchy2_independent_prompts
@@ -39,6 +44,10 @@ Training uses fixed resize/normalize transforms without augmentation. Student
 classification, sketch-photo relational KD, photo-text KD, and sketch-text KD
 have independent weights. Set `--lambda_cls 0` for distillation-only student
 training.
+
+Photo-text and sketch-text KD temperatures can be set independently. The
+existing `--image_text_kd_temperature` remains available as the fallback for
+either modality-specific temperature that is not supplied.
 
 When `--teacher_pretrain_epochs` is positive, raw DFN5B image features are
 encoded once and the modality adapters are pretrained using feature-only

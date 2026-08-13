@@ -173,7 +173,7 @@ def loss_fn(args, features):
             student_photo_text,
             teacher_photo_features,
             teacher_photo_text,
-            args.image_text_kd_temperature,
+            args.photo_text_kd_temperature,
         )
         active_image_text_losses.append(photo_text_kd)
     if teacher_active and args.lambda_sketch_text_kd > 0:
@@ -182,7 +182,7 @@ def loss_fn(args, features):
             student_sketch_text,
             teacher_sketch_features,
             teacher_sketch_text,
-            args.image_text_kd_temperature,
+            args.sketch_text_kd_temperature,
         )
         active_image_text_losses.append(sketch_text_kd)
     image_text_kd = (

@@ -382,7 +382,8 @@ class CustomCLIP(nn.Module):
             "[Image-Text KD] "
             f"photo_lambda={cfg.lambda_photo_text_kd}, "
             f"sketch_lambda={cfg.lambda_sketch_text_kd}, "
-            f"temperature={cfg.image_text_kd_temperature}"
+            f"photo_temperature={cfg.photo_text_kd_temperature}, "
+            f"sketch_temperature={cfg.sketch_text_kd_temperature}"
         )
 
     @staticmethod
@@ -413,6 +414,8 @@ class CustomCLIP(nn.Module):
             ),
             "adapter_bottleneck": cfg.teacher_adapter_bottleneck,
             "adapter_lr": cfg.teacher_adapter_lr,
+            "teacher_momentum": cfg.teacher_momentum,
+            "teacher_weight_decay": cfg.teacher_weight_decay,
             "pretrain_epochs": cfg.teacher_pretrain_epochs,
             "pretrain_batch_size": cfg.teacher_pretrain_batch_size,
             "lambda_retrieval": cfg.lambda_teacher_retrieval,
@@ -509,8 +512,8 @@ class CustomCLIP(nn.Module):
         optimizer = torch.optim.SGD(
             self.teacher_adapters.parameters(),
             lr=cfg.teacher_adapter_lr,
-            momentum=0.9,
-            weight_decay=1e-3,
+            momentum=cfg.teacher_momentum,
+            weight_decay=cfg.teacher_weight_decay,
         )
         scheduler = torch.optim.lr_scheduler.StepLR(
             optimizer,
@@ -940,19 +943,28 @@ class ZS_SBIR(pl.LightningModule):
             if parameter.requires_grad
             and id(parameter) not in adapter_param_ids
         ]
-        param_groups = [{"params": student_params, "lr": self.args.lr}]
+        param_groups = [
+            {
+                "params": student_params,
+                "lr": self.args.lr,
+                "momentum": self.args.momentum,
+                "weight_decay": self.args.weight_decay,
+            }
+        ]
         if adapter_params:
             param_groups.append(
                 {
                     "params": adapter_params,
                     "lr": self.args.teacher_adapter_lr,
+                    "momentum": self.args.teacher_momentum,
+                    "weight_decay": self.args.teacher_weight_decay,
                 }
             )
         optimizer = torch.optim.SGD(
             params=param_groups,
             lr=self.args.lr,
-            weight_decay=1e-3,
-            momentum=0.9,
+            weight_decay=self.args.weight_decay,
+            momentum=self.args.momentum,
         )
         trainable = sum(
             parameter.numel()
@@ -962,9 +974,14 @@ class ZS_SBIR(pl.LightningModule):
         )
         print(
             "[Optimizer] SGD "
-            f"lr={self.args.lr}, momentum=0.9, weight_decay=1e-3, "
+            f"lr={self.args.lr}, momentum={self.args.momentum}, "
+            f"weight_decay={self.args.weight_decay}, "
             f"teacher_adapter_lr="
             f"{self.args.teacher_adapter_lr if adapter_params else 'off'}, "
+            f"teacher_momentum="
+            f"{self.args.teacher_momentum if adapter_params else 'off'}, "
+            f"teacher_weight_decay="
+            f"{self.args.teacher_weight_decay if adapter_params else 'off'}, "
             f"trainable_params={trainable:,}"
         )
         

@@ -147,6 +147,18 @@ if __name__ == "__main__":
         help="Weight for CE(photo, text) + CE(sketch, text).",
     )
     parser.add_argument("--lr", type=float, default=4e-5)
+    parser.add_argument(
+        "--momentum",
+        type=float,
+        default=0.9,
+        help="SGD momentum for student optimization.",
+    )
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=1e-3,
+        help="SGD weight decay for student optimization.",
+    )
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--test_batch_size", type=int, default=1024)
     parser.add_argument("--epochs", type=int, default=3)
@@ -182,6 +194,20 @@ if __name__ == "__main__":
     )
     parser.add_argument("--teacher_adapter_bottleneck", type=int, default=64)
     parser.add_argument("--teacher_adapter_lr", type=float, default=2e-5)
+    parser.add_argument(
+        "--teacher_momentum",
+        type=float,
+        default=0.9,
+        help="SGD momentum for teacher-adapter optimization.",
+    )
+    parser.add_argument(
+        "--teacher_weight_decay",
+        "--weight_decay_teacher",
+        dest="teacher_weight_decay",
+        type=float,
+        default=1e-3,
+        help="SGD weight decay for teacher-adapter optimization.",
+    )
     parser.add_argument(
         "--teacher_pretrain_epochs",
         type=int,
@@ -248,7 +274,19 @@ if __name__ == "__main__":
         "--image_text_kd_temperature",
         type=float,
         default=0.1,
-        help="Temperature for image-text class-distribution distillation.",
+        help="Shared fallback temperature for photo-text and sketch-text KD.",
+    )
+    parser.add_argument(
+        "--photo_text_kd_temperature",
+        type=float,
+        default=None,
+        help="Photo-text KD temperature; defaults to the shared temperature.",
+    )
+    parser.add_argument(
+        "--sketch_text_kd_temperature",
+        type=float,
+        default=None,
+        help="Sketch-text KD temperature; defaults to the shared temperature.",
     )
     parser.add_argument(
         "--exp_name",
@@ -257,6 +295,10 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    if args.photo_text_kd_temperature is None:
+        args.photo_text_kd_temperature = args.image_text_kd_temperature
+    if args.sketch_text_kd_temperature is None:
+        args.sketch_text_kd_temperature = args.image_text_kd_temperature
     if args.n_ctx_text < 0:
         parser.error("--n_ctx_text must be greater than or equal to 0.")
     if args.n_ctx_visual < 0:
@@ -265,6 +307,14 @@ if __name__ == "__main__":
         parser.error("--prompt_depth must be greater than or equal to 1.")
     if args.lambda_cls < 0:
         parser.error("--lambda_cls must be non-negative.")
+    if args.momentum < 0:
+        parser.error("--momentum must be non-negative.")
+    if args.weight_decay < 0:
+        parser.error("--weight_decay must be non-negative.")
+    if args.teacher_momentum < 0:
+        parser.error("--teacher_momentum must be non-negative.")
+    if args.teacher_weight_decay < 0:
+        parser.error("--teacher_weight_decay must be non-negative.")
     if args.teacher_pretrain_epochs < 0:
         parser.error("--teacher_pretrain_epochs must be non-negative.")
     if args.teacher_pretrain_batch_size < 2:
@@ -294,6 +344,10 @@ if __name__ == "__main__":
         parser.error("Image-text KD weights must be non-negative.")
     if args.image_text_kd_temperature <= 0:
         parser.error("--image_text_kd_temperature must be greater than 0.")
+    if args.photo_text_kd_temperature <= 0:
+        parser.error("--photo_text_kd_temperature must be greater than 0.")
+    if args.sketch_text_kd_temperature <= 0:
+        parser.error("--sketch_text_kd_temperature must be greater than 0.")
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
 
     checkpoint_callback = ModelCheckpoint(
