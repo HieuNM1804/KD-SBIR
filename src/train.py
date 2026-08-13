@@ -16,7 +16,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from src.dataset import TrainDataset, ValidDataset, WorkerInvariantSampler
 from src.data_config import UNSEEN_CLASSES
-from src.model import ZS_SBIR
+from src.model import ZS_SBIR, default_teacher_cache_path
 
 
 def seed_everything(seed):
@@ -233,6 +233,15 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--teacher_cache_dir",
+        type=str,
+        default="",
+        help=(
+            "Directory for automatically named teacher caches. Defaults to "
+            "/kaggle/working/teacher_cache on Kaggle and teacher_cache elsewhere."
+        ),
+    )
+    parser.add_argument(
         "--rebuild_teacher_cache",
         action="store_true",
         help="Ignore and overwrite an existing persistent teacher cache.",
@@ -324,22 +333,6 @@ if __name__ == "__main__":
             "Teacher pretraining cannot be combined with "
             "--no_joint_teacher_adapter."
         )
-    cache_exists = bool(args.teacher_cache_path) and os.path.isfile(
-        args.teacher_cache_path
-    )
-    if (
-        args.teacher_cache_path
-        and (args.rebuild_teacher_cache or not cache_exists)
-        and args.teacher_pretrain_epochs == 0
-    ):
-        parser.error(
-            "Creating a persistent teacher cache requires "
-            "--teacher_pretrain_epochs greater than 0."
-        )
-    if args.rebuild_teacher_cache and not args.teacher_cache_path:
-        parser.error(
-            "--rebuild_teacher_cache requires --teacher_cache_path."
-        )
     if args.lambda_photo_text_kd < 0 or args.lambda_sketch_text_kd < 0:
         parser.error("Image-text KD weights must be non-negative.")
     if args.image_text_kd_temperature <= 0:
@@ -360,6 +353,30 @@ if __name__ == "__main__":
     )
 
     train_loader, val_sketch_loader, val_photo_loader = get_loaders(args)
+    if not args.teacher_cache_path and args.teacher_pretrain_epochs > 0:
+        args.teacher_cache_path = default_teacher_cache_path(
+            args,
+            train_loader.dataset,
+        )
+        print(f"[Teacher Cache] automatic path: {args.teacher_cache_path}")
+
+    cache_exists = bool(args.teacher_cache_path) and os.path.isfile(
+        args.teacher_cache_path
+    )
+    if (
+        args.teacher_cache_path
+        and (args.rebuild_teacher_cache or not cache_exists)
+        and args.teacher_pretrain_epochs == 0
+    ):
+        parser.error(
+            "Creating a persistent teacher cache requires "
+            "--teacher_pretrain_epochs greater than 0."
+        )
+    if args.rebuild_teacher_cache and not args.teacher_cache_path:
+        parser.error(
+            "--rebuild_teacher_cache requires --teacher_cache_path or "
+            "--teacher_pretrain_epochs greater than 0."
+        )
     progress_bar = TQDMProgressBar(refresh_rate=20)
 
     trainer = Trainer(

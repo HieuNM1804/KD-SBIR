@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -38,6 +39,70 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DFN5B_MODEL = "ViT-H-14-quickgelu"
 DFN5B_PRETRAINED = "dfn5b"
 DFN5B_OUTPUT_DIM = 1024
+TEACHER_CACHE_FORMAT_VERSION = 2
+
+
+def _teacher_training_config(args):
+    """Parameters that can change the cached adapted teacher targets."""
+    return {
+        "teacher_model": DFN5B_MODEL,
+        "teacher_pretrained": DFN5B_PRETRAINED,
+        "teacher_output_dim": DFN5B_OUTPUT_DIM,
+        "teacher_precision": "fp16",
+        "joint_teacher_adapter": args.joint_teacher_adapter,
+        "adapter_bottleneck": args.teacher_adapter_bottleneck,
+        "adapter_lr": args.teacher_adapter_lr,
+        "teacher_momentum": args.teacher_momentum,
+        "teacher_weight_decay": args.teacher_weight_decay,
+        "pretrain_epochs": args.teacher_pretrain_epochs,
+        "pretrain_batch_size": args.teacher_pretrain_batch_size,
+        "lambda_retrieval": args.lambda_teacher_retrieval,
+        "lambda_semantic": args.lambda_teacher_semantic,
+        "temperature": args.teacher_temperature,
+        "triplet_margin": args.teacher_triplet_margin,
+        "scheduler": "StepLR",
+        "scheduler_step_size": 5,
+        "scheduler_gamma": 0.1,
+        "seed": args.seed,
+    }
+
+
+def default_teacher_cache_path(args, train_dataset):
+    """Build a reusable cache path from the dataset and teacher configuration."""
+    dataset_digest = hashlib.sha256()
+    dataset_digest.update(args.dataset.encode("utf-8"))
+    dataset_digest.update(str(train_dataset.max_size).encode("utf-8"))
+    for classname in train_dataset.all_categories:
+        dataset_digest.update(classname.encode("utf-8"))
+        dataset_digest.update(b"\0")
+    paths = train_dataset.all_sketches_path + train_dataset.all_photo_paths
+    for path in paths:
+        relative = os.path.relpath(path, args.root).replace("\\", "/")
+        dataset_digest.update(relative.encode("utf-8"))
+        dataset_digest.update(b"\0")
+
+    cache_key = {
+        "format_version": TEACHER_CACHE_FORMAT_VERSION,
+        "dataset": args.dataset,
+        "dataset_fingerprint": dataset_digest.hexdigest(),
+        "teacher": _teacher_training_config(args),
+    }
+    encoded = json.dumps(
+        cache_key,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    config_hash = hashlib.sha256(encoded).hexdigest()[:16]
+
+    cache_dir = args.teacher_cache_dir
+    if not cache_dir:
+        kaggle_working = Path("/kaggle/working")
+        cache_dir = (
+            kaggle_working / "teacher_cache"
+            if kaggle_working.is_dir()
+            else Path("teacher_cache")
+        )
+    return str(Path(cache_dir) / f"{args.dataset}_{config_hash}.pt")
 
 
 def _image_text_kd_active(args):
@@ -398,9 +463,7 @@ class CustomCLIP(nn.Module):
     def _teacher_cache_metadata(self, train_dataset):
         cfg = self.cfg
         return {
-            "format_version": 1,
-            "teacher_model": DFN5B_MODEL,
-            "teacher_pretrained": DFN5B_PRETRAINED,
+            "format_version": TEACHER_CACHE_FORMAT_VERSION,
             "dataset": cfg.dataset,
             "max_size": train_dataset.max_size,
             "classnames": list(self.classnames),
@@ -412,17 +475,7 @@ class CustomCLIP(nn.Module):
             "photo_fingerprint": self._path_fingerprint(
                 train_dataset.all_photo_paths, cfg.root
             ),
-            "adapter_bottleneck": cfg.teacher_adapter_bottleneck,
-            "adapter_lr": cfg.teacher_adapter_lr,
-            "teacher_momentum": cfg.teacher_momentum,
-            "teacher_weight_decay": cfg.teacher_weight_decay,
-            "pretrain_epochs": cfg.teacher_pretrain_epochs,
-            "pretrain_batch_size": cfg.teacher_pretrain_batch_size,
-            "lambda_retrieval": cfg.lambda_teacher_retrieval,
-            "lambda_semantic": cfg.lambda_teacher_semantic,
-            "temperature": cfg.teacher_temperature,
-            "triplet_margin": cfg.teacher_triplet_margin,
-            "seed": cfg.seed,
+            **_teacher_training_config(cfg),
         }
 
     def _load_persistent_teacher_cache(self, train_dataset):

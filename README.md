@@ -23,7 +23,6 @@
     --teacher_adapter_lr 2e-5 \
     --teacher_momentum 0.9 \
     --teacher_weight_decay 1e-3 \
-    --teacher_cache_path /kaggle/working/teacher_cache/sketchy2.pt \
     --seed 42 \
     --exp_name sketchy2_independent_prompts
 ```
@@ -52,11 +51,15 @@ either modality-specific temperature that is not supplied.
 When `--teacher_pretrain_epochs` is positive, raw DFN5B image features are
 encoded once and the modality adapters are pretrained using feature-only
 batches. The trained adapters are then frozen and their outputs are
-materialized for every seen sketch and photo. If `--teacher_cache_path` is
-provided, the adapted image features, teacher text targets, adapter state, and
-configuration metadata are saved to that file. Reusing the same command in a
-later cell loads the file and skips both DFN5B encoding and teacher-adapter
-pretraining. Pass `--rebuild_teacher_cache` to overwrite it intentionally.
+materialized for every seen sketch and photo. The adapted image features,
+teacher text targets, adapter state, and configuration metadata are saved
+automatically under `/kaggle/working/teacher_cache`. The filename is derived
+from the dataset and complete teacher configuration. Reusing the same teacher
+settings in a later cell loads the file and skips both DFN5B encoding and
+teacher-adapter pretraining. Student losses, prompts, and optimizer settings
+may change without invalidating the teacher cache. Pass
+`--rebuild_teacher_cache` to overwrite the matching cache intentionally, or
+`--teacher_cache_path` to use an explicit file.
 
 The persistent cache is validated against the dataset paths and all teacher
 pretraining settings. Use a different cache path when changing those settings.
