@@ -9,7 +9,6 @@
     --n_ctx_text 3 \
     --n_ctx_visual 3 \
     --prompt_depth 12 \
-    --lambda_cls 0.0 \
     --lambda_kd 7.0 \
     --lambda_photo_text_kd 1.0 \
     --lambda_sketch_text_kd 1.0 \
@@ -40,9 +39,9 @@ Both `--n_ctx_text` and `--n_ctx_visual` accept zero for branch-specific
 ablations.
 
 Training uses fixed resize/normalize transforms without augmentation. Student
-classification, sketch-photo relational KD, photo-text KD, and sketch-text KD
-have independent weights. Set `--lambda_cls 0` for distillation-only student
-training.
+classification and teacher semantic classification are removed. The student
+learns only from sketch-photo relational KD, photo-text KD, and sketch-text KD;
+the teacher adapters learn only from retrieval triplet loss.
 
 Photo-text and sketch-text KD temperatures can be set independently. The
 existing `--image_text_kd_temperature` remains available as the fallback for

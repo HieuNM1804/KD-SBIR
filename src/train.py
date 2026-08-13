@@ -140,12 +140,6 @@ if __name__ == "__main__":
         default=42,
         help="Random seed for Python, NumPy, PyTorch, and DataLoader workers.",
     )
-    parser.add_argument(
-        "--lambda_cls",
-        type=float,
-        default=1.0,
-        help="Weight for CE(photo, text) + CE(sketch, text).",
-    )
     parser.add_argument("--lr", type=float, default=4e-5)
     parser.add_argument(
         "--momentum",
@@ -252,8 +246,6 @@ if __name__ == "__main__":
         default=1.5,
         help="Weight for the teacher-adapter retrieval loss.",
     )
-    parser.add_argument("--lambda_teacher_semantic", type=float, default=1.0)
-    parser.add_argument("--teacher_temperature", type=float, default=0.07)
     parser.add_argument("--teacher_triplet_margin", type=float, default=0.2)
     parser.add_argument(
         "--lambda_kd",
@@ -314,8 +306,6 @@ if __name__ == "__main__":
         parser.error("--n_ctx_visual must be greater than or equal to 0.")
     if args.prompt_depth < 1:
         parser.error("--prompt_depth must be greater than or equal to 1.")
-    if args.lambda_cls < 0:
-        parser.error("--lambda_cls must be non-negative.")
     if args.momentum < 0:
         parser.error("--momentum must be non-negative.")
     if args.weight_decay < 0:

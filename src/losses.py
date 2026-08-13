@@ -107,26 +107,6 @@ def batch_hard_teacher_triplet_loss(
     return 0.5 * (one_direction(distance) + one_direction(distance.t()))
 
 
-def teacher_semantic_loss(
-    sketch_features,
-    photo_features,
-    labels,
-    sketch_text,
-    photo_text,
-    temperature,
-):
-    return 0.5 * (
-        F.cross_entropy(
-            sketch_features @ sketch_text.t() / temperature,
-            labels,
-        )
-        + F.cross_entropy(
-            photo_features @ photo_text.t() / temperature,
-            labels,
-        )
-    )
-
-
 def loss_fn(args, features):
     (
         photo_features,
@@ -134,8 +114,6 @@ def loss_fn(args, features):
         teacher_photo_features,
         teacher_sketch_features,
         labels,
-        photo_logits,
-        sketch_logits,
         teacher_active,
         joint_teacher_adapter,
         student_sketch_text,
@@ -146,13 +124,6 @@ def loss_fn(args, features):
 
     labels = labels.to(photo_features.device)
     zero = torch.zeros((), device=photo_features.device)
-
-    classification_loss = zero
-    if args.lambda_cls > 0:
-        classification_loss = (
-            F.cross_entropy(photo_logits, labels)
-            + F.cross_entropy(sketch_logits, labels)
-        )
 
     kd_loss = zero
     if teacher_active and args.lambda_kd > 0:
@@ -192,7 +163,6 @@ def loss_fn(args, features):
     )
 
     teacher_triplet_loss = zero
-    teacher_semantic = zero
     if joint_teacher_adapter:
         teacher_triplet_loss = batch_hard_teacher_triplet_loss(
             teacher_sketch_features,
@@ -200,27 +170,15 @@ def loss_fn(args, features):
             labels,
             args.teacher_triplet_margin,
         )
-        teacher_semantic = teacher_semantic_loss(
-            teacher_sketch_features,
-            teacher_photo_features,
-            labels,
-            teacher_sketch_text,
-            teacher_photo_text,
-            args.teacher_temperature,
-        )
 
     total_loss = (
-        args.lambda_cls * classification_loss
-        + args.lambda_kd * kd_loss
+        args.lambda_kd * kd_loss
         + args.lambda_photo_text_kd * photo_text_kd
         + args.lambda_sketch_text_kd * sketch_text_kd
         + args.lambda_teacher_retrieval * teacher_triplet_loss
-        + args.lambda_teacher_semantic * teacher_semantic
     )
     return total_loss, {
-        "cls": classification_loss,
         "kd_sketch_photo": kd_loss,
         "image_text_kd": image_text_kd,
         "teacher_triplet": teacher_triplet_loss,
-        "teacher_semantic": teacher_semantic,
     }

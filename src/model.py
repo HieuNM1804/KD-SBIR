@@ -27,7 +27,6 @@ from src.text_encoder import TextEncoder
 from src.losses import (
     batch_hard_teacher_triplet_loss,
     loss_fn,
-    teacher_semantic_loss,
 )
 from src.teacher_adapters import ModalityAdapters
 
@@ -39,7 +38,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DFN5B_MODEL = "ViT-H-14-quickgelu"
 DFN5B_PRETRAINED = "dfn5b"
 DFN5B_OUTPUT_DIM = 1024
-TEACHER_CACHE_FORMAT_VERSION = 2
+TEACHER_CACHE_FORMAT_VERSION = 3
 
 
 def _teacher_training_config(args):
@@ -57,8 +56,6 @@ def _teacher_training_config(args):
         "pretrain_epochs": args.teacher_pretrain_epochs,
         "pretrain_batch_size": args.teacher_pretrain_batch_size,
         "lambda_retrieval": args.lambda_teacher_retrieval,
-        "lambda_semantic": args.lambda_teacher_semantic,
-        "temperature": args.teacher_temperature,
         "triplet_margin": args.teacher_triplet_margin,
         "scheduler": "StepLR",
         "scheduler_step_size": 5,
@@ -362,13 +359,8 @@ class CustomCLIP(nn.Module):
             clip_model.transformer.layers,
         )
         self.classnames = tuple(classnames)
-        self.classification_active = cfg.lambda_cls > 0
-        self.photo_text_active = (
-            self.classification_active or cfg.lambda_photo_text_kd > 0
-        )
-        self.sketch_text_active = (
-            self.classification_active or cfg.lambda_sketch_text_kd > 0
-        )
+        self.photo_text_active = cfg.lambda_photo_text_kd > 0
+        self.sketch_text_active = cfg.lambda_sketch_text_kd > 0
         self.image_text_kd_active = _image_text_kd_active(cfg)
         self.photo_text_prompt = (
             IndependentTextPromptLearner(
@@ -413,7 +405,6 @@ class CustomCLIP(nn.Module):
             if self.photo_text_active or self.sketch_text_active
             else None
         )
-        self.logit_scale = clip_model.logit_scale
 
         # The pretrained teacher is reloaded when needed and must not be saved
         # inside every student checkpoint.
@@ -438,10 +429,6 @@ class CustomCLIP(nn.Module):
             "[Relational KD] sketch-photo branch -> "
             f"active={self.teacher_active}, lambda={cfg.lambda_kd}, "
             f"temperature={cfg.kd_temperature}"
-        )
-        print(
-            "[Classification] "
-            f"active={self.classification_active}, lambda={cfg.lambda_cls}"
         )
         print(
             "[Image-Text KD] "
@@ -546,9 +533,6 @@ class CustomCLIP(nn.Module):
         teacher_device = next(self._teacher.parameters()).device
         self.teacher_adapters.to(device=teacher_device, dtype=torch.float32)
         self.teacher_adapters.requires_grad_(True).train()
-        teacher_sketch_text, teacher_photo_text = (
-            self.get_teacher_text_features()
-        )
         adapter_dataset = TeacherAdapterDataset(train_dataset)
         loader = DataLoader(
             adapter_dataset,
@@ -576,7 +560,6 @@ class CustomCLIP(nn.Module):
 
         for epoch in range(cfg.teacher_pretrain_epochs):
             retrieval_total = 0.0
-            semantic_total = 0.0
             steps = 0
             batches = tqdm(
                 loader,
@@ -607,29 +590,16 @@ class CustomCLIP(nn.Module):
                         labels,
                         cfg.teacher_triplet_margin,
                     )
-                    semantic = teacher_semantic_loss(
-                        sketch_features,
-                        photo_features,
-                        labels,
-                        teacher_sketch_text,
-                        teacher_photo_text,
-                        cfg.teacher_temperature,
-                    )
-                    loss = (
-                        cfg.lambda_teacher_retrieval * retrieval
-                        + cfg.lambda_teacher_semantic * semantic
-                    )
+                    loss = cfg.lambda_teacher_retrieval * retrieval
                     optimizer.zero_grad(set_to_none=True)
                     loss.backward()
                     optimizer.step()
 
                     retrieval_total += retrieval.detach().item()
-                    semantic_total += semantic.detach().item()
                     steps += 1
                     if show_progress:
                         batches.set_postfix(
                             T_TRI=f"{retrieval.item():.3f}",
-                            T_SEM=f"{semantic.item():.3f}",
                         )
             scheduler.step()
             if steps == 0:
@@ -638,8 +608,7 @@ class CustomCLIP(nn.Module):
                 )
             print(
                 f"[Teacher Pretrain] epoch={epoch + 1}, "
-                f"retrieval={retrieval_total / steps:.6f}, "
-                f"semantic={semantic_total / steps:.6f}"
+                f"retrieval={retrieval_total / steps:.6f}"
             )
 
         self.teacher_adapters.eval().requires_grad_(False)
@@ -894,21 +863,6 @@ class CustomCLIP(nn.Module):
             if self.sketch_text_active
             else None
         )
-        photo_logits = (
-            self.logit_scale.exp()
-            * photo_features
-            @ student_photo_text.t()
-            if self.classification_active
-            else None
-        )
-        sketch_logits = (
-            self.logit_scale.exp()
-            * sketch_features
-            @ student_sketch_text.t()
-            if self.classification_active
-            else None
-        )
-
         teacher_photo_features = photo_features.detach()
         teacher_sketch_features = sketch_features.detach()
         teacher_sketch_text = None
@@ -920,7 +874,7 @@ class CustomCLIP(nn.Module):
             teacher_sketch_features = self.adapt_teacher_feature(
                 teacher_sketch_base, "sketch"
             )
-            if self.joint_teacher_adapter or self.image_text_kd_active:
+            if self.image_text_kd_active:
                 teacher_sketch_text, teacher_photo_text = (
                     self.get_teacher_text_features()
                 )
@@ -931,8 +885,6 @@ class CustomCLIP(nn.Module):
             teacher_photo_features,
             teacher_sketch_features,
             label,
-            photo_logits,
-            sketch_logits,
             self.teacher_active,
             self.joint_teacher_adapter,
             student_sketch_text,
@@ -1054,7 +1006,6 @@ class ZS_SBIR(pl.LightningModule):
         loss, loss_dict = loss_fn(self.args, features)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         bar_names = {
-            "cls": "CE",
             "kd_sketch_photo": "KD_II",
             "image_text_kd": "KD_IT",
         }
