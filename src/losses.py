@@ -113,16 +113,13 @@ def loss_fn(args, features):
         sketch_features,
         teacher_photo_features,
         teacher_sketch_features,
-        labels,
         teacher_active,
-        joint_teacher_adapter,
         student_sketch_text,
         student_photo_text,
         teacher_sketch_text,
         teacher_photo_text,
     ) = features
 
-    labels = labels.to(photo_features.device)
     zero = torch.zeros((), device=photo_features.device)
 
     kd_loss = zero
@@ -162,23 +159,12 @@ def loss_fn(args, features):
         else zero
     )
 
-    teacher_triplet_loss = zero
-    if joint_teacher_adapter:
-        teacher_triplet_loss = batch_hard_teacher_triplet_loss(
-            teacher_sketch_features,
-            teacher_photo_features,
-            labels,
-            args.teacher_triplet_margin,
-        )
-
     total_loss = (
         args.lambda_kd * kd_loss
         + args.lambda_photo_text_kd * photo_text_kd
         + args.lambda_sketch_text_kd * sketch_text_kd
-        + args.lambda_teacher_retrieval * teacher_triplet_loss
     )
     return total_loss, {
         "kd_sketch_photo": kd_loss,
         "image_text_kd": image_text_kd,
-        "teacher_triplet": teacher_triplet_loss,
     }

@@ -175,24 +175,59 @@ if __name__ == "__main__":
         help="Disable the tqdm progress bar.",
     )
     parser.add_argument(
-        "--joint_teacher_adapter",
-        action="store_true",
-        default=True,
-        help="Train DFN5B sketch/photo adapters jointly with the student.",
+        "--teacher_lora_rank",
+        type=int,
+        default=4,
+        help="Rank of each modality-specific teacher LoRA update.",
     )
     parser.add_argument(
-        "--no_joint_teacher_adapter",
-        action="store_false",
-        dest="joint_teacher_adapter",
-        help="Disable joint teacher-adapter training for ablations.",
+        "--teacher_lora_alpha",
+        type=float,
+        default=4.0,
+        help="Teacher LoRA scaling numerator; effective scale is alpha/rank.",
     )
-    parser.add_argument("--teacher_adapter_bottleneck", type=int, default=64)
-    parser.add_argument("--teacher_adapter_lr", type=float, default=2e-5)
+    parser.add_argument(
+        "--teacher_lora_depth",
+        type=int,
+        default=-1,
+        help="Number of final teacher visual blocks with LoRA; -1 uses all.",
+    )
+    parser.add_argument(
+        "--teacher_lora_targets",
+        type=str,
+        default="qv",
+        choices=("q", "v", "qv", "qkv"),
+        help="Attention projections adapted independently for photo/sketch.",
+    )
+    parser.add_argument(
+        "--teacher_lora_lr",
+        type=float,
+        default=2e-5,
+        help="SGD learning rate for teacher LoRA pretraining.",
+    )
+    parser.add_argument(
+        "--teacher_lora_seed",
+        type=int,
+        default=None,
+        help="LoRA-only initialization seed; defaults to --seed.",
+    )
+    parser.add_argument(
+        "--teacher_lora_gradient_checkpointing",
+        action="store_true",
+        default=True,
+        help="Recompute teacher forwards during backward to reduce LoRA memory.",
+    )
+    parser.add_argument(
+        "--no_teacher_lora_gradient_checkpointing",
+        action="store_false",
+        dest="teacher_lora_gradient_checkpointing",
+        help="Disable teacher LoRA gradient checkpointing.",
+    )
     parser.add_argument(
         "--teacher_momentum",
         type=float,
         default=0.9,
-        help="SGD momentum for teacher-adapter optimization.",
+        help="SGD momentum for teacher LoRA pretraining.",
     )
     parser.add_argument(
         "--teacher_weight_decay",
@@ -200,29 +235,42 @@ if __name__ == "__main__":
         dest="teacher_weight_decay",
         type=float,
         default=1e-3,
-        help="SGD weight decay for teacher-adapter optimization.",
+        help="SGD weight decay for teacher LoRA pretraining.",
     )
     parser.add_argument(
         "--teacher_pretrain_epochs",
         type=int,
         default=0,
         help=(
-            "Pretrain teacher adapters for this many epochs, then freeze and "
-            "materialize their adapted features before student training."
+            "Pretrain teacher LoRA for this many epochs, then freeze it and "
+            "materialize tuned features before student training. Set 0 to "
+            "use the original frozen DFN5B teacher."
         ),
     )
     parser.add_argument(
         "--teacher_pretrain_batch_size",
         type=int,
         default=64,
-        help="Feature-only batch size used during teacher-adapter pretraining.",
+        help="Image batch size used during teacher LoRA pretraining.",
+    )
+    parser.add_argument(
+        "--teacher_scheduler_step_size",
+        type=int,
+        default=5,
+        help="StepLR step size for teacher LoRA pretraining.",
+    )
+    parser.add_argument(
+        "--teacher_scheduler_gamma",
+        type=float,
+        default=0.1,
+        help="StepLR decay factor for teacher LoRA pretraining.",
     )
     parser.add_argument(
         "--teacher_cache_path",
         type=str,
         default="",
         help=(
-            "Optional .pt file for persistent adapted teacher features and "
+            "Optional .pt file for persistent LoRA-tuned teacher features and "
             "text targets. Existing compatible files skip DFN5B entirely."
         ),
     )
@@ -244,7 +292,7 @@ if __name__ == "__main__":
         "--lambda_teacher_retrieval",
         type=float,
         default=1.5,
-        help="Weight for the teacher-adapter retrieval loss.",
+        help="Weight for the teacher LoRA retrieval loss.",
     )
     parser.add_argument("--teacher_triplet_margin", type=float, default=0.2)
     parser.add_argument(
@@ -292,10 +340,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--exp_name",
         type=str,
-        default="tail_prompts_four_student_losses",
+        default="teacher_modality_lora",
     )
 
     args = parser.parse_args()
+    if args.teacher_lora_seed is None:
+        args.teacher_lora_seed = args.seed
     if args.photo_text_kd_temperature is None:
         args.photo_text_kd_temperature = args.image_text_kd_temperature
     if args.sketch_text_kd_temperature is None:
@@ -310,6 +360,14 @@ if __name__ == "__main__":
         parser.error("--momentum must be non-negative.")
     if args.weight_decay < 0:
         parser.error("--weight_decay must be non-negative.")
+    if args.teacher_lora_rank < 1:
+        parser.error("--teacher_lora_rank must be at least 1.")
+    if args.teacher_lora_alpha <= 0:
+        parser.error("--teacher_lora_alpha must be greater than 0.")
+    if args.teacher_lora_depth == 0 or args.teacher_lora_depth < -1:
+        parser.error("--teacher_lora_depth must be -1 or greater than 0.")
+    if args.teacher_lora_lr <= 0:
+        parser.error("--teacher_lora_lr must be greater than 0.")
     if args.teacher_momentum < 0:
         parser.error("--teacher_momentum must be non-negative.")
     if args.teacher_weight_decay < 0:
@@ -318,11 +376,10 @@ if __name__ == "__main__":
         parser.error("--teacher_pretrain_epochs must be non-negative.")
     if args.teacher_pretrain_batch_size < 2:
         parser.error("--teacher_pretrain_batch_size must be at least 2.")
-    if args.teacher_pretrain_epochs > 0 and not args.joint_teacher_adapter:
-        parser.error(
-            "Teacher pretraining cannot be combined with "
-            "--no_joint_teacher_adapter."
-        )
+    if args.teacher_scheduler_step_size < 1:
+        parser.error("--teacher_scheduler_step_size must be at least 1.")
+    if args.teacher_scheduler_gamma <= 0:
+        parser.error("--teacher_scheduler_gamma must be greater than 0.")
     if args.lambda_photo_text_kd < 0 or args.lambda_sketch_text_kd < 0:
         parser.error("Image-text KD weights must be non-negative.")
     if args.image_text_kd_temperature <= 0:

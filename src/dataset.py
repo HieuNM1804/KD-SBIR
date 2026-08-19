@@ -139,40 +139,6 @@ class TeacherFeatureDataset(torch.utils.data.Dataset):
         return self.transform(image)
 
 
-class TeacherAdapterDataset(torch.utils.data.Dataset):
-    """Return cached DFN5B pairs without decoding the source images again."""
-
-    def __init__(self, train_dataset):
-        if train_dataset.teacher_sketch_features is None:
-            raise ValueError("DFN5B features must be cached before adapter pretraining.")
-        self.train_dataset = train_dataset
-        self.seed = train_dataset.seed
-
-    def __len__(self):
-        return len(self.train_dataset)
-
-    def __getitem__(self, sample_key):
-        if isinstance(sample_key, tuple):
-            epoch, index = sample_key
-        else:
-            epoch, index = 0, sample_key
-
-        dataset = self.train_dataset
-        filepath = dataset.all_sketches_path[index]
-        category = filepath.split(os.path.sep)[-2]
-        photo_paths = dataset.all_photos_path[category]
-        rng = np.random.default_rng(sample_seed(self.seed, epoch, index))
-        photo_path = photo_paths[rng.integers(len(photo_paths))]
-
-        return (
-            dataset.teacher_photo_features[
-                dataset.photo_path_to_index[photo_path]
-            ],
-            dataset.teacher_sketch_features[index],
-            dataset.category_to_label[category],
-        )
-
-
 class ValidDataset(torch.utils.data.Dataset):
     def __init__(self, args, mode="photo"):
         super().__init__()
