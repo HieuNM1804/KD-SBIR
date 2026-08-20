@@ -594,7 +594,7 @@ class CustomCLIP(nn.Module):
             )
 
         cfg = self.cfg
-        teacher_parameter = next(self._teacher.parameters())
+        teacher_parameter = self._teacher.visual.conv1.weight
         teacher_device = teacher_parameter.device
         teacher_dtype = teacher_parameter.dtype
         self.teacher_prompts.requires_grad_(True)
@@ -701,7 +701,7 @@ class CustomCLIP(nn.Module):
         epoch,
         show_progress,
     ):
-        teacher_parameter = next(self._teacher.parameters())
+        teacher_parameter = self._teacher.visual.conv1.weight
         teacher_device = teacher_parameter.device
         teacher_dtype = teacher_parameter.dtype
 
@@ -755,7 +755,7 @@ class CustomCLIP(nn.Module):
         workers,
         show_progress,
     ):
-        teacher_parameter = next(self._teacher.parameters())
+        teacher_parameter = self._teacher.visual.conv1.weight
         teacher_device = teacher_parameter.device
         teacher_dtype = teacher_parameter.dtype
         dataset = TeacherFeatureDataset(paths, self.cfg.max_size)
