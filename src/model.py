@@ -27,7 +27,7 @@ from src.losses import (
     batch_hard_teacher_triplet_loss,
     loss_fn,
 )
-from src.teacher_lora import install_teacher_lora
+from src.teacher_prompts import build_teacher_prompt_controller
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -37,23 +37,24 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DFN5B_MODEL = "ViT-H-14-quickgelu"
 DFN5B_PRETRAINED = "dfn5b"
 DFN5B_OUTPUT_DIM = 1024
-TEACHER_CACHE_FORMAT_VERSION = 4
+TEACHER_CACHE_FORMAT_VERSION = 5
 
 
 def _teacher_training_config(args):
-    """Parameters that can change the cached LoRA-tuned teacher targets."""
+    """Parameters that can change the prompt-tuned teacher targets."""
     return {
         "teacher_model": DFN5B_MODEL,
         "teacher_pretrained": DFN5B_PRETRAINED,
         "teacher_output_dim": DFN5B_OUTPUT_DIM,
         "teacher_precision": "fp16",
-        "lora_rank": args.teacher_lora_rank,
-        "lora_alpha": args.teacher_lora_alpha,
-        "lora_depth": args.teacher_lora_depth,
-        "lora_targets": args.teacher_lora_targets,
-        "lora_seed": args.teacher_lora_seed,
-        "lora_gradient_checkpointing": args.teacher_lora_gradient_checkpointing,
-        "lora_lr": args.teacher_lora_lr,
+        "teacher_n_ctx_visual": args.teacher_n_ctx_visual,
+        "teacher_prompt_depth": args.teacher_prompt_depth,
+        "teacher_prompt_std": args.teacher_prompt_std,
+        "teacher_prompt_seed": args.teacher_prompt_seed,
+        "teacher_prompt_gradient_checkpointing": (
+            args.teacher_prompt_gradient_checkpointing
+        ),
+        "teacher_prompt_lr": args.teacher_prompt_lr,
         "teacher_momentum": args.teacher_momentum,
         "teacher_weight_decay": args.teacher_weight_decay,
         "pretrain_epochs": args.teacher_pretrain_epochs,
@@ -131,22 +132,21 @@ def _load_clip_model(backbone):
     return build_model(state_dict)
 
 
-def _build_teacher_lora(args, teacher):
+def _build_teacher_prompts(args, teacher):
     if teacher is None or args.teacher_pretrain_epochs == 0:
         return None
 
-    controller = install_teacher_lora(
+    controller = build_teacher_prompt_controller(
         teacher=teacher,
-        rank=args.teacher_lora_rank,
-        alpha=args.teacher_lora_alpha,
-        depth=args.teacher_lora_depth,
-        targets=args.teacher_lora_targets,
-        seed=args.teacher_lora_seed,
+        n_ctx=args.teacher_n_ctx_visual,
+        depth=args.teacher_prompt_depth,
+        std=args.teacher_prompt_std,
+        seed=args.teacher_prompt_seed,
     )
     print(
-        "[Teacher LoRA] initialized for teacher pretraining "
-        f"(rank={args.teacher_lora_rank}, alpha={args.teacher_lora_alpha}, "
-        f"targets={args.teacher_lora_targets}, depth={controller.depth}, "
+        "[Teacher Prompt] initialized for teacher pretraining "
+        f"(n_ctx_visual={args.teacher_n_ctx_visual}, "
+        f"depth={controller.depth}, std={args.teacher_prompt_std}, "
         f"trainable_params={controller.trainable_parameter_count():,})"
     )
     return controller
@@ -418,7 +418,7 @@ class CustomCLIP(nn.Module):
         object.__setattr__(self, "_teacher", teacher)
         self.persistent_teacher_cache = _persistent_teacher_cache_available(cfg)
         self.teacher_active = teacher is not None or self.persistent_teacher_cache
-        self.teacher_lora = _build_teacher_lora(cfg, teacher)
+        self.teacher_prompts = _build_teacher_prompts(cfg, teacher)
 
         self.register_buffer("_teacher_sketch_text", None, persistent=False)
         self.register_buffer("_teacher_photo_text", None, persistent=False)
@@ -513,7 +513,7 @@ class CustomCLIP(nn.Module):
         self._teacher_sketch_text = payload["teacher_sketch_text"]
         self._teacher_photo_text = payload["teacher_photo_text"]
         self.teacher_active = True
-        self.teacher_lora = None
+        self.teacher_prompts = None
         object.__setattr__(self, "_teacher", None)
         cache_size_mb = cache_path.stat().st_size / 1024**2
         print(
@@ -522,36 +522,36 @@ class CustomCLIP(nn.Module):
         )
 
     def _encode_teacher_image(self, images, modality):
-        if self.teacher_lora is None:
+        if self.teacher_prompts is None:
             return self._teacher.encode_image(images)
 
         def encode(current_images):
-            with self.teacher_lora.use(modality):
-                return self._teacher.encode_image(current_images)
+            return self.teacher_prompts(current_images, modality)
 
         if (
-            self.cfg.teacher_lora_gradient_checkpointing
+            self.cfg.teacher_prompt_gradient_checkpointing
             and torch.is_grad_enabled()
         ):
             return checkpoint(encode, images, use_reentrant=False)
         return encode(images)
 
-    def _pretrain_teacher_lora(
+    def _pretrain_teacher_prompts(
         self,
         train_dataset,
         workers,
         show_progress,
     ):
-        if self.teacher_lora is None:
+        if self.teacher_prompts is None:
             raise RuntimeError(
-                "Teacher LoRA pretraining requires teacher_pretrain_epochs > 0."
+                "Teacher prompt pretraining requires "
+                "teacher_pretrain_epochs > 0."
             )
 
         cfg = self.cfg
         teacher_parameter = next(self._teacher.parameters())
         teacher_device = teacher_parameter.device
         teacher_dtype = teacher_parameter.dtype
-        self.teacher_lora.requires_grad_(True)
+        self.teacher_prompts.requires_grad_(True)
         loader = DataLoader(
             train_dataset,
             batch_size=cfg.teacher_pretrain_batch_size,
@@ -565,8 +565,8 @@ class CustomCLIP(nn.Module):
             generator=torch.Generator().manual_seed(cfg.seed),
         )
         optimizer = torch.optim.SGD(
-            self.teacher_lora.parameters(),
-            lr=cfg.teacher_lora_lr,
+            self.teacher_prompts.parameters(),
+            lr=cfg.teacher_prompt_lr,
             momentum=cfg.teacher_momentum,
             weight_decay=cfg.teacher_weight_decay,
         )
@@ -586,7 +586,7 @@ class CustomCLIP(nn.Module):
             batches = tqdm(
                 loader,
                 desc=(
-                    "Teacher LoRA pretrain "
+                    "Teacher prompt pretrain "
                     f"{epoch + 1}/{cfg.teacher_pretrain_epochs}"
                 ),
                 disable=not show_progress,
@@ -639,7 +639,7 @@ class CustomCLIP(nn.Module):
                 f"retrieval={retrieval_total / steps:.6f}"
             )
 
-        self.teacher_lora.requires_grad_(False)
+        self.teacher_prompts.requires_grad_(False)
 
     @torch.no_grad()
     def _materialize_teacher_features(
@@ -689,7 +689,7 @@ class CustomCLIP(nn.Module):
         train_dataset,
         sketch_features,
         photo_features,
-        lora_state,
+        prompt_state,
     ):
         if not self.cfg.teacher_cache_path:
             return
@@ -703,7 +703,7 @@ class CustomCLIP(nn.Module):
             "teacher_photo_features": photo_features.cpu(),
             "teacher_sketch_text": self._teacher_sketch_text.detach().cpu(),
             "teacher_photo_text": self._teacher_photo_text.detach().cpu(),
-            "teacher_lora_state_dict": lora_state,
+            "teacher_prompt_state_dict": prompt_state,
         }
         torch.save(payload, temporary_path)
         os.replace(temporary_path, cache_path)
@@ -736,8 +736,8 @@ class CustomCLIP(nn.Module):
             / 1024**2
         )
 
-        if self.teacher_lora is not None:
-            self._pretrain_teacher_lora(
+        if self.teacher_prompts is not None:
+            self._pretrain_teacher_prompts(
                 train_dataset,
                 workers,
                 show_progress,
@@ -763,16 +763,19 @@ class CustomCLIP(nn.Module):
         train_dataset.set_teacher_features(sketch_features, photo_features)
 
         if self.cfg.teacher_pretrain_epochs > 0:
-            lora_state = self.teacher_lora.state_dict()
+            prompt_state = {
+                key: value.detach().cpu()
+                for key, value in self.teacher_prompts.state_dict().items()
+            }
             self._save_persistent_teacher_cache(
                 train_dataset,
                 sketch_features,
                 photo_features,
-                lora_state,
+                prompt_state,
             )
 
         teacher = self._teacher
-        self.teacher_lora = None
+        self.teacher_prompts = None
         object.__setattr__(self, "_teacher", None)
         del teacher
         if torch.cuda.is_available():

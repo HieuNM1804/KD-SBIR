@@ -175,59 +175,52 @@ if __name__ == "__main__":
         help="Disable the tqdm progress bar.",
     )
     parser.add_argument(
-        "--teacher_lora_rank",
+        "--teacher_n_ctx_visual",
         type=int,
-        default=4,
-        help="Rank of each modality-specific teacher LoRA update.",
+        default=3,
+        help="Number of independent visual prompt tokens per teacher modality.",
     )
     parser.add_argument(
-        "--teacher_lora_alpha",
+        "--teacher_prompt_depth",
+        type=int,
+        default=12,
+        help="Number of initial teacher visual blocks receiving prompts; -1 uses all.",
+    )
+    parser.add_argument(
+        "--teacher_prompt_std",
         type=float,
-        default=4.0,
-        help="Teacher LoRA scaling numerator; effective scale is alpha/rank.",
+        default=0.02,
+        help="Standard deviation for teacher visual prompt initialization.",
     )
     parser.add_argument(
-        "--teacher_lora_depth",
-        type=int,
-        default=-1,
-        help="Number of final teacher visual blocks with LoRA; -1 uses all.",
-    )
-    parser.add_argument(
-        "--teacher_lora_targets",
-        type=str,
-        default="qv",
-        choices=("q", "v", "qv", "qkv"),
-        help="Attention projections adapted independently for photo/sketch.",
-    )
-    parser.add_argument(
-        "--teacher_lora_lr",
+        "--teacher_prompt_lr",
         type=float,
         default=2e-5,
-        help="SGD learning rate for teacher LoRA pretraining.",
+        help="SGD learning rate for teacher prompt pretraining.",
     )
     parser.add_argument(
-        "--teacher_lora_seed",
+        "--teacher_prompt_seed",
         type=int,
         default=None,
-        help="LoRA-only initialization seed; defaults to --seed.",
+        help="Teacher-prompt initialization seed; defaults to --seed.",
     )
     parser.add_argument(
-        "--teacher_lora_gradient_checkpointing",
+        "--teacher_prompt_gradient_checkpointing",
         action="store_true",
         default=True,
-        help="Recompute teacher forwards during backward to reduce LoRA memory.",
+        help="Recompute teacher forwards during backward to reduce memory.",
     )
     parser.add_argument(
-        "--no_teacher_lora_gradient_checkpointing",
+        "--no_teacher_prompt_gradient_checkpointing",
         action="store_false",
-        dest="teacher_lora_gradient_checkpointing",
-        help="Disable teacher LoRA gradient checkpointing.",
+        dest="teacher_prompt_gradient_checkpointing",
+        help="Disable teacher prompt gradient checkpointing.",
     )
     parser.add_argument(
         "--teacher_momentum",
         type=float,
         default=0.9,
-        help="SGD momentum for teacher LoRA pretraining.",
+        help="SGD momentum for teacher prompt pretraining.",
     )
     parser.add_argument(
         "--teacher_weight_decay",
@@ -235,14 +228,14 @@ if __name__ == "__main__":
         dest="teacher_weight_decay",
         type=float,
         default=1e-3,
-        help="SGD weight decay for teacher LoRA pretraining.",
+        help="SGD weight decay for teacher prompt pretraining.",
     )
     parser.add_argument(
         "--teacher_pretrain_epochs",
         type=int,
         default=0,
         help=(
-            "Pretrain teacher LoRA for this many epochs, then freeze it and "
+            "Pretrain teacher visual prompts for this many epochs, freeze them, "
             "materialize tuned features before student training. Set 0 to "
             "use the original frozen DFN5B teacher."
         ),
@@ -251,26 +244,26 @@ if __name__ == "__main__":
         "--teacher_pretrain_batch_size",
         type=int,
         default=64,
-        help="Image batch size used during teacher LoRA pretraining.",
+        help="Image batch size used during teacher prompt pretraining.",
     )
     parser.add_argument(
         "--teacher_scheduler_step_size",
         type=int,
         default=5,
-        help="StepLR step size for teacher LoRA pretraining.",
+        help="StepLR step size for teacher prompt pretraining.",
     )
     parser.add_argument(
         "--teacher_scheduler_gamma",
         type=float,
         default=0.1,
-        help="StepLR decay factor for teacher LoRA pretraining.",
+        help="StepLR decay factor for teacher prompt pretraining.",
     )
     parser.add_argument(
         "--teacher_cache_path",
         type=str,
         default="",
         help=(
-            "Optional .pt file for persistent LoRA-tuned teacher features and "
+            "Optional .pt file for persistent prompt-tuned teacher features and "
             "text targets. Existing compatible files skip DFN5B entirely."
         ),
     )
@@ -292,7 +285,7 @@ if __name__ == "__main__":
         "--lambda_teacher_retrieval",
         type=float,
         default=1.5,
-        help="Weight for the teacher LoRA retrieval loss.",
+        help="Weight for the teacher prompt retrieval loss.",
     )
     parser.add_argument("--teacher_triplet_margin", type=float, default=0.2)
     parser.add_argument(
@@ -340,12 +333,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--exp_name",
         type=str,
-        default="teacher_modality_lora",
+        default="teacher_visual_prompt_tuning",
     )
 
     args = parser.parse_args()
-    if args.teacher_lora_seed is None:
-        args.teacher_lora_seed = args.seed
+    if args.teacher_prompt_seed is None:
+        args.teacher_prompt_seed = args.seed
     if args.photo_text_kd_temperature is None:
         args.photo_text_kd_temperature = args.image_text_kd_temperature
     if args.sketch_text_kd_temperature is None:
@@ -360,14 +353,16 @@ if __name__ == "__main__":
         parser.error("--momentum must be non-negative.")
     if args.weight_decay < 0:
         parser.error("--weight_decay must be non-negative.")
-    if args.teacher_lora_rank < 1:
-        parser.error("--teacher_lora_rank must be at least 1.")
-    if args.teacher_lora_alpha <= 0:
-        parser.error("--teacher_lora_alpha must be greater than 0.")
-    if args.teacher_lora_depth == 0 or args.teacher_lora_depth < -1:
-        parser.error("--teacher_lora_depth must be -1 or greater than 0.")
-    if args.teacher_lora_lr <= 0:
-        parser.error("--teacher_lora_lr must be greater than 0.")
+    if args.teacher_n_ctx_visual < 1 and args.teacher_pretrain_epochs > 0:
+        parser.error(
+            "--teacher_n_ctx_visual must be at least 1 when teacher prompts train."
+        )
+    if args.teacher_prompt_depth == 0 or args.teacher_prompt_depth < -1:
+        parser.error("--teacher_prompt_depth must be -1 or greater than 0.")
+    if args.teacher_prompt_std <= 0:
+        parser.error("--teacher_prompt_std must be greater than 0.")
+    if args.teacher_prompt_lr <= 0:
+        parser.error("--teacher_prompt_lr must be greater than 0.")
     if args.teacher_momentum < 0:
         parser.error("--teacher_momentum must be non-negative.")
     if args.teacher_weight_decay < 0:

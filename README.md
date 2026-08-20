@@ -18,14 +18,13 @@
     --momentum 0.9 \
     --weight_decay 1e-3 \
     --teacher_pretrain_epochs 3 \
-    --teacher_pretrain_batch_size 64 \
-    --teacher_lora_rank 4 \
-    --teacher_lora_alpha 4 \
-    --teacher_lora_depth -1 \
-    --teacher_lora_targets qv \
-    --teacher_lora_lr 2e-5 \
-    --teacher_lora_seed 42 \
-    --teacher_lora_gradient_checkpointing \
+    --teacher_pretrain_batch_size 16 \
+    --teacher_n_ctx_visual 3 \
+    --teacher_prompt_depth 12 \
+    --teacher_prompt_std 0.02 \
+    --teacher_prompt_lr 2e-5 \
+    --teacher_prompt_seed 42 \
+    --teacher_prompt_gradient_checkpointing \
     --teacher_momentum 0.9 \
     --teacher_weight_decay 1e-3 \
     --teacher_scheduler_step_size 5 \
@@ -49,22 +48,25 @@ ablations.
 Training uses fixed resize/normalize transforms without augmentation. Student
 classification and teacher semantic classification are removed. The student
 learns only from sketch-photo relational KD, photo-text KD, and sketch-text KD.
-The teacher uses independent photo/sketch LoRA updates and learns only from
-retrieval triplet loss.
+The teacher uses independent photo/sketch deep visual prompts and learns only
+from retrieval triplet loss. Its pretrained visual and text weights remain
+fully frozen; this branch contains neither teacher adapters nor teacher LoRA.
 
 Photo-text and sketch-text KD temperatures can be set independently. The
 existing `--image_text_kd_temperature` remains available as the fallback for
 either modality-specific temperature that is not supplied.
 
-When `--teacher_pretrain_epochs` is positive, the frozen DFN5B visual encoder
-is augmented with modality-specific LoRA updates to its attention projections.
-LoRA is trained by forwarding the seen photo/sketch images in every teacher
-epoch. It is then frozen, and tuned teacher features are materialized once for
-student distillation. The image features, teacher text targets, LoRA state, and
-configuration metadata are saved automatically under
+When `--teacher_pretrain_epochs` is positive, modality-specific prompts are
+inserted into the frozen DFN5B visual transformer. The prompt at layer zero is
+appended after positional embeddings and before `ln_pre`. At every subsequent
+prompted layer, the previous prompt tokens are replaced by that layer's own
+parameters. Prompts are trained by forwarding seen photo/sketch images in every
+teacher epoch. They are then frozen, and tuned teacher features are materialized
+once for student distillation. The image features, original teacher text
+targets, prompt state, and configuration metadata are saved automatically under
 `/kaggle/working/teacher_cache`. The filename is derived from the dataset and
 complete teacher configuration. Reusing the same teacher settings in a later
-cell loads the file and skips both DFN5B loading and LoRA pretraining. Student
+cell loads the file and skips both DFN5B loading and prompt pretraining. Student
 losses, prompts, and optimizer settings may change without invalidating the
 teacher cache. Pass
 `--rebuild_teacher_cache` to overwrite the matching cache intentionally, or
@@ -79,8 +81,7 @@ an input.
 The student CLIP backbone, including every LayerNorm, is fully frozen. After
 teacher pretraining, only active student prompt parameters are optimized.
 
-Teacher LoRA uses `W + (alpha / rank) * B @ A`. Matrix `A` uses Kaiming
-initialization and `B` starts at zero, so both modality branches initially
-produce exactly the original DFN5B function. `--teacher_lora_depth -1` adapts
-all visual Transformer blocks; a positive value adapts only that many final
-blocks. `--teacher_lora_targets` accepts `q`, `v`, `qv`, or `qkv`.
+Teacher prompts use `Normal(0, teacher_prompt_std)` initialization with a local
+seed that does not consume the global student RNG. `--teacher_prompt_depth -1`
+prompts every teacher visual Transformer block; a positive value prompts the
+first requested number of blocks. Photo and sketch never share prompt vectors.
