@@ -442,6 +442,8 @@ if __name__ == "__main__":
 
     model.cache_teacher_features(
         train_loader.dataset,
+        val_sketch_loader,
+        val_photo_loader,
         batch_size=args.teacher_pretrain_batch_size,
         workers=args.workers,
         show_progress=args.progress,

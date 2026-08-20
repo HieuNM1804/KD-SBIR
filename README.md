@@ -78,6 +78,13 @@ Files under `/kaggle/working` persist across cells in the current notebook; to
 reuse them in another Kaggle session, save the notebook output and attach it as
 an input.
 
+After every teacher prompt-pretraining epoch, the current teacher is evaluated
+on the unseen sketch queries and photo gallery with the same retrieval metrics
+used for the student. These metrics are printed for monitoring only and do not
+select or restore a teacher checkpoint. Selecting teacher hyperparameters or an
+epoch from these unseen metrics would make the experiment transductive rather
+than strictly inductive.
+
 The student CLIP backbone, including every LayerNorm, is fully frozen. After
 teacher pretraining, only active student prompt parameters are optimized.
 

@@ -40,6 +40,50 @@ DFN5B_OUTPUT_DIM = 1024
 TEACHER_CACHE_FORMAT_VERSION = 5
 
 
+def _retrieval_metrics(
+    query_features,
+    gallery_features,
+    query_labels,
+    gallery_labels,
+    dataset,
+):
+    query_labels = query_labels.cpu()
+    gallery_labels = gallery_labels.cpu()
+    ap = torch.zeros(len(query_features))
+    precision_at_k = torch.zeros(len(query_features))
+    if dataset == "sketchy_2":
+        map_k = 200
+        p_k = 200
+    else:
+        map_k = 0
+        p_k = 200 if dataset == "quickdraw" else 100
+
+    for index, query_feature in enumerate(query_features):
+        cosine = F.cosine_similarity(
+            query_feature.unsqueeze(0), gallery_features
+        ).cpu()
+        score = ((cosine + 1.0) * 0.5).clamp(
+            min=torch.finfo(cosine.dtype).eps,
+            max=1.0,
+        )
+        target = gallery_labels.eq(query_labels[index])
+        if map_k:
+            ap[index] = retrieval_average_precision(
+                score,
+                target,
+                top_k=min(map_k, len(gallery_features)),
+            )
+        else:
+            ap[index] = retrieval_average_precision(score, target)
+        precision_at_k[index] = retrieval_precision(
+            score,
+            target,
+            top_k=p_k,
+        )
+
+    return ap.mean(), precision_at_k.mean(), map_k, p_k
+
+
 def _teacher_training_config(args):
     """Parameters that can change the prompt-tuned teacher targets."""
     return {
@@ -538,6 +582,8 @@ class CustomCLIP(nn.Module):
     def _pretrain_teacher_prompts(
         self,
         train_dataset,
+        val_sketch_loader,
+        val_photo_loader,
         workers,
         show_progress,
     ):
@@ -638,8 +684,67 @@ class CustomCLIP(nn.Module):
                 f"[Teacher Pretrain] epoch={epoch + 1}, "
                 f"retrieval={retrieval_total / steps:.6f}"
             )
+            self._validate_teacher_unseen(
+                val_sketch_loader,
+                val_photo_loader,
+                epoch + 1,
+                show_progress,
+            )
 
         self.teacher_prompts.requires_grad_(False)
+
+    @torch.no_grad()
+    def _validate_teacher_unseen(
+        self,
+        val_sketch_loader,
+        val_photo_loader,
+        epoch,
+        show_progress,
+    ):
+        teacher_parameter = next(self._teacher.parameters())
+        teacher_device = teacher_parameter.device
+        teacher_dtype = teacher_parameter.dtype
+
+        def encode_loader(loader, modality):
+            features = []
+            labels = []
+            batches = tqdm(
+                loader,
+                desc=f"Teacher unseen {modality} epoch {epoch}",
+                disable=not show_progress,
+            )
+            for images, current_labels in batches:
+                images = images.to(
+                    teacher_device,
+                    dtype=teacher_dtype,
+                    non_blocking=True,
+                )
+                current_features = self._encode_teacher_image(
+                    images, modality
+                )
+                features.append(current_features.float().cpu())
+                labels.append(current_labels.cpu())
+            return torch.cat(features), torch.cat(labels)
+
+        sketch_features, sketch_labels = encode_loader(
+            val_sketch_loader, "sketch"
+        )
+        photo_features, photo_labels = encode_loader(
+            val_photo_loader, "photo"
+        )
+        mean_ap, precision, map_k, p_k = _retrieval_metrics(
+            sketch_features,
+            photo_features,
+            sketch_labels,
+            photo_labels,
+            self.cfg.dataset,
+        )
+        map_name = f"mAP@{map_k}" if map_k else "mAP@all"
+        print(
+            f"[Teacher Validation] epoch={epoch}, "
+            f"{map_name}={mean_ap.item():.4f}, "
+            f"P@{p_k}={precision.item():.4f}"
+        )
 
     @torch.no_grad()
     def _materialize_teacher_features(
@@ -715,6 +820,8 @@ class CustomCLIP(nn.Module):
     def cache_teacher_features(
         self,
         train_dataset,
+        val_sketch_loader,
+        val_photo_loader,
         batch_size,
         workers,
         show_progress,
@@ -739,6 +846,8 @@ class CustomCLIP(nn.Module):
         if self.teacher_prompts is not None:
             self._pretrain_teacher_prompts(
                 train_dataset,
+                val_sketch_loader,
+                val_photo_loader,
                 workers,
                 show_progress,
             )
@@ -922,12 +1031,16 @@ class ZS_SBIR(pl.LightningModule):
     def cache_teacher_features(
         self,
         train_dataset,
+        val_sketch_loader,
+        val_photo_loader,
         batch_size,
         workers,
         show_progress,
     ):
         self.model.cache_teacher_features(
             train_dataset,
+            val_sketch_loader,
+            val_photo_loader,
             batch_size,
             workers,
             show_progress,
@@ -1018,41 +1131,13 @@ class ZS_SBIR(pl.LightningModule):
             [labels for _, labels in self.val_step_outputs_ph]
         ).cpu()
 
-        ap = torch.zeros(len(query_features))
-        precision_at_k = torch.zeros(len(query_features))
-        if self.args.dataset == "sketchy_2":
-            map_k = 200
-            p_k = 200
-        else:
-            map_k = 0
-            p_k = 200 if self.args.dataset == "quickdraw" else 100
-
-        for idx, sketch_feature in enumerate(query_features):
-            cosine = self.distance_fn(
-                sketch_feature.unsqueeze(0), gallery_features
-            ).cpu()
-            # TorchMetrics treats non-positive predictions as non-relevant.
-            # Map cosine from [-1, 1] to (0, 1] without changing its ranking.
-            score = ((cosine + 1.0) * 0.5).clamp(
-                min=torch.finfo(cosine.dtype).eps,
-                max=1.0,
-            )
-            target = photo_labels.eq(sketch_labels[idx])
-
-            if map_k:
-                top_k = min(map_k, len(gallery_features))
-                ap[idx] = retrieval_average_precision(
-                    score, target, top_k=top_k
-                )
-            else:
-                ap[idx] = retrieval_average_precision(score, target)
-
-            precision_at_k[idx] = retrieval_precision(
-                score, target, top_k=p_k
-            )
-
-        mAP = ap.mean()
-        precision = precision_at_k.mean()
+        mAP, precision, map_k, p_k = _retrieval_metrics(
+            query_features,
+            gallery_features,
+            sketch_labels,
+            photo_labels,
+            self.args.dataset,
+        )
         self.log("mAP", mAP, on_step=False, on_epoch=True)
         if self.global_step > 0:
             self.best_metric = max(self.best_metric, mAP.item())
