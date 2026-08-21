@@ -22,7 +22,6 @@ from src.dataset import (
     TeacherFeatureDataset,
     WorkerInvariantSampler,
 )
-from src.text_encoder import TextEncoder
 from src.losses import (
     batch_hard_teacher_triplet_loss,
     loss_fn,
@@ -238,130 +237,6 @@ def _random_parameter(rows, width, seed):
     return nn.Parameter(parameter)
 
 
-class IndependentTextPromptLearner(nn.Module):
-    def __init__(
-        self,
-        n_ctx_text,
-        text_width,
-        classnames,
-        token_embedding,
-        modality,
-        seed,
-        prompt_depth,
-    ):
-        super().__init__()
-        self.n_ctx = n_ctx_text
-        modality_name = "photo" if modality == "photo" else "sketch"
-        classnames = [name.replace("_", " ") for name in classnames]
-
-        if n_ctx_text == 0:
-            ctx = None
-        elif n_ctx_text <= 3:
-            init_phrase = f"a {modality_name} of"
-            init_tokens = clip.tokenize(init_phrase)
-            with torch.no_grad():
-                embeddings = token_embedding(init_tokens).detach()
-            ctx = embeddings[0, 1 : 1 + n_ctx_text].clone()
-        else:
-            ctx = _random_parameter(
-                n_ctx_text,
-                text_width,
-                seed,
-            ).detach()
-
-        self.ctx = nn.Parameter(ctx) if ctx is not None else None
-        self.compound_prompts = nn.ParameterList()
-        for layer_index in range(1, prompt_depth):
-            if n_ctx_text == 0:
-                break
-            if n_ctx_text <= 3:
-                deep_ctx = ctx.clone()
-            else:
-                deep_ctx = _random_parameter(
-                    n_ctx_text,
-                    text_width,
-                    seed + layer_index,
-                ).detach()
-            self.compound_prompts.append(nn.Parameter(deep_ctx))
-
-        base_prompts = [
-            f"a {modality_name} of a {name}" for name in classnames
-        ]
-        if n_ctx_text <= 3:
-            raw_prompts = [f"{base}." for base in base_prompts]
-        else:
-            placeholders = " ".join(["X"] * n_ctx_text)
-            raw_prompts = [
-                f"{base} {placeholders}." for base in base_prompts
-            ]
-        try:
-            tokenized_prompts = clip.tokenize(raw_prompts)
-        except RuntimeError as error:
-            raise ValueError(
-                f"n_ctx_text={n_ctx_text} exceeds CLIP's text context length."
-            ) from error
-
-        if 0 < n_ctx_text <= 3:
-            prompt_positions = torch.arange(
-                1, 1 + n_ctx_text
-            ).expand(len(classnames), -1)
-        elif n_ctx_text > 3:
-            base_tokens = clip.tokenize(base_prompts)
-            prompt_starts = base_tokens.argmax(dim=-1)
-            prompt_positions = prompt_starts[:, None] + torch.arange(
-                n_ctx_text
-            )[None, :]
-            eot_positions = tokenized_prompts.argmax(dim=-1)
-            if torch.any(prompt_positions[:, -1] >= eot_positions):
-                raise ValueError(
-                    f"n_ctx_text={n_ctx_text} leaves no room for the end-of-text token."
-                )
-        else:
-            prompt_positions = torch.empty(
-                len(classnames), 0, dtype=torch.long
-            )
-
-        with torch.no_grad():
-            prompt_embeddings = token_embedding(tokenized_prompts).detach()
-        self.register_buffer(
-            "tokenized_prompts",
-            tokenized_prompts,
-            persistent=False,
-        )
-        self.register_buffer(
-            "prompt_embeddings",
-            prompt_embeddings,
-            persistent=False,
-        )
-        self.register_buffer(
-            "prompt_positions",
-            prompt_positions,
-            persistent=False,
-        )
-
-    def forward(self):
-        if self.ctx is None:
-            return (
-                self.tokenized_prompts,
-                self.prompt_embeddings,
-                [],
-                self.prompt_positions,
-            )
-
-        prompts = self.prompt_embeddings.clone()
-        context = self.ctx.to(dtype=prompts.dtype)
-        batch_indices = torch.arange(
-            prompts.shape[0], device=prompts.device
-        )[:, None]
-        prompts[batch_indices, self.prompt_positions] = context.unsqueeze(0)
-        return (
-            self.tokenized_prompts,
-            prompts,
-            list(self.compound_prompts),
-            self.prompt_positions,
-        )
-
-
 class IndependentVisualPromptLearner(nn.Module):
     def __init__(
         self,
@@ -399,46 +274,18 @@ class CustomCLIP(nn.Module):
         super().__init__()
         self.cfg = cfg
         freeze_clip(clip_model)
+        self.clip_model = clip_model
         self.dtype = clip_model.dtype
 
-        self.visual_encoder = clip_model.visual
-        visual_width = self.visual_encoder.ln_pre.normalized_shape[0]
-        text_width = clip_model.ln_final.normalized_shape[0]
+        visual_width = clip_model.visual.ln_pre.normalized_shape[0]
         prompt_depth = min(
             cfg.prompt_depth,
             clip_model.visual.transformer.layers,
-            clip_model.transformer.layers,
         )
         self.classnames = tuple(classnames)
         self.photo_text_active = cfg.lambda_photo_text_kd > 0
         self.sketch_text_active = cfg.lambda_sketch_text_kd > 0
         self.image_text_kd_active = _image_text_kd_active(cfg)
-        self.photo_text_prompt = (
-            IndependentTextPromptLearner(
-                cfg.n_ctx_text,
-                text_width,
-                self.classnames,
-                clip_model.token_embedding,
-                "photo",
-                cfg.seed + 101,
-                prompt_depth,
-            )
-            if self.photo_text_active
-            else None
-        )
-        self.sketch_text_prompt = (
-            IndependentTextPromptLearner(
-                cfg.n_ctx_text,
-                text_width,
-                self.classnames,
-                clip_model.token_embedding,
-                "sketch",
-                cfg.seed + 102,
-                prompt_depth,
-            )
-            if self.sketch_text_active
-            else None
-        )
         self.photo_visual_prompt = IndependentVisualPromptLearner(
             cfg.n_ctx_visual,
             visual_width,
@@ -451,10 +298,33 @@ class CustomCLIP(nn.Module):
             cfg.seed + 202,
             prompt_depth,
         )
-        self.text_encoder = (
-            TextEncoder(clip_model)
-            if self.photo_text_active or self.sketch_text_active
-            else None
+        photo_texts = [
+            f"a photo of a {name.replace('_', ' ')}."
+            for name in self.classnames
+        ]
+        sketch_texts = [
+            f"a sketch of a {name.replace('_', ' ')}."
+            for name in self.classnames
+        ]
+        self.register_buffer(
+            "_student_photo_tokens",
+            clip.tokenize(photo_texts),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_student_sketch_tokens",
+            clip.tokenize(sketch_texts),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_student_photo_text_features",
+            None,
+            persistent=False,
+        )
+        self.register_buffer(
+            "_student_sketch_text_features",
+            None,
+            persistent=False,
         )
 
         # The pretrained teacher is reloaded when needed and must not be saved
@@ -468,10 +338,10 @@ class CustomCLIP(nn.Module):
         self.register_buffer("_teacher_photo_text", None, persistent=False)
 
         print(
-            "[Student] frozen CLIP with independent deep text and visual prompts; "
-            f"n_ctx_text={cfg.n_ctx_text}, "
+            "[Student] frozen text encoder with fixed modality templates; "
+            "independent deep visual prompts; "
             f"n_ctx_visual={cfg.n_ctx_visual}, "
-            f"prompt_depth={prompt_depth}; no cross-modal projection"
+            f"prompt_depth={prompt_depth}"
         )
         print(
             "[Relational KD] sketch-photo branch -> "
@@ -898,6 +768,7 @@ class CustomCLIP(nn.Module):
 
     def train(self, mode=True):
         super().train(mode)
+        self.clip_model.eval()
         if self._teacher is not None:
             self._teacher.eval()
         return self
@@ -930,30 +801,27 @@ class CustomCLIP(nn.Module):
             self._teacher_photo_text,
         )
 
-    def get_text_prompt(self, modality):
-        if modality == "photo":
-            return self.photo_text_prompt
-        return self.sketch_text_prompt
-
     def get_visual_prompt(self, modality):
         if modality == "photo":
             return self.photo_visual_prompt()
         return self.sketch_visual_prompt()
 
     def get_student_text_features(self, modality):
-        tokenized_prompts, text_prompts, compound_prompts, prompt_positions = (
-            self.get_text_prompt(modality)()
-        )
-        return self.text_encoder(
-            tokenized_prompts,
-            text_prompts,
-            compound_prompts,
-            prompt_positions,
-        )
+        feature_name = f"_student_{modality}_text_features"
+        features = getattr(self, feature_name)
+        if features is None:
+            tokens = getattr(self, f"_student_{modality}_tokens")
+            with torch.no_grad():
+                features = F.normalize(
+                    self.clip_model.encode_text(tokens).float(),
+                    dim=-1,
+                )
+            setattr(self, feature_name, features)
+        return features
 
     def encode_student_image(self, image, modality):
         visual_prompt, compound_prompts = self.get_visual_prompt(modality)
-        features = self.visual_encoder(
+        features = self.clip_model.visual(
             image.type(self.dtype),
             visual_prompt,
             compound_prompts,

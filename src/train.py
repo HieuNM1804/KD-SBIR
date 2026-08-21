@@ -107,16 +107,6 @@ if __name__ == "__main__":
     parser.add_argument("--backbone", type=str, default="ViT-B/32")
     parser.add_argument("--max_size", type=int, default=224)
     parser.add_argument(
-        "--n_ctx_text",
-        type=int,
-        default=4,
-        help=(
-            "Number of independent deep text-prompt tokens per modality. "
-            "Values 1..3 initialize from 'a photo/sketch of'; values >=4 "
-            "use Normal(0, 0.02). Set 0 to disable text prompts."
-        ),
-    )
-    parser.add_argument(
         "--n_ctx_visual",
         type=int,
         default=4,
@@ -130,8 +120,7 @@ if __name__ == "__main__":
         type=int,
         default=12,
         help=(
-            "Number of text and visual transformer layers receiving "
-            "independent prompts."
+            "Number of visual transformer layers receiving independent prompts."
         ),
     )
     parser.add_argument(
@@ -333,7 +322,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--exp_name",
         type=str,
-        default="teacher_visual_prompt_tuning",
+        default="teacher_visual_student_visual_only",
     )
 
     args = parser.parse_args()
@@ -343,8 +332,6 @@ if __name__ == "__main__":
         args.photo_text_kd_temperature = args.image_text_kd_temperature
     if args.sketch_text_kd_temperature is None:
         args.sketch_text_kd_temperature = args.image_text_kd_temperature
-    if args.n_ctx_text < 0:
-        parser.error("--n_ctx_text must be greater than or equal to 0.")
     if args.n_ctx_visual < 0:
         parser.error("--n_ctx_visual must be greater than or equal to 0.")
     if args.prompt_depth < 1:
