@@ -7,70 +7,48 @@ from src.losses import image_text_kd_loss, relational_kd_loss
 def fine_grained_teacher_triplet_loss(
     sketch_features,
     photo_features,
-    category_ids,
-    instance_ids,
+    target_photo_indices,
     margin=0.2,
 ):
-    """Exact-pair triplet loss with hard same-category instance negatives."""
+    """Sketch-to-photo hard triplet against all 99 category negatives."""
     sketch_features = F.normalize(sketch_features.float(), dim=-1)
     photo_features = F.normalize(photo_features.float(), dim=-1)
-    category_ids = category_ids.to(sketch_features.device)
-    instance_ids = instance_ids.to(sketch_features.device)
+    targets = target_photo_indices.to(sketch_features.device).long()
+    if photo_features.shape[0] != 100:
+        raise RuntimeError("Fine-grained training expects a 100-photo gallery.")
+    if targets.shape[0] != sketch_features.shape[0]:
+        raise RuntimeError("Every sketch query needs one exact photo target.")
 
     distance = 1.0 - sketch_features @ photo_features.t()
-    positive = distance.diagonal()
-    same_category = category_ids[:, None].eq(category_ids[None, :])
-    different_instance = instance_ids[:, None].ne(instance_ids[None, :])
-    negative_mask = same_category & different_instance
-    valid = negative_mask.any(dim=-1)
-    if not valid.all():
-        raise RuntimeError(
-            "Every fine-grained sample needs a different-instance negative "
-            "from the same category."
-        )
-
-    def one_direction(current_distance):
-        hardest_negative = current_distance.masked_fill(
-            ~negative_mask, torch.inf
-        ).min(dim=-1).values
-        return F.relu(positive - hardest_negative + margin).mean()
-
-    return 0.5 * (
-        one_direction(distance) + one_direction(distance.t())
-    )
+    positive = distance.gather(1, targets[:, None]).squeeze(1)
+    negative_mask = torch.ones_like(distance, dtype=torch.bool)
+    negative_mask.scatter_(1, targets[:, None], False)
+    hardest_negative = distance.masked_fill(
+        ~negative_mask, torch.inf
+    ).min(dim=-1).values
+    return F.relu(positive - hardest_negative + margin).mean()
 
 
-def category_relational_kd_loss(
+def full_gallery_relational_kd_loss(
     student_sketch,
     student_photo,
     teacher_sketch,
     teacher_photo,
-    category_ids,
     temperature=0.07,
 ):
-    """Apply relational KD independently inside every category block."""
-    weighted_loss = student_sketch.new_zeros((), dtype=torch.float32)
-    sample_count = 0
-    for category in torch.unique(category_ids, sorted=True):
-        mask = category_ids.eq(category)
-        count = int(mask.sum().item())
-        if count < 2:
-            raise RuntimeError(
-                "Fine-grained relational KD needs at least two instances per category."
-            )
-        current = relational_kd_loss(
-            student_sketch[mask],
-            student_photo[mask],
-            teacher_sketch[mask],
-            teacher_photo[mask],
-            temperature,
-        )
-        weighted_loss = weighted_loss + current * count
-        sample_count += count
-    return weighted_loss / sample_count
+    """Match sketch-to-photo distributions over all 100 category photos."""
+    if student_photo.shape[0] != 100 or teacher_photo.shape[0] != 100:
+        raise RuntimeError("Domain KD requires the full 100-photo gallery.")
+    return relational_kd_loss(
+        student_sketch,
+        student_photo,
+        teacher_sketch,
+        teacher_photo,
+        temperature,
+    )
 
 
-def fine_grained_distillation_loss(args, features, category_ids):
+def fine_grained_distillation_loss(args, features):
     (
         photo_features,
         sketch_features,
@@ -86,12 +64,11 @@ def fine_grained_distillation_loss(args, features, category_ids):
     zero = photo_features.new_zeros((), dtype=torch.float32)
     domain_loss = zero
     if teacher_active and args.lambda_domain > 0:
-        domain_loss = category_relational_kd_loss(
+        domain_loss = full_gallery_relational_kd_loss(
             sketch_features,
             photo_features,
             teacher_sketch_features,
             teacher_photo_features,
-            category_ids.to(photo_features.device),
             args.kd_temperature,
         )
 

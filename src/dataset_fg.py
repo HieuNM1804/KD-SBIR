@@ -1,4 +1,3 @@
-import hashlib
 import os
 from collections import defaultdict
 from pathlib import Path
@@ -179,16 +178,32 @@ class FineGrainedTrainDataset(torch.utils.data.Dataset):
         self.sample_category_ids = []
         self.sample_instance_ids = []
         self.sample_photo_indices = []
+        self.sample_local_photo_indices = []
+        self.category_to_photo_indices = {}
 
         instance_index = 0
         for category in self.all_categories:
             category_id = self.category_to_label[category]
+            category_photo_indices = []
             for photo_path in self.index.photos_by_category[category]:
                 photo_id = Path(photo_path).stem
                 self.photo_path_to_index[photo_path] = len(self.all_photo_paths)
                 self.all_photo_paths.append(photo_path)
+                category_photo_indices.append(
+                    self.photo_path_to_index[photo_path]
+                )
                 self.photo_key_to_instance[(category, photo_id)] = instance_index
                 instance_index += 1
+            if len(category_photo_indices) != 100:
+                raise RuntimeError(
+                    f"Category {category} has {len(category_photo_indices)} "
+                    "photos; full-gallery training requires exactly 100."
+                )
+            self.category_to_photo_indices[category_id] = category_photo_indices
+            local_photo_indices = {
+                self.all_photo_paths[photo_index]: local_index
+                for local_index, photo_index in enumerate(category_photo_indices)
+            }
 
             for sketch_path in self.index.sketches_by_category[category]:
                 photo_path = self.index.sketch_to_photo[sketch_path]
@@ -200,6 +215,9 @@ class FineGrainedTrainDataset(torch.utils.data.Dataset):
                 self.sample_instance_ids.append(current_instance)
                 self.sample_photo_indices.append(
                     self.photo_path_to_index[photo_path]
+                )
+                self.sample_local_photo_indices.append(
+                    local_photo_indices[photo_path]
                 )
                 self.category_instance_to_sketch_indices[category_id][
                     current_instance
@@ -219,131 +237,84 @@ class FineGrainedTrainDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.all_sketches_path)
 
-    def __getitem__(self, sample_key):
-        if isinstance(sample_key, tuple):
-            _, index = sample_key
-        else:
-            index = sample_key
-
+    def __getitem__(self, index):
         sketch_path = self.all_sketches_path[index]
-        photo_index = self.sample_photo_indices[index]
-        photo_path = self.all_photo_paths[photo_index]
         sketch = self.transform(load_image(sketch_path, self.max_size))
-        photo = self.transform(load_image(photo_path, self.max_size))
 
         if self.teacher_sketch_features is None:
             teacher_sketch = torch.empty(0)
-            teacher_photo = torch.empty(0)
         else:
             teacher_sketch = self.teacher_sketch_features[index]
-            teacher_photo = self.teacher_photo_features[photo_index]
 
         return (
-            photo,
             sketch,
-            teacher_photo,
             teacher_sketch,
             self.sample_category_ids[index],
-            self.sample_instance_ids[index],
+            self.sample_local_photo_indices[index],
+        )
+
+    def collate_full_gallery(self, samples):
+        """Load one category's 100-photo gallery once for a sketch batch."""
+        sketches, teacher_sketches, categories, targets = zip(*samples)
+        if len(set(categories)) != 1:
+            raise RuntimeError("A full-gallery batch must contain one category.")
+
+        category = categories[0]
+        photo_indices = self.category_to_photo_indices[category]
+        photos = torch.stack([
+            self.transform(
+                load_image(self.all_photo_paths[photo_index], self.max_size)
+            )
+            for photo_index in photo_indices
+        ])
+        if self.teacher_photo_features is None:
+            teacher_photos = torch.empty(0)
+        else:
+            teacher_photos = self.teacher_photo_features[photo_indices]
+
+        return (
+            photos,
+            torch.stack(sketches),
+            teacher_photos,
+            torch.stack(teacher_sketches),
+            torch.full((len(samples),), category, dtype=torch.long),
+            torch.as_tensor(targets, dtype=torch.long),
         )
 
 
-class _CyclingPool:
-    def __init__(self, values, rng):
-        self.values = np.asarray(list(values), dtype=np.int64)
-        if len(self.values) == 0:
-            raise ValueError("A cycling pool cannot be empty.")
-        self.rng = rng
-        self.order = self.rng.permutation(self.values)
-        self.offset = 0
+class FineGrainedFullGalleryBatchSampler(torch.utils.data.Sampler):
+    """Yield every sketch once, grouped by category for its 100-photo gallery."""
 
-    def take_distinct(self, count):
-        if count > len(self.values):
-            raise ValueError(
-                f"Cannot take {count} distinct values from {len(self.values)}."
-            )
-        selected = []
-        selected_set = set()
-        while len(selected) < count:
-            if self.offset == len(self.order):
-                self.order = self.rng.permutation(self.values)
-                self.offset = 0
-            value = int(self.order[self.offset])
-            self.offset += 1
-            if value not in selected_set:
-                selected.append(value)
-                selected_set.add(value)
-        return selected
-
-    def take_one(self):
-        return self.take_distinct(1)[0]
-
-
-class FineGrainedPKBatchSampler(torch.utils.data.Sampler):
-    """Deterministic P-category/K-instance batches for fine-grained learning."""
-
-    def __init__(self, dataset, batch_size, samples_per_category, seed):
-        if samples_per_category < 2:
-            raise ValueError("samples_per_category must be at least 2.")
-        if batch_size % samples_per_category:
-            raise ValueError(
-                "batch_size must be divisible by samples_per_category."
-            )
+    def __init__(self, dataset, batch_size, seed):
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive.")
         self.dataset = dataset
         self.batch_size = batch_size
-        self.samples_per_category = samples_per_category
-        self.categories_per_batch = batch_size // samples_per_category
         self.seed = seed
         self.epoch = 0
-
-        self.instances = {
-            int(category): sorted(instance_map)
-            for category, instance_map in (
-                dataset.category_instance_to_sketch_indices.items()
-            )
-        }
-        if self.categories_per_batch > len(self.instances):
-            raise ValueError("The batch requests more categories than available.")
-        for category, instance_ids in self.instances.items():
-            if len(instance_ids) < samples_per_category:
-                raise ValueError(
-                    f"Category {category} has only {len(instance_ids)} instances."
-                )
+        self.category_to_sketch_indices = defaultdict(list)
+        for index, category in enumerate(dataset.sample_category_ids):
+            self.category_to_sketch_indices[int(category)].append(index)
 
     def __len__(self):
-        return len(self.dataset) // self.batch_size
+        return sum(
+            (len(indices) + self.batch_size - 1) // self.batch_size
+            for indices in self.category_to_sketch_indices.values()
+        )
 
     def __iter__(self):
         epoch = self.epoch
         self.epoch += 1
-        seed_bytes = hashlib.blake2b(
-            f"{self.seed}:{epoch}:fg-pk".encode("utf-8"), digest_size=8
-        ).digest()
-        rng = np.random.default_rng(int.from_bytes(seed_bytes, "little"))
-        category_pool = _CyclingPool(sorted(self.instances), rng)
-        instance_pools = {
-            category: _CyclingPool(instance_ids, rng)
-            for category, instance_ids in self.instances.items()
-        }
-        sketch_pools = {
-            (category, instance): _CyclingPool(indices, rng)
-            for category, instance_map in (
-                self.dataset.category_instance_to_sketch_indices.items()
-            )
-            for instance, indices in instance_map.items()
-        }
-
-        for _ in range(len(self)):
-            categories = category_pool.take_distinct(self.categories_per_batch)
-            batch = []
-            for category in categories:
-                instance_ids = instance_pools[category].take_distinct(
-                    self.samples_per_category
-                )
-                for instance in instance_ids:
-                    sample_index = sketch_pools[(category, instance)].take_one()
-                    batch.append((epoch, sample_index))
-            yield batch
+        rng = np.random.default_rng(self.seed + epoch)
+        categories = rng.permutation(
+            sorted(self.category_to_sketch_indices)
+        )
+        for category in categories:
+            indices = rng.permutation(
+                self.category_to_sketch_indices[int(category)]
+            ).tolist()
+            for offset in range(0, len(indices), self.batch_size):
+                yield indices[offset : offset + self.batch_size]
 
 
 class FineGrainedValidDataset(torch.utils.data.Dataset):

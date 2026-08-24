@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 
 from src.dataset_fg import (
     FineGrainedIndex,
-    FineGrainedPKBatchSampler,
+    FineGrainedFullGalleryBatchSampler,
     FineGrainedTrainDataset,
     FineGrainedValidDataset,
 )
@@ -56,15 +56,15 @@ def get_loaders(args):
         "prefetch_factor": 4 if args.workers > 0 else None,
         "worker_init_fn": seed_worker,
     }
-    train_sampler = FineGrainedPKBatchSampler(
+    train_sampler = FineGrainedFullGalleryBatchSampler(
         train_dataset,
         batch_size=args.batch_size,
-        samples_per_category=args.samples_per_category,
         seed=args.seed,
     )
     train_loader = DataLoader(
         train_dataset,
         batch_sampler=train_sampler,
+        collate_fn=train_dataset.collate_full_gallery,
         generator=torch.Generator().manual_seed(args.seed),
         **loader_kwargs,
     )
@@ -88,6 +88,10 @@ def get_loaders(args):
         f"seen_photos={len(train_dataset.all_photo_paths):,}, "
         f"unseen_sketches={len(val_sketch):,}, "
         f"unseen_photos={len(val_photo):,}"
+    )
+    print(
+        "[FG Training] each batch uses up to "
+        f"{args.batch_size} sketches from one category + its 100-photo gallery"
     )
     return train_loader, val_sketch_loader, val_photo_loader
 
@@ -113,7 +117,6 @@ def build_parser():
     parser.add_argument("--weight_decay", type=float, default=1e-3)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--test_batch_size", type=int, default=1024)
-    parser.add_argument("--samples_per_category", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=7)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--progress", action="store_true", default=True)
@@ -170,17 +173,10 @@ def validate_args(parser, args):
         parser.error("--n_ctx_visual must be at least 1.")
     if args.prompt_depth < 1:
         parser.error("--prompt_depth must be at least 1.")
-    if args.batch_size < 2 or args.test_batch_size < 1:
-        parser.error("Batch sizes must be positive and train batch must be >= 2.")
-    if args.samples_per_category < 2:
-        parser.error("--samples_per_category must be at least 2.")
-    if args.batch_size % args.samples_per_category:
-        parser.error("--batch_size must be divisible by --samples_per_category.")
-    if args.teacher_pretrain_batch_size % args.samples_per_category:
-        parser.error(
-            "--teacher_pretrain_batch_size must be divisible by "
-            "--samples_per_category."
-        )
+    if args.batch_size < 1 or args.test_batch_size < 1:
+        parser.error("Batch sizes must be positive.")
+    if args.teacher_pretrain_batch_size < 1:
+        parser.error("--teacher_pretrain_batch_size must be positive.")
     if args.teacher_pretrain_epochs < 0:
         parser.error("--teacher_pretrain_epochs must be non-negative.")
     if args.teacher_pretrain_epochs > 0 and args.teacher_n_ctx_visual < 1:

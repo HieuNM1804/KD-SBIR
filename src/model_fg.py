@@ -9,7 +9,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from src.dataset_fg import FineGrainedPKBatchSampler
+from src.dataset_fg import FineGrainedFullGalleryBatchSampler
 from src.losses_fg import (
     fine_grained_distillation_loss,
     fine_grained_teacher_triplet_loss,
@@ -23,7 +23,7 @@ from src.model import (
 )
 
 
-FG_CACHE_FORMAT_VERSION = 1
+FG_CACHE_FORMAT_VERSION = 2
 
 
 def better_acc1_acc5(acc1, acc5, best_acc1, best_acc5):
@@ -107,7 +107,7 @@ def _fg_teacher_config(args):
     config.update(
         {
             "task": "fine_grained_exact_instance",
-            "samples_per_category": args.samples_per_category,
+            "teacher_negative_scope": "full_100_photo_category_gallery",
             "checkpoint_selection": "best_unseen_acc1_then_acc5",
         }
     )
@@ -169,15 +169,15 @@ class FineGrainedCustomCLIP(CustomCLIP):
         teacher_device = teacher_parameter.device
         teacher_dtype = teacher_parameter.dtype
         self.teacher_prompts.requires_grad_(True)
-        sampler = FineGrainedPKBatchSampler(
+        sampler = FineGrainedFullGalleryBatchSampler(
             train_dataset,
             batch_size=cfg.teacher_pretrain_batch_size,
-            samples_per_category=cfg.samples_per_category,
             seed=cfg.seed + 10_000,
         )
         loader = DataLoader(
             train_dataset,
             batch_sampler=sampler,
+            collate_fn=train_dataset.collate_full_gallery,
             num_workers=workers,
             pin_memory=True,
             persistent_workers=workers > 0,
@@ -213,15 +213,14 @@ class FineGrainedCustomCLIP(CustomCLIP):
             )
             with torch.enable_grad():
                 for batch in batches:
-                    photo, sketch, _, _, categories, instances = batch
+                    photo, sketch, _, _, _, targets = batch
                     photo = photo.to(
                         teacher_device, dtype=teacher_dtype, non_blocking=True
                     )
                     sketch = sketch.to(
                         teacher_device, dtype=teacher_dtype, non_blocking=True
                     )
-                    categories = categories.to(teacher_device, non_blocking=True)
-                    instances = instances.to(teacher_device, non_blocking=True)
+                    targets = targets.to(teacher_device, non_blocking=True)
                     with torch.amp.autocast(
                         "cuda",
                         dtype=torch.float16,
@@ -236,8 +235,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
                         retrieval = fine_grained_teacher_triplet_loss(
                             sketch_features,
                             photo_features,
-                            categories,
-                            instances,
+                            targets,
                             cfg.teacher_triplet_margin,
                         )
                         loss = cfg.lambda_teacher_retrieval * retrieval
@@ -437,9 +435,7 @@ class FineGrainedZS_SBIR(pl.LightningModule):
         features = self.model(
             (photo, sketch, teacher_photo, teacher_sketch, categories)
         )
-        loss, loss_dict = fine_grained_distillation_loss(
-            self.args, features, categories
-        )
+        loss, loss_dict = fine_grained_distillation_loss(self.args, features)
         self.log("train_loss", loss, on_step=False, on_epoch=True)
         self.log(
             "DOMAIN",

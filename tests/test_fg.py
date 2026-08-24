@@ -8,11 +8,14 @@ import torch
 
 from src.data_config import UNSEEN_CLASSES
 from src.dataset_fg import (
+    FineGrainedFullGalleryBatchSampler,
     FineGrainedIndex,
-    FineGrainedPKBatchSampler,
     photo_id_from_sketch,
 )
-from src.losses_fg import fine_grained_teacher_triplet_loss
+from src.losses_fg import (
+    fine_grained_teacher_triplet_loss,
+    full_gallery_relational_kd_loss,
+)
 from src.model_fg import (
     better_acc1_acc5,
     default_teacher_cache_path,
@@ -50,53 +53,32 @@ class FineGrainedDataTests(unittest.TestCase):
 
 class _FakeDataset:
     def __init__(self):
-        self.category_instance_to_sketch_indices = {}
-        sample_index = 0
-        for category in range(4):
-            instance_map = {}
-            for instance_offset in range(10):
-                instance = category * 100 + instance_offset
-                instance_map[instance] = [sample_index, sample_index + 1]
-                sample_index += 2
-            self.category_instance_to_sketch_indices[category] = instance_map
-        self.length = sample_index
+        self.sample_category_ids = [0] * 5 + [1] * 7 + [2] * 3
 
     def __len__(self):
-        return self.length
+        return len(self.sample_category_ids)
 
 
 class FineGrainedSamplerTests(unittest.TestCase):
-    def test_pk_batches_have_distinct_categories_and_instances(self):
+    def test_full_gallery_batches_have_one_category_and_cover_all_sketches(self):
         dataset = _FakeDataset()
-        sampler = FineGrainedPKBatchSampler(
-            dataset, batch_size=8, samples_per_category=4, seed=42
+        sampler = FineGrainedFullGalleryBatchSampler(
+            dataset, batch_size=4, seed=42
         )
-        reverse = {}
-        for category, instance_map in (
-            dataset.category_instance_to_sketch_indices.items()
-        ):
-            for instance, indices in instance_map.items():
-                for index in indices:
-                    reverse[index] = (category, instance)
-
-        batch = next(iter(sampler))
-        pairs = [reverse[sample_index] for _, sample_index in batch]
-        categories = sorted({category for category, _ in pairs})
-        self.assertEqual(len(categories), 2)
-        for category in categories:
-            instances = [
-                instance
-                for current_category, instance in pairs
-                if current_category == category
-            ]
-            self.assertEqual(len(instances), 4)
-            self.assertEqual(len(set(instances)), 4)
+        batches = list(iter(sampler))
+        flattened = [index for batch in batches for index in batch]
+        self.assertEqual(sorted(flattened), list(range(len(dataset))))
+        self.assertEqual(len(flattened), len(set(flattened)))
+        for batch in batches:
+            categories = {dataset.sample_category_ids[index] for index in batch}
+            self.assertEqual(len(categories), 1)
+            self.assertLessEqual(len(batch), 4)
 
     def test_sampler_is_reproducible(self):
         dataset = _FakeDataset()
-        first = FineGrainedPKBatchSampler(dataset, 8, 4, seed=42)
-        second = FineGrainedPKBatchSampler(dataset, 8, 4, seed=42)
-        self.assertEqual(next(iter(first)), next(iter(second)))
+        first = FineGrainedFullGalleryBatchSampler(dataset, 4, seed=42)
+        second = FineGrainedFullGalleryBatchSampler(dataset, 4, seed=42)
+        self.assertEqual(list(iter(first)), list(iter(second)))
 
 
 class FineGrainedCacheTests(unittest.TestCase):
@@ -127,7 +109,6 @@ class FineGrainedCacheTests(unittest.TestCase):
                 teacher_triplet_margin=0.2,
                 teacher_scheduler_step_size=5,
                 teacher_scheduler_gamma=0.1,
-                samples_per_category=8,
                 seed=42,
                 lr=1e-2,
             )
@@ -153,14 +134,28 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         self.assertFalse(better_acc1_acc5(0.2, 0.4, 0.2, 0.4))
         self.assertFalse(better_acc1_acc5(0.1, 0.9, 0.2, 0.4))
 
-    def test_teacher_triplet_uses_exact_pair_and_same_category_negatives(self):
-        features = torch.eye(4)
-        categories = torch.tensor([0, 0, 1, 1])
-        instances = torch.tensor([0, 1, 2, 3])
+    def test_teacher_triplet_uses_exact_pair_and_all_gallery_negatives(self):
+        gallery = torch.eye(100)
+        queries = gallery[[7, 31, 99]]
         loss = fine_grained_teacher_triplet_loss(
-            features, features, categories, instances, margin=0.2
+            queries,
+            gallery,
+            torch.tensor([7, 31, 99]),
+            margin=0.2,
         )
         self.assertAlmostEqual(loss.item(), 0.0, places=7)
+
+    def test_domain_kd_supports_rectangular_sketch_gallery_logits(self):
+        generator = torch.Generator().manual_seed(42)
+        sketches = torch.randn(7, 16, generator=generator)
+        photos = torch.randn(100, 16, generator=generator)
+        loss = full_gallery_relational_kd_loss(
+            sketches,
+            photos,
+            sketches.clone(),
+            photos.clone(),
+        )
+        self.assertAlmostEqual(loss.item(), 0.0, places=5)
 
     def test_micro_acc_at_1_and_5(self):
         gallery = torch.eye(100)
