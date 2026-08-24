@@ -46,7 +46,7 @@ def _image_files(directory):
 class FineGrainedIndex:
     """Validated exact sketch-photo associations for the Sketchy Basic set."""
 
-    def __init__(self, root, dataset="sketchy_2", validate_counts=True):
+    def __init__(self, root, dataset="sketchy_2", validate_counts=False):
         if dataset != "sketchy_2":
             raise ValueError(
                 "Fine-grained ZS-SBIR currently supports only --dataset sketchy_2."

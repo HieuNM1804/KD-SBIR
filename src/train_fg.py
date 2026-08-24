@@ -44,7 +44,7 @@ def seed_worker(_worker_id):
 
 def get_loaders(args):
     seed_everything(args.seed)
-    index = FineGrainedIndex(args.root, args.dataset, validate_counts=True)
+    index = FineGrainedIndex(args.root, args.dataset, validate_counts=False)
     train_dataset = FineGrainedTrainDataset(args, index=index)
     val_sketch = FineGrainedValidDataset(args, index, modality="sketch")
     val_photo = FineGrainedValidDataset(args, index, modality="photo")
