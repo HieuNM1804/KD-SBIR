@@ -54,3 +54,10 @@ Teacher caches are named from the dataset and complete teacher configuration.
 Changing only student prompts, losses, or optimizer settings reuses a compatible
 teacher cache. Use `--rebuild_teacher_cache` only when intentionally replacing
 that cache.
+
+Teacher prompt pretraining keeps the epoch with the highest unseen P@K, restores
+that prompt state, and materializes the distillation cache from it. Student
+checkpoints are also ranked by unseen P@K instead of mAP. Ties keep the earlier
+teacher epoch. Neither state cloning nor checkpoint serialization consumes RNG.
+Because unseen labels determine both selections, this setting has test-set
+model-selection leakage and is not a strict inductive ZS-SBIR protocol.

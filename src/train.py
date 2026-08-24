@@ -373,9 +373,9 @@ if __name__ == "__main__":
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
 
     checkpoint_callback = ModelCheckpoint(
-        monitor="mAP",
+        monitor="precision",
         dirpath=f"saved_models/{args.exp_name}",
-        filename="{epoch:02d}-{mAP:.4f}",
+        filename="{epoch:02d}-{precision:.4f}",
         save_top_k=1,
         mode="max",
         save_last=True,

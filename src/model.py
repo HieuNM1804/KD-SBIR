@@ -495,6 +495,9 @@ class CustomCLIP(nn.Module):
             "cuda",
             enabled=teacher_device.type == "cuda",
         )
+        best_precision = -float("inf")
+        best_epoch = 0
+        best_prompt_state = None
 
         for epoch in range(cfg.teacher_pretrain_epochs):
             retrieval_total = 0.0
@@ -554,12 +557,29 @@ class CustomCLIP(nn.Module):
                 f"[Teacher Pretrain] epoch={epoch + 1}, "
                 f"retrieval={retrieval_total / steps:.6f}"
             )
-            self._validate_teacher_unseen(
+            precision = self._validate_teacher_unseen(
                 val_sketch_loader,
                 val_photo_loader,
                 epoch + 1,
                 show_progress,
             )
+            if precision > best_precision:
+                best_precision = precision
+                best_epoch = epoch + 1
+                best_prompt_state = {
+                    key: value.detach().cpu().clone()
+                    for key, value in self.teacher_prompts.state_dict().items()
+                }
+
+        if best_prompt_state is None:
+            raise RuntimeError("Teacher best-precision state was not created.")
+        self.teacher_prompts.load_state_dict(best_prompt_state, strict=True)
+        self.teacher_best_precision = best_precision
+        self.teacher_best_epoch = best_epoch
+        print(
+            "[Teacher Best] restored visual prompts from "
+            f"epoch={best_epoch}, precision={best_precision:.6f}"
+        )
 
         self.teacher_prompts.requires_grad_(False)
 
@@ -615,6 +635,7 @@ class CustomCLIP(nn.Module):
             f"{map_name}={mean_ap.item():.4f}, "
             f"P@{p_k}={precision.item():.4f}"
         )
+        return precision.item()
 
     @torch.no_grad()
     def _materialize_teacher_features(
@@ -679,6 +700,12 @@ class CustomCLIP(nn.Module):
             "teacher_sketch_text": self._teacher_sketch_text.detach().cpu(),
             "teacher_photo_text": self._teacher_photo_text.detach().cpu(),
             "teacher_prompt_state_dict": prompt_state,
+            "teacher_best_epoch": getattr(self, "teacher_best_epoch", None),
+            "teacher_best_precision": getattr(
+                self,
+                "teacher_best_precision",
+                None,
+            ),
         }
         torch.save(payload, temporary_path)
         os.replace(temporary_path, cache_path)
@@ -883,7 +910,7 @@ class ZS_SBIR(pl.LightningModule):
         clip_model = _load_clip_model(args.backbone)
 
         self.distance_fn = lambda x, y: F.cosine_similarity(x, y)
-        self.best_metric = 1e-3
+        self.best_precision = 0.0
 
         teacher = _load_teacher(args)
         self.model = CustomCLIP(
@@ -1007,18 +1034,22 @@ class ZS_SBIR(pl.LightningModule):
             self.args.dataset,
         )
         self.log("mAP", mAP, on_step=False, on_epoch=True)
+        self.log("precision", precision, on_step=False, on_epoch=True)
         if self.global_step > 0:
-            self.best_metric = max(self.best_metric, mAP.item())
+            self.best_precision = max(
+                self.best_precision,
+                precision.item(),
+            )
 
         if map_k:
             print(
                 f"mAP@{map_k}: {mAP.item()}, P@{p_k}: {precision}, "
-                f"Best mAP: {self.best_metric}"
+                f"Best P@{p_k}: {self.best_precision}"
             )
         else:
             print(
                 f"mAP@all: {mAP.item()}, P@{p_k}: {precision}, "
-                f"Best mAP: {self.best_metric}"
+                f"Best P@{p_k}: {self.best_precision}"
             )
         train_loss = self.trainer.callback_metrics.get("train_loss")
         if train_loss is not None:
