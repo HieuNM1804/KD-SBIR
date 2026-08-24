@@ -278,10 +278,10 @@ if __name__ == "__main__":
     )
     parser.add_argument("--teacher_triplet_margin", type=float, default=0.2)
     parser.add_argument(
-        "--lambda_kd",
+        "--lambda_domain",
         type=float,
         default=3.0,
-        help="Weight for sketch-photo relational distillation.",
+        help="Weight for sketch-photo domain distillation.",
     )
     parser.add_argument(
         "--kd_temperature",
@@ -290,16 +290,13 @@ if __name__ == "__main__":
         help="Temperature for the sketch-photo similarity distribution.",
     )
     parser.add_argument(
-        "--lambda_photo_text_kd",
+        "--lambda_modality",
         type=float,
         default=0.0,
-        help="Weight for DFN5B-to-student photo-text logit distillation.",
-    )
-    parser.add_argument(
-        "--lambda_sketch_text_kd",
-        type=float,
-        default=0.0,
-        help="Weight for DFN5B-to-student sketch-text logit distillation.",
+        help=(
+            "Shared weight for the sum of photo-text and sketch-text "
+            "modality distillation losses."
+        ),
     )
     parser.add_argument(
         "--image_text_kd_temperature",
@@ -362,8 +359,10 @@ if __name__ == "__main__":
         parser.error("--teacher_scheduler_step_size must be at least 1.")
     if args.teacher_scheduler_gamma <= 0:
         parser.error("--teacher_scheduler_gamma must be greater than 0.")
-    if args.lambda_photo_text_kd < 0 or args.lambda_sketch_text_kd < 0:
-        parser.error("Image-text KD weights must be non-negative.")
+    if args.lambda_domain < 0:
+        parser.error("--lambda_domain must be non-negative.")
+    if args.lambda_modality < 0:
+        parser.error("--lambda_modality must be non-negative.")
     if args.image_text_kd_temperature <= 0:
         parser.error("--image_text_kd_temperature must be greater than 0.")
     if args.photo_text_kd_temperature <= 0:

@@ -151,10 +151,7 @@ def default_teacher_cache_path(args, train_dataset):
 
 
 def _image_text_kd_active(args):
-    return (
-        args.lambda_photo_text_kd > 0
-        or args.lambda_sketch_text_kd > 0
-    )
+    return args.lambda_modality > 0
 
 
 def _persistent_teacher_cache_available(args):
@@ -205,7 +202,7 @@ def _load_teacher(args):
         return None
 
     if (
-        args.lambda_kd <= 0
+        args.lambda_domain <= 0
         and not _image_text_kd_active(args)
         and args.teacher_pretrain_epochs == 0
     ):
@@ -284,9 +281,9 @@ class CustomCLIP(nn.Module):
             clip_model.visual.transformer.layers,
         )
         self.classnames = tuple(classnames)
-        self.photo_text_active = cfg.lambda_photo_text_kd > 0
-        self.sketch_text_active = cfg.lambda_sketch_text_kd > 0
         self.image_text_kd_active = _image_text_kd_active(cfg)
+        self.photo_text_active = self.image_text_kd_active
+        self.sketch_text_active = self.image_text_kd_active
         self.photo_visual_prompt = IndependentVisualPromptLearner(
             cfg.n_ctx_visual,
             visual_width,
@@ -345,14 +342,13 @@ class CustomCLIP(nn.Module):
             f"prompt_depth={prompt_depth}"
         )
         print(
-            "[Relational KD] sketch-photo branch -> "
-            f"active={self.teacher_active}, lambda={cfg.lambda_kd}, "
+            "[Domain KD] sketch-photo branch -> "
+            f"active={self.teacher_active}, lambda={cfg.lambda_domain}, "
             f"temperature={cfg.kd_temperature}"
         )
         print(
-            "[Image-Text KD] "
-            f"photo_lambda={cfg.lambda_photo_text_kd}, "
-            f"sketch_lambda={cfg.lambda_sketch_text_kd}, "
+            "[Modality KD] photo-text + sketch-text -> "
+            f"lambda={cfg.lambda_modality}, "
             f"photo_temperature={cfg.photo_text_kd_temperature}, "
             f"sketch_temperature={cfg.sketch_text_kd_temperature}"
         )
@@ -991,8 +987,8 @@ class ZS_SBIR(pl.LightningModule):
         loss, loss_dict = loss_fn(self.args, features)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         bar_names = {
-            "kd_sketch_photo": "KD_II",
-            "image_text_kd": "KD_IT",
+            "domain_kd": "DOMAIN",
+            "modality_kd": "MODALITY",
         }
         for key, bar_name in bar_names.items():
             self.log(

@@ -26,9 +26,8 @@ sketch-text KD. Setting an objective weight to zero disables that objective.
     --test_batch_size 1024 \
     --n_ctx_visual 3 \
     --prompt_depth 12 \
-    --lambda_kd 1.0 \
-    --lambda_photo_text_kd 0.5 \
-    --lambda_sketch_text_kd 1.0 \
+    --lambda_domain 1.0 \
+    --lambda_modality 1.0 \
     --photo_text_kd_temperature 0.2 \
     --sketch_text_kd_temperature 0.02 \
     --lr 1e-3 \

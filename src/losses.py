@@ -122,9 +122,9 @@ def loss_fn(args, features):
 
     zero = torch.zeros((), device=photo_features.device)
 
-    kd_loss = zero
-    if teacher_active and args.lambda_kd > 0:
-        kd_loss = relational_kd_loss(
+    domain_loss = zero
+    if teacher_active and args.lambda_domain > 0:
+        domain_loss = relational_kd_loss(
             sketch_features,
             photo_features,
             teacher_sketch_features,
@@ -134,8 +134,7 @@ def loss_fn(args, features):
 
     photo_text_kd = zero
     sketch_text_kd = zero
-    active_image_text_losses = []
-    if teacher_active and args.lambda_photo_text_kd > 0:
+    if teacher_active and args.lambda_modality > 0:
         photo_text_kd = image_text_kd_loss(
             photo_features,
             student_photo_text,
@@ -143,8 +142,6 @@ def loss_fn(args, features):
             teacher_photo_text,
             args.photo_text_kd_temperature,
         )
-        active_image_text_losses.append(photo_text_kd)
-    if teacher_active and args.lambda_sketch_text_kd > 0:
         sketch_text_kd = image_text_kd_loss(
             sketch_features,
             student_sketch_text,
@@ -152,19 +149,13 @@ def loss_fn(args, features):
             teacher_sketch_text,
             args.sketch_text_kd_temperature,
         )
-        active_image_text_losses.append(sketch_text_kd)
-    image_text_kd = (
-        torch.stack(active_image_text_losses).mean()
-        if active_image_text_losses
-        else zero
-    )
+    modality_loss = photo_text_kd + sketch_text_kd
 
     total_loss = (
-        args.lambda_kd * kd_loss
-        + args.lambda_photo_text_kd * photo_text_kd
-        + args.lambda_sketch_text_kd * sketch_text_kd
+        args.lambda_domain * domain_loss
+        + args.lambda_modality * modality_loss
     )
     return total_loss, {
-        "kd_sketch_photo": kd_loss,
-        "image_text_kd": image_text_kd,
+        "domain_kd": domain_loss,
+        "modality_kd": modality_loss,
     }
