@@ -36,7 +36,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DFN5B_MODEL = "ViT-H-14-quickgelu"
 DFN5B_PRETRAINED = "dfn5b"
 DFN5B_OUTPUT_DIM = 1024
-TEACHER_CACHE_FORMAT_VERSION = 5
+TEACHER_CACHE_FORMAT_VERSION = 6
 
 
 def _retrieval_metrics(
@@ -107,6 +107,7 @@ def _teacher_training_config(args):
         "scheduler": "StepLR",
         "scheduler_step_size": args.teacher_scheduler_step_size,
         "scheduler_gamma": args.teacher_scheduler_gamma,
+        "checkpoint_selection": "best_unseen_precision",
         "seed": args.seed,
     }
 
