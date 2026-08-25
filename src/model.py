@@ -18,6 +18,7 @@ from tqdm.auto import tqdm
 
 from clip import clip
 from clip.model import build_model
+from src.data_config import GENERALIZED_CLASSES
 from src.dataset import (
     TeacherFeatureDataset,
     WorkerInvariantSampler,
@@ -91,6 +92,11 @@ def _teacher_training_config(args):
         "teacher_output_dim": DFN5B_OUTPUT_DIM,
         "teacher_precision": "fp16",
         "evaluation_protocol": getattr(args, "eval_protocol", "zs"),
+        "generalized_classes": (
+            list(GENERALIZED_CLASSES.get(args.dataset, ()))
+            if getattr(args, "eval_protocol", "zs") == "gzs"
+            else []
+        ),
         "teacher_n_ctx_visual": args.teacher_n_ctx_visual,
         "teacher_prompt_depth": args.teacher_prompt_depth,
         "teacher_prompt_std": args.teacher_prompt_std,

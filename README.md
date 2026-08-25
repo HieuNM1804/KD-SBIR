@@ -1,10 +1,16 @@
 # KD-SBIR: Generalized Zero-Shot SBIR
 
 This experimental branch evaluates the existing distillation model with the
-GZS-SBIR protocol used by SpLIP. Training still uses only seen categories.
-Every validation query is an unseen-category sketch, while the retrieval
-gallery contains photos from both seen and unseen categories. Relevant photos
-are determined by category; cosine values remain a continuous ranking score.
+subset-GZS-SBIR protocol. Training still uses only seen categories. Every
+validation query is an unseen-category sketch, while the retrieval gallery
+contains every unseen photo plus photos from the fixed seen-category subset in
+`GENERALIZED_CLASSES`. Relevant photos are determined by category; cosine
+values remain a continuous ranking score.
+
+The fixed seen distractors are nine Sketchy-2 classes (`teapot`, `harp`,
+`piano`, `trumpet`, `saxophone`, `hourglass`, `mushroom`, `pretzel`, `bell`)
+and five TU-Berlin classes (`blimp`, `tablelamp`, `telephone`,
+`human-skeleton`, `pickup truck`).
 
 The branch defaults to `--eval_protocol gzs`. Use `--eval_protocol zs` only as
 an unseen-gallery ablation. Sketchy-2 reports mAP@200/P@200; TU-Berlin reports

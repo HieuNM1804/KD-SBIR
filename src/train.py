@@ -125,7 +125,8 @@ if __name__ == "__main__":
         choices=("gzs", "zs"),
         help=(
             "Evaluation gallery protocol. 'gzs' (branch default) ranks unseen "
-            "sketch queries against photos from seen and unseen categories; "
+            "sketch queries against all unseen photos plus the fixed seen "
+            "subset in GENERALIZED_CLASSES; "
             "'zs' keeps the original unseen-only gallery for ablation."
         ),
     )

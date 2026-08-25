@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from torchvision import transforms
 from PIL import Image
-from src.data_config import UNSEEN_CLASSES
+from src.data_config import GENERALIZED_CLASSES, UNSEEN_CLASSES
 
 CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073]
 CLIP_STD = [0.26862954, 0.26130258, 0.27577711]
@@ -167,11 +167,35 @@ class ValidDataset(torch.utils.data.Dataset):
                 + ", ".join(missing_unseen)
             )
 
-        # GZS-SBIR keeps unseen sketches as queries but expands the photo
-        # gallery to P_seen union P_unseen.  A shared global label map is
-        # required so unseen query labels still match their gallery labels.
+        # Subset-GZS keeps unseen sketches as queries and adds a fixed subset
+        # of seen-category photos to the complete unseen photo gallery.
         if protocol == "gzs":
-            self.label_classes = available_photo_classes
+            if args.dataset not in GENERALIZED_CLASSES:
+                supported = ", ".join(sorted(GENERALIZED_CLASSES))
+                raise ValueError(
+                    f"No fixed GZS seen subset for {args.dataset}. "
+                    f"Supported datasets: {supported}."
+                )
+            generalized_classes = list(GENERALIZED_CLASSES[args.dataset])
+            overlap = sorted(
+                set(self.unseen_classes) & set(generalized_classes)
+            )
+            if overlap:
+                raise ValueError(
+                    "GZS seen subset overlaps unseen classes: "
+                    + ", ".join(overlap)
+                )
+            missing_generalized = sorted(
+                set(generalized_classes) - set(available_photo_classes)
+            )
+            if missing_generalized:
+                raise FileNotFoundError(
+                    "GZS seen photo categories are missing from the dataset: "
+                    + ", ".join(missing_generalized)
+                )
+            self.label_classes = (
+                list(self.unseen_classes) + generalized_classes
+            )
             selected_classes = (
                 self.unseen_classes if mode == "sketch" else self.label_classes
             )

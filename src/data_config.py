@@ -118,3 +118,27 @@ UNSEEN_CLASSES = {
         "tv",
     ],
 }
+
+
+# Fixed seen-category distractors added to the unseen photo gallery for the
+# subset-based GZS-SBIR evaluation.  Queries remain unseen-category sketches.
+GENERALIZED_CLASSES = {
+    "sketchy_2": [
+        "teapot",
+        "harp",
+        "piano",
+        "trumpet",
+        "saxophone",
+        "hourglass",
+        "mushroom",
+        "pretzel",
+        "bell",
+    ],
+    "tuberlin": [
+        "blimp",
+        "tablelamp",
+        "telephone",
+        "human-skeleton",
+        "pickup truck",
+    ],
+}
