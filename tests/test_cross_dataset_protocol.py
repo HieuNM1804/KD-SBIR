@@ -13,6 +13,50 @@ class CrossDatasetProtocolTest(unittest.TestCase):
         self.assertEqual(len(quickdraw), 11)
         self.assertEqual(len(set(quickdraw)), 11)
 
+    def test_fixed_cross_dataset_classes(self):
+        self.assertEqual(
+            CROSS_DATASET_CLASSES[("sketchy_1", "tuberlin")],
+            [
+                "airplane",
+                "baseball bat",
+                "bus",
+                "butterfly",
+                "cell phone",
+                "cup",
+                "floor lamp",
+                "house",
+                "horse",
+                "mermaid",
+                "mosquito",
+                "mug",
+                "palm tree",
+                "panda",
+                "skull",
+                "suv",
+                "toilet",
+                "truck",
+                "tv",
+                "wineglass",
+                "wrist-watch",
+            ],
+        )
+        self.assertEqual(
+            CROSS_DATASET_CLASSES[("sketchy_1", "quickdraw")],
+            [
+                "airplane",
+                "cruise ship",
+                "windmill",
+                "horse",
+                "bus",
+                "eiffel tower",
+                "cake",
+                "parrot",
+                "palm tree",
+                "megaphone",
+                "tree",
+            ],
+        )
+
     def test_category_normalization_handles_dataset_spelling(self):
         self.assertEqual(
             canonical_category_name("hot-air_balloon"),
