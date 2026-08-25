@@ -1,4 +1,14 @@
-# KD-SBIR: Teacher Visual Prompts, Student Visual-Only Prompts
+# KD-SBIR: Generalized Zero-Shot SBIR
+
+This experimental branch evaluates the existing distillation model with the
+GZS-SBIR protocol used by SpLIP. Training still uses only seen categories.
+Every validation query is an unseen-category sketch, while the retrieval
+gallery contains photos from both seen and unseen categories. Relevant photos
+are determined by category; cosine values remain a continuous ranking score.
+
+The branch defaults to `--eval_protocol gzs`. Use `--eval_protocol zs` only as
+an unseen-gallery ablation. Sketchy-2 reports mAP@200/P@200; TU-Berlin reports
+mAP@all/P@100, matching the paper's dataset-specific conventions.
 
 This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from
 `experiment/teacher-visual-prompt-tuning`. The teacher has separate photo and
@@ -19,7 +29,8 @@ sketch-text KD. Setting an objective weight to zero disables that objective.
 ```bash
 !python -m src.train \
     --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
-    --dataset sketchy_1 \
+    --dataset sketchy_2 \
+    --eval_protocol gzs \
     --epochs 7 \
     --workers 8 \
     --batch_size 64 \
@@ -45,7 +56,7 @@ sketch-text KD. Setting an objective weight to zero disables that objective.
     --lambda_teacher_retrieval 1.5 \
     --teacher_triplet_margin 0.2 \
     --seed 42 \
-    --exp_name teacher_visual_student_visual_only \
+    --exp_name gzs_sketchy2 \
     --progress
 ```
 

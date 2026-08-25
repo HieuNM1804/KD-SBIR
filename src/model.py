@@ -90,6 +90,7 @@ def _teacher_training_config(args):
         "teacher_pretrained": DFN5B_PRETRAINED,
         "teacher_output_dim": DFN5B_OUTPUT_DIM,
         "teacher_precision": "fp16",
+        "evaluation_protocol": getattr(args, "eval_protocol", "zs"),
         "teacher_n_ctx_visual": args.teacher_n_ctx_visual,
         "teacher_prompt_depth": args.teacher_prompt_depth,
         "teacher_prompt_std": args.teacher_prompt_std,
@@ -107,7 +108,11 @@ def _teacher_training_config(args):
         "scheduler": "StepLR",
         "scheduler_step_size": args.teacher_scheduler_step_size,
         "scheduler_gamma": args.teacher_scheduler_gamma,
-        "checkpoint_selection": "best_unseen_precision",
+        "checkpoint_selection": (
+            "best_gzs_precision"
+            if getattr(args, "eval_protocol", "zs") == "gzs"
+            else "best_unseen_precision"
+        ),
         "seed": args.seed,
     }
 

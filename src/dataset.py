@@ -140,20 +140,58 @@ class TeacherFeatureDataset(torch.utils.data.Dataset):
 
 
 class ValidDataset(torch.utils.data.Dataset):
-    def __init__(self, args, mode="photo"):
+    def __init__(self, args, mode="photo", protocol="zs"):
         super().__init__()
+        if protocol not in {"zs", "gzs"}:
+            raise ValueError(f"Unknown evaluation protocol: {protocol}")
+        if mode not in {"photo", "sketch"}:
+            raise ValueError(f"Unknown validation modality: {mode}")
+
         self.max_size = args.max_size
         self.transform = normal_transform(self.max_size)
         self.unseen_classes = UNSEEN_CLASSES[args.dataset]
 
-        unseen_paths = []
-        for category in self.unseen_classes:
+        photo_root = os.path.join(args.root, "photo")
+        available_photo_classes = sorted(
+            category
+            for category in os.listdir(photo_root)
+            if category != ".ipynb_checkpoints"
+            and os.path.isdir(os.path.join(photo_root, category))
+        )
+        missing_unseen = sorted(
+            set(self.unseen_classes) - set(available_photo_classes)
+        )
+        if missing_unseen:
+            raise FileNotFoundError(
+                "Unseen photo categories are missing from the dataset: "
+                + ", ".join(missing_unseen)
+            )
+
+        # GZS-SBIR keeps unseen sketches as queries but expands the photo
+        # gallery to P_seen union P_unseen.  A shared global label map is
+        # required so unseen query labels still match their gallery labels.
+        if protocol == "gzs":
+            self.label_classes = available_photo_classes
+            selected_classes = (
+                self.unseen_classes if mode == "sketch" else self.label_classes
+            )
+        else:
+            self.label_classes = list(self.unseen_classes)
+            selected_classes = self.unseen_classes
+        self.category_to_label = {
+            category: index for index, category in enumerate(self.label_classes)
+        }
+        self.protocol = protocol
+        self.mode = mode
+
+        evaluation_paths = []
+        for category in selected_classes:
             paths = glob.glob(
                 os.path.join(args.root, mode, category, "*")
             )
-            unseen_paths.extend(sorted(paths))
+            evaluation_paths.extend(sorted(paths))
 
-        self.paths = unseen_paths
+        self.paths = evaluation_paths
 
     def __getitem__(self, index):
         filepath = self.paths[index]
@@ -162,7 +200,7 @@ class ValidDataset(torch.utils.data.Dataset):
         image = load_image(filepath, self.max_size)
         image_tensor = self.transform(image)
 
-        return image_tensor, self.unseen_classes.index(category)
+        return image_tensor, self.category_to_label[category]
     
     def __len__(self):
         return len(self.paths)

@@ -45,8 +45,22 @@ def get_loaders(args):
     seed_everything(args.seed)
     
     train_dataset = TrainDataset(args)
-    val_sketch = ValidDataset(args, mode='sketch')
-    val_photo = ValidDataset(args)
+    val_sketch = ValidDataset(
+        args,
+        mode="sketch",
+        protocol=args.eval_protocol,
+    )
+    val_photo = ValidDataset(
+        args,
+        mode="photo",
+        protocol=args.eval_protocol,
+    )
+    print(
+        f"[Evaluation] protocol={args.eval_protocol.upper()}, "
+        f"unseen_sketch_queries={len(val_sketch):,}, "
+        f"photo_gallery={len(val_photo):,}, "
+        f"gallery_classes={len(val_photo.label_classes):,}"
+    )
 
     loader_kwargs = dict(
         num_workers=args.workers,
@@ -103,6 +117,17 @@ if __name__ == "__main__":
         default="sketchy_1",
         choices=sorted(UNSEEN_CLASSES),
         help="Zero-shot split.",
+    )
+    parser.add_argument(
+        "--eval_protocol",
+        type=str,
+        default="gzs",
+        choices=("gzs", "zs"),
+        help=(
+            "Evaluation gallery protocol. 'gzs' (branch default) ranks unseen "
+            "sketch queries against photos from seen and unseen categories; "
+            "'zs' keeps the original unseen-only gallery for ablation."
+        ),
     )
     parser.add_argument("--backbone", type=str, default="ViT-B/32")
     parser.add_argument("--max_size", type=int, default=224)
