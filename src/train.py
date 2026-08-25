@@ -14,7 +14,14 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from src.dataset import TrainDataset, ValidDataset, WorkerInvariantSampler
+from src.dataset import (
+    CrossDatasetValidDataset,
+    TrainDataset,
+    ValidDataset,
+    WorkerInvariantSampler,
+    canonical_category_name,
+    select_cross_dataset_classes,
+)
 from src.data_config import UNSEEN_CLASSES
 from src.model import ZS_SBIR, default_teacher_cache_path
 
@@ -41,12 +48,82 @@ def seed_worker(_worker_id):
     random.seed(worker_seed)
 
 
+PAPER_CROSS_DATASET_COUNTS = {
+    ("sketchy_2", "tuberlin"): 21,
+    ("sketchy_2", "quickdraw"): 11,
+    ("tuberlin", "sketchy_2"): 8,
+    ("tuberlin", "quickdraw"): 10,
+}
+
+
+def _read_target_classes(path):
+    with open(path, "r", encoding="utf-8") as file:
+        classes = [line.strip() for line in file if line.strip()]
+    if len(classes) != len(set(classes)):
+        raise ValueError("--target_classes_file contains duplicate categories.")
+    return classes
+
+
 def get_loaders(args):
     seed_everything(args.seed)
     
     train_dataset = TrainDataset(args)
-    val_sketch = ValidDataset(args, mode='sketch')
-    val_photo = ValidDataset(args)
+    source_val_sketch = ValidDataset(args, mode="sketch")
+    source_val_photo = ValidDataset(args, mode="photo")
+
+    if args.target_classes_file:
+        target_classes = _read_target_classes(args.target_classes_file)
+        source_semantics = {
+            canonical_category_name(category)
+            for category in train_dataset.all_categories
+        }
+        leaked = [
+            category
+            for category in target_classes
+            if canonical_category_name(category) in source_semantics
+        ]
+        if leaked:
+            raise ValueError(
+                "Target class file is not zero-shot relative to source train: "
+                + ", ".join(leaked)
+            )
+    else:
+        target_classes = select_cross_dataset_classes(
+            train_dataset.all_categories,
+            UNSEEN_CLASSES[args.target_dataset],
+        )
+
+    expected_count = PAPER_CROSS_DATASET_COUNTS.get(
+        (args.dataset, args.target_dataset)
+    )
+    if expected_count is not None and len(target_classes) != expected_count:
+        print(
+            "[Cross-Dataset Warning] The installed target split produces "
+            f"{len(target_classes)} zero-shot classes, while the ZSE/SpLIP "
+            f"paper protocol reports {expected_count}. Supply the published "
+            "class subset with --target_classes_file for directly comparable "
+            "numbers. No class is silently truncated."
+        )
+
+    target_val_sketch = CrossDatasetValidDataset(
+        args.target_root,
+        target_classes,
+        args.max_size,
+        mode="sketch",
+    )
+    target_val_photo = CrossDatasetValidDataset(
+        args.target_root,
+        target_classes,
+        args.max_size,
+        mode="photo",
+    )
+    print(
+        f"[Cross-Dataset] source={args.dataset}, "
+        f"target={args.target_dataset}, classes={len(target_classes)}, "
+        f"queries={len(target_val_sketch):,}, "
+        f"gallery={len(target_val_photo):,}"
+    )
+    print("[Cross-Dataset Classes] " + ", ".join(target_classes))
 
     loader_kwargs = dict(
         num_workers=args.workers,
@@ -65,22 +142,43 @@ def get_loaders(args):
         generator=torch.Generator().manual_seed(args.seed),
         **loader_kwargs,
     )
-    val_sketch_loader = DataLoader(
-        dataset=val_sketch,
+    source_val_sketch_loader = DataLoader(
+        dataset=source_val_sketch,
         batch_size=args.test_batch_size,
         shuffle=False,
         generator=torch.Generator().manual_seed(args.seed + 1),
         **loader_kwargs,
     )
-    val_photo_loader = DataLoader(
-        dataset=val_photo,
+    source_val_photo_loader = DataLoader(
+        dataset=source_val_photo,
         batch_size=args.test_batch_size,
         shuffle=False,
         generator=torch.Generator().manual_seed(args.seed + 2),
         **loader_kwargs,
     )
 
-    return train_loader, val_sketch_loader, val_photo_loader
+    target_val_sketch_loader = DataLoader(
+        dataset=target_val_sketch,
+        batch_size=args.test_batch_size,
+        shuffle=False,
+        generator=torch.Generator().manual_seed(args.seed + 3),
+        **loader_kwargs,
+    )
+    target_val_photo_loader = DataLoader(
+        dataset=target_val_photo,
+        batch_size=args.test_batch_size,
+        shuffle=False,
+        generator=torch.Generator().manual_seed(args.seed + 4),
+        **loader_kwargs,
+    )
+
+    return (
+        train_loader,
+        source_val_sketch_loader,
+        source_val_photo_loader,
+        target_val_sketch_loader,
+        target_val_photo_loader,
+    )
 
 
 if __name__ == "__main__":
@@ -103,6 +201,29 @@ if __name__ == "__main__":
         default="sketchy_1",
         choices=sorted(UNSEEN_CLASSES),
         help="Zero-shot split.",
+    )
+    parser.add_argument(
+        "--target_root",
+        type=str,
+        required=True,
+        help="Target dataset root containing sketch/ and photo/.",
+    )
+    parser.add_argument(
+        "--target_dataset",
+        type=str,
+        required=True,
+        choices=sorted(UNSEEN_CLASSES),
+        help="Target dataset/split used only for cross-dataset evaluation.",
+    )
+    parser.add_argument(
+        "--target_classes_file",
+        type=str,
+        default="",
+        help=(
+            "Optional paper-protocol target subset, one category directory "
+            "name per line. Without it, target test classes observed during "
+            "source training are removed automatically."
+        ),
     )
     parser.add_argument("--backbone", type=str, default="ViT-B/32")
     parser.add_argument("--max_size", type=int, default=224)
@@ -323,6 +444,12 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    if os.path.abspath(args.root) == os.path.abspath(args.target_root):
+        parser.error("--root and --target_root must identify different datasets.")
+    if args.dataset == args.target_dataset:
+        parser.error("--dataset and --target_dataset must be different.")
+    if args.target_classes_file and not os.path.isfile(args.target_classes_file):
+        parser.error("--target_classes_file does not exist.")
     if args.teacher_prompt_seed is None:
         args.teacher_prompt_seed = args.seed
     if args.photo_text_kd_temperature is None:
@@ -380,7 +507,13 @@ if __name__ == "__main__":
         save_last=True,
     )
 
-    train_loader, val_sketch_loader, val_photo_loader = get_loaders(args)
+    (
+        train_loader,
+        source_val_sketch_loader,
+        source_val_photo_loader,
+        target_val_sketch_loader,
+        target_val_photo_loader,
+    ) = get_loaders(args)
     if not args.teacher_cache_path and args.teacher_pretrain_epochs > 0:
         args.teacher_cache_path = default_teacher_cache_path(
             args,
@@ -428,11 +561,39 @@ if __name__ == "__main__":
 
     model.cache_teacher_features(
         train_loader.dataset,
-        val_sketch_loader,
-        val_photo_loader,
+        source_val_sketch_loader,
+        source_val_photo_loader,
         batch_size=args.teacher_pretrain_batch_size,
         workers=args.workers,
         show_progress=args.progress,
     )
 
-    trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])
+    # Source validation controls teacher and student checkpoint selection.
+    # Target images never participate in training or model selection.
+    trainer.fit(
+        model,
+        train_loader,
+        [source_val_sketch_loader, source_val_photo_loader],
+    )
+
+    best_path = checkpoint_callback.best_model_path
+    if best_path:
+        checkpoint = torch.load(
+            best_path,
+            map_location="cpu",
+            weights_only=False,
+        )
+        model.load_state_dict(checkpoint["state_dict"], strict=True)
+        print(f"[Cross-Dataset] loaded source-selected checkpoint: {best_path}")
+    else:
+        print("[Cross-Dataset] no best checkpoint found; evaluating final state.")
+
+    # Any non-standard dataset key selects mAP@all/P@100 in _retrieval_metrics.
+    # This assignment happens only after all source-side training/selection.
+    args.dataset = f"cross_{args.target_dataset}"
+    print("[Cross-Dataset] final target evaluation (mAP@all, P@100)")
+    trainer.validate(
+        model,
+        dataloaders=[target_val_sketch_loader, target_val_photo_loader],
+        verbose=False,
+    )

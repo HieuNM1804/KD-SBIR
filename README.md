@@ -1,4 +1,17 @@
-# KD-SBIR: Teacher Visual Prompts, Student Visual-Only Prompts
+# KD-SBIR: Across-Dataset Zero-Shot SBIR
+
+This branch trains the existing teacher/student distillation pipeline on one
+source dataset and evaluates the source-selected student checkpoint on a
+different target dataset. Target sketches/photos are never used by teacher
+pretraining, student training, or checkpoint selection.
+
+The target query/gallery is restricted to the target dataset's standard test
+split after removing every category observed in source training. Evaluation
+reports mAP@all and P@100, as in the SpLIP/ZSE-SBIR cross-dataset protocol.
+For the canonical Sketchy-2 source, the papers report 21 TU-Berlin and 11
+QuickDraw target classes. The code prints the exact selected class list and
+warns when an installed dataset taxonomy differs. A published class-list file
+can be supplied with `--target_classes_file` for direct table reproduction.
 
 This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from
 `experiment/teacher-visual-prompt-tuning`. The teacher has separate photo and
@@ -19,7 +32,9 @@ sketch-text KD. Setting an objective weight to zero disables that objective.
 ```bash
 !python -m src.train \
     --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
-    --dataset sketchy_1 \
+    --dataset sketchy_2 \
+    --target_root /kaggle/input/datasets/b20dccn616nguynhutun/tuberlin \
+    --target_dataset tuberlin \
     --epochs 7 \
     --workers 8 \
     --batch_size 64 \
@@ -45,9 +60,14 @@ sketch-text KD. Setting an objective weight to zero disables that objective.
     --lambda_teacher_retrieval 1.5 \
     --teacher_triplet_margin 0.2 \
     --seed 42 \
-    --exp_name teacher_visual_student_visual_only \
+    --exp_name sketchy2_to_tuberlin \
     --progress
 ```
+
+To run Sketchy-2 to QuickDraw, only change `--target_root`,
+`--target_dataset quickdraw`, and `--exp_name`. Teacher caches depend solely on
+the source-side teacher configuration, so the same tuned teacher cache is
+reused across target datasets and student-only ablations.
 
 Teacher caches are named from the dataset and complete teacher configuration.
 Changing only student prompts, losses, or optimizer settings reuses a compatible

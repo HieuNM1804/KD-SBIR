@@ -1,6 +1,7 @@
 import os
 import glob
 import hashlib
+import re
 import numpy as np
 import torch
 from torchvision import transforms
@@ -164,6 +165,71 @@ class ValidDataset(torch.utils.data.Dataset):
 
         return image_tensor, self.unseen_classes.index(category)
     
+    def __len__(self):
+        return len(self.paths)
+
+
+def canonical_category_name(category):
+    """Normalize harmless dataset-specific spelling without merging concepts."""
+    category = re.sub(r"\([^)]*\)", " ", category.lower())
+    category = re.sub(r"[^a-z0-9]+", " ", category).strip()
+    aliases = {
+        "car sedan": "car",
+        "tablelamp": "table lamp",
+        "teddy bear": "teddy bear",
+    }
+    return aliases.get(category, category)
+
+
+def select_cross_dataset_classes(source_seen_classes, target_test_classes):
+    """Keep only target-test categories never observed in source training."""
+    source_semantics = {
+        canonical_category_name(category) for category in source_seen_classes
+    }
+    return [
+        category
+        for category in target_test_classes
+        if canonical_category_name(category) not in source_semantics
+    ]
+
+
+class CrossDatasetValidDataset(torch.utils.data.Dataset):
+    """Sketch or photo evaluation subset for cross-dataset ZS-SBIR."""
+
+    def __init__(self, root, classes, max_size, mode="photo"):
+        super().__init__()
+        if mode not in {"photo", "sketch"}:
+            raise ValueError(f"Unknown validation modality: {mode}")
+        if not classes:
+            raise ValueError("Cross-dataset evaluation requires at least one class.")
+
+        self.root = root
+        self.classes = list(classes)
+        self.max_size = max_size
+        self.mode = mode
+        self.transform = normal_transform(max_size)
+        self.category_to_label = {
+            category: index for index, category in enumerate(self.classes)
+        }
+        self.paths = []
+        missing = []
+        for category in self.classes:
+            category_dir = os.path.join(root, mode, category)
+            paths = sorted(glob.glob(os.path.join(category_dir, "*")))
+            if not paths:
+                missing.append(category)
+            self.paths.extend(paths)
+        if missing:
+            raise FileNotFoundError(
+                f"Target {mode} categories have no files: " + ", ".join(missing)
+            )
+
+    def __getitem__(self, index):
+        filepath = self.paths[index]
+        category = filepath.split(os.path.sep)[-2]
+        image = load_image(filepath, self.max_size)
+        return self.transform(image), self.category_to_label[category]
+
     def __len__(self):
         return len(self.paths)
 
