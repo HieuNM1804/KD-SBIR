@@ -20,9 +20,8 @@ from src.dataset import (
     ValidDataset,
     WorkerInvariantSampler,
     canonical_category_name,
-    select_cross_dataset_classes,
 )
-from src.data_config import UNSEEN_CLASSES
+from src.data_config import CROSS_DATASET_CLASSES, UNSEEN_CLASSES
 from src.model import ZS_SBIR, default_teacher_cache_path
 
 
@@ -48,14 +47,6 @@ def seed_worker(_worker_id):
     random.seed(worker_seed)
 
 
-PAPER_CROSS_DATASET_COUNTS = {
-    ("sketchy_2", "tuberlin"): 21,
-    ("sketchy_2", "quickdraw"): 11,
-    ("tuberlin", "sketchy_2"): 8,
-    ("tuberlin", "quickdraw"): 10,
-}
-
-
 def _read_target_classes(path):
     with open(path, "r", encoding="utf-8") as file:
         classes = [line.strip() for line in file if line.strip()]
@@ -71,38 +62,36 @@ def get_loaders(args):
     source_val_sketch = ValidDataset(args, mode="sketch")
     source_val_photo = ValidDataset(args, mode="photo")
 
+    protocol_key = (args.dataset, args.target_dataset)
     if args.target_classes_file:
         target_classes = _read_target_classes(args.target_classes_file)
-        source_semantics = {
-            canonical_category_name(category)
-            for category in train_dataset.all_categories
-        }
-        leaked = [
-            category
-            for category in target_classes
-            if canonical_category_name(category) in source_semantics
-        ]
-        if leaked:
-            raise ValueError(
-                "Target class file is not zero-shot relative to source train: "
-                + ", ".join(leaked)
-            )
     else:
-        target_classes = select_cross_dataset_classes(
-            train_dataset.all_categories,
-            UNSEEN_CLASSES[args.target_dataset],
-        )
+        if protocol_key not in CROSS_DATASET_CLASSES:
+            supported = ", ".join(
+                f"{source}->{target}"
+                for source, target in sorted(CROSS_DATASET_CLASSES)
+            )
+            raise ValueError(
+                f"No built-in cross-dataset subset for "
+                f"{args.dataset}->{args.target_dataset}. "
+                f"Supported paper protocols: {supported}. Use "
+                "--target_classes_file for a custom direction."
+            )
+        target_classes = list(CROSS_DATASET_CLASSES[protocol_key])
 
-    expected_count = PAPER_CROSS_DATASET_COUNTS.get(
-        (args.dataset, args.target_dataset)
-    )
-    if expected_count is not None and len(target_classes) != expected_count:
-        print(
-            "[Cross-Dataset Warning] The installed target split produces "
-            f"{len(target_classes)} zero-shot classes, while the ZSE/SpLIP "
-            f"paper protocol reports {expected_count}. Supply the published "
-            "class subset with --target_classes_file for directly comparable "
-            "numbers. No class is silently truncated."
+    source_semantics = {
+        canonical_category_name(category)
+        for category in train_dataset.all_categories
+    }
+    leaked = [
+        category
+        for category in target_classes
+        if canonical_category_name(category) in source_semantics
+    ]
+    if leaked:
+        raise ValueError(
+            "Cross-dataset target is not zero-shot relative to source train: "
+            + ", ".join(leaked)
         )
 
     target_val_sketch = CrossDatasetValidDataset(
@@ -220,9 +209,9 @@ if __name__ == "__main__":
         type=str,
         default="",
         help=(
-            "Optional paper-protocol target subset, one category directory "
-            "name per line. Without it, target test classes observed during "
-            "source training are removed automatically."
+            "Optional custom target subset, one category directory name per "
+            "line. Without it, the fixed ZSE-SBIR/SpLIP S->T(21) or S->Q(11) "
+            "subset from src.data_config is used."
         ),
     )
     parser.add_argument("--backbone", type=str, default="ViT-B/32")

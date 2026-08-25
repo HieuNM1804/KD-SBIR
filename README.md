@@ -5,13 +5,12 @@ source dataset and evaluates the source-selected student checkpoint on a
 different target dataset. Target sketches/photos are never used by teacher
 pretraining, student training, or checkpoint selection.
 
-The target query/gallery is restricted to the target dataset's standard test
-split after removing every category observed in source training. Evaluation
-reports mAP@all and P@100, as in the SpLIP/ZSE-SBIR cross-dataset protocol.
-For the canonical Sketchy-2 source, the papers report 21 TU-Berlin and 11
-QuickDraw target classes. The code prints the exact selected class list and
-warns when an installed dataset taxonomy differs. A published class-list file
-can be supplied with `--target_classes_file` for direct table reproduction.
+The target query/gallery uses the fixed subsets published by the
+SpLIP/ZSE-SBIR protocol: Sketchy-1 -> TU-Berlin has 21 classes and Sketchy-1 ->
+QuickDraw has 11 classes. They are stored in `src/data_config.py`. Evaluation
+reports mAP@all and P@100. The code prints the exact selected class list and
+fails if a target directory is missing or a target class appears in source
+training. A custom direction remains possible through `--target_classes_file`.
 
 This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from
 `experiment/teacher-visual-prompt-tuning`. The teacher has separate photo and
@@ -32,7 +31,7 @@ sketch-text KD. Setting an objective weight to zero disables that objective.
 ```bash
 !python -m src.train \
     --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
-    --dataset sketchy_2 \
+    --dataset sketchy_1 \
     --target_root /kaggle/input/datasets/b20dccn616nguynhutun/tuberlin \
     --target_dataset tuberlin \
     --epochs 7 \
@@ -60,11 +59,11 @@ sketch-text KD. Setting an objective weight to zero disables that objective.
     --lambda_teacher_retrieval 1.5 \
     --teacher_triplet_margin 0.2 \
     --seed 42 \
-    --exp_name sketchy2_to_tuberlin \
+    --exp_name sketchy1_to_tuberlin \
     --progress
 ```
 
-To run Sketchy-2 to QuickDraw, only change `--target_root`,
+To run Sketchy-1 to QuickDraw, only change `--target_root`,
 `--target_dataset quickdraw`, and `--exp_name`. Teacher caches depend solely on
 the source-side teacher configuration, so the same tuned teacher cache is
 reused across target datasets and student-only ablations.

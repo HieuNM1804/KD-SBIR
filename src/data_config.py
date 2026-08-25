@@ -118,3 +118,47 @@ UNSEEN_CLASSES = {
         "tv",
     ],
 }
+
+
+# Cross-dataset ZS-SBIR subsets used by ZSE-SBIR and SpLIP.  The source is
+# Sketchy-1-Ext (100 seen / 25 unseen).  Starting from each target dataset's
+# 30-class test split, categories already present in the 100 Sketchy-1 seen
+# classes are removed.  This leaves S->T(21) and S->Q(11).
+CROSS_DATASET_CLASSES = {
+    ("sketchy_1", "tuberlin"): [
+        "bus",
+        "tractor",
+        "suitcase",
+        "streetlight",
+        "telephone",
+        "bottle opener",
+        "canoe",
+        "teacup",
+        "laptop",
+        "lighter",
+        "brain",
+        "t-shirt",
+        "trombone",
+        "windmill",
+        "snowboard",
+        "rollerblades",
+        "parachute",
+        "space shuttle",
+        "bridge",
+        "frying-pan",
+        "horse",
+    ],
+    ("sketchy_1", "quickdraw"): [
+        "scissors",
+        "tree",
+        "windmill",
+        "feather",
+        "campfire",
+        "palm tree",
+        "fire_hydrant",
+        "beach",
+        "megaphone",
+        "cactus",
+        "cake",
+    ],
+}

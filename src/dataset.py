@@ -181,18 +181,6 @@ def canonical_category_name(category):
     return aliases.get(category, category)
 
 
-def select_cross_dataset_classes(source_seen_classes, target_test_classes):
-    """Keep only target-test categories never observed in source training."""
-    source_semantics = {
-        canonical_category_name(category) for category in source_seen_classes
-    }
-    return [
-        category
-        for category in target_test_classes
-        if canonical_category_name(category) not in source_semantics
-    ]
-
-
 class CrossDatasetValidDataset(torch.utils.data.Dataset):
     """Sketch or photo evaluation subset for cross-dataset ZS-SBIR."""
 
