@@ -355,7 +355,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
         batch_size = self.cfg.test_batch_size
         sketch_features = self._materialize_teacher_features(
             train_dataset.all_sketches_path,
-            "train sketch",
+            "sketch",
             batch_size,
             workers,
             show_progress,
@@ -363,7 +363,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
         )
         photo_features = self._materialize_teacher_features(
             train_dataset.all_photo_paths,
-            "train photo",
+            "photo",
             batch_size,
             workers,
             show_progress,

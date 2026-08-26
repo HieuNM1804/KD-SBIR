@@ -17,6 +17,7 @@ from src.losses_fg import (
     full_gallery_relational_kd_loss,
 )
 from src.model_fg import (
+    FineGrainedCustomCLIP,
     better_acc1_acc5,
     default_teacher_cache_path,
     fine_grained_accuracy,
@@ -204,6 +205,42 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         )
         self.assertTrue(torch.equal(photo_instances[:100], torch.arange(100)))
         self.assertTrue(torch.equal(photo_instances[100:], torch.arange(100)))
+
+    def test_teacher_train_evaluation_uses_supported_modalities(self):
+        model = FineGrainedCustomCLIP.__new__(FineGrainedCustomCLIP)
+        torch.nn.Module.__init__(model)
+        model.cfg = SimpleNamespace(test_batch_size=128, seed=42)
+        calls = []
+        gallery = torch.eye(100)
+
+        def materialize(
+            paths,
+            modality,
+            _batch_size,
+            _workers,
+            _show_progress,
+            generator_seed=None,
+        ):
+            calls.append((modality, generator_seed))
+            return gallery[[0]] if modality == "sketch" else gallery
+
+        model._materialize_teacher_features = materialize
+        dataset = SimpleNamespace(
+            all_sketches_path=["sketch-0"],
+            all_photo_paths=[f"photo-{index}" for index in range(100)],
+            sample_category_ids=[0],
+            sample_local_photo_indices=[0],
+            category_to_photo_indices={0: list(range(100))},
+        )
+        acc1, acc5 = model._validate_teacher_train(
+            dataset,
+            epoch=1,
+            workers=0,
+            show_progress=False,
+        )
+        self.assertEqual([modality for modality, _ in calls], ["sketch", "photo"])
+        self.assertEqual(acc1, 1.0)
+        self.assertEqual(acc5, 1.0)
 
 
 if __name__ == "__main__":
