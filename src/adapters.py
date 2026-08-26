@@ -73,8 +73,8 @@ class BottleneckAdapter(nn.Module):
         return x + self.scale * residual
 
 
-class ModalityBottleneckAdapters(nn.Module):
-    """Independent photo/sketch adapters for the first ``depth`` ViT blocks."""
+class ModalityOutputAdapters(nn.Module):
+    """One independent output adapter for each image modality."""
 
     _MODALITIES = ("photo", "sketch")
 
@@ -82,7 +82,6 @@ class ModalityBottleneckAdapters(nn.Module):
         self,
         width,
         bottleneck,
-        depth,
         std,
         seed,
         dropout=0.0,
@@ -90,24 +89,16 @@ class ModalityBottleneckAdapters(nn.Module):
         device=None,
     ):
         super().__init__()
-        if depth < 1:
-            raise ValueError("Adapter depth must be positive.")
-        self.depth = depth
         self.adapters = nn.ModuleDict()
         for modality_index, modality in enumerate(self._MODALITIES):
-            self.adapters[modality] = nn.ModuleList(
-                [
-                    BottleneckAdapter(
-                        width=width,
-                        bottleneck=bottleneck,
-                        std=std,
-                        seed=seed + modality_index * depth + layer_index,
-                        dropout=dropout,
-                        scale=scale,
-                        device=device,
-                    )
-                    for layer_index in range(depth)
-                ]
+            self.adapters[modality] = BottleneckAdapter(
+                width=width,
+                bottleneck=bottleneck,
+                std=std,
+                seed=seed + modality_index,
+                dropout=dropout,
+                scale=scale,
+                device=device,
             )
 
     def for_modality(self, modality):
@@ -115,10 +106,8 @@ class ModalityBottleneckAdapters(nn.Module):
             raise ValueError(f"Unsupported adapter modality: {modality}")
         return self.adapters[modality]
 
-    def apply_layer(self, x, modality, layer_index):
-        if layer_index >= self.depth:
-            return x
-        return self.for_modality(modality)[layer_index](x)
+    def forward(self, x, modality):
+        return self.for_modality(modality)(x)
 
     def trainable_parameter_count(self):
         return sum(parameter.numel() for parameter in self.parameters())

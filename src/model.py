@@ -18,7 +18,7 @@ from tqdm.auto import tqdm
 
 from clip import clip
 from clip.model import build_model
-from src.adapters import ModalityBottleneckAdapters
+from src.adapters import ModalityOutputAdapters
 from src.dataset import (
     TeacherFeatureDataset,
     WorkerInvariantSampler,
@@ -37,7 +37,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DFN5B_MODEL = "ViT-H-14-quickgelu"
 DFN5B_PRETRAINED = "dfn5b"
 DFN5B_OUTPUT_DIM = 1024
-TEACHER_CACHE_FORMAT_VERSION = 7
+TEACHER_CACHE_FORMAT_VERSION = 8
 
 
 def _retrieval_metrics(
@@ -101,7 +101,6 @@ def _teacher_training_config(args):
         "teacher_adapter_bottleneck": getattr(
             args, "teacher_adapter_bottleneck", 0
         ),
-        "teacher_adapter_depth": getattr(args, "teacher_adapter_depth", 0),
         "teacher_adapter_std": getattr(args, "teacher_adapter_std", 0.02),
         "teacher_adapter_dropout": getattr(
             args, "teacher_adapter_dropout", 0.0
@@ -203,7 +202,6 @@ def _build_teacher_prompts(args, teacher):
         std=args.teacher_prompt_std,
         seed=args.teacher_prompt_seed,
         adapter_bottleneck=getattr(args, "teacher_adapter_bottleneck", 0),
-        adapter_depth=getattr(args, "teacher_adapter_depth", 0),
         adapter_std=getattr(args, "teacher_adapter_std", 0.02),
         adapter_dropout=getattr(args, "teacher_adapter_dropout", 0.0),
         adapter_scale=getattr(args, "teacher_adapter_scale", 1.0),
@@ -215,11 +213,12 @@ def _build_teacher_prompts(args, teacher):
         f"depth={controller.depth}, std={args.teacher_prompt_std}, "
         f"prompt_params={controller.prompt_parameter_count():,})"
     )
-    if controller.adapter_learner is not None:
+    if controller.output_adapters is not None:
+        output_width = controller.output_adapters.for_modality("photo").width
         print(
-            "[Teacher Adapter] independent photo/sketch bottleneck adapters "
+            "[Teacher Adapter] independent photo/sketch output adapters "
             f"(bottleneck={args.teacher_adapter_bottleneck}, "
-            f"depth={controller.adapter_learner.depth}, "
+            f"output_dim={output_width}, "
             f"std={args.teacher_adapter_std}, "
             f"dropout={args.teacher_adapter_dropout}, "
             f"scale={args.teacher_adapter_scale}, "
@@ -237,10 +236,10 @@ def _teacher_optimizer_parameter_groups(controller, cfg):
             "name": "prompts",
         }
     ]
-    if controller.adapter_learner is not None:
+    if controller.output_adapters is not None:
         groups.append(
             {
-                "params": list(controller.adapter_learner.parameters()),
+                "params": list(controller.output_adapters.parameters()),
                 "lr": cfg.teacher_adapter_lr,
                 "weight_decay": cfg.teacher_adapter_weight_decay,
                 "name": "adapters",
@@ -353,21 +352,11 @@ class CustomCLIP(nn.Module):
             prompt_depth,
         )
         adapter_bottleneck = getattr(cfg, "adapter_bottleneck", 0)
-        adapter_depth = getattr(cfg, "adapter_depth", 0)
-        if adapter_depth == -1:
-            adapter_depth = clip_model.visual.transformer.layers
         self.student_adapters = None
         if adapter_bottleneck > 0:
-            if not 1 <= adapter_depth <= clip_model.visual.transformer.layers:
-                raise ValueError(
-                    "adapter_depth must be -1 or in "
-                    f"[1, {clip_model.visual.transformer.layers}], "
-                    f"got {adapter_depth}."
-                )
-            self.student_adapters = ModalityBottleneckAdapters(
-                width=visual_width,
+            self.student_adapters = ModalityOutputAdapters(
+                width=clip_model.visual.output_dim,
                 bottleneck=adapter_bottleneck,
-                depth=adapter_depth,
                 std=getattr(cfg, "adapter_std", 0.02),
                 seed=getattr(cfg, "adapter_seed", cfg.seed + 30_000),
                 dropout=getattr(cfg, "adapter_dropout", 0.0),
@@ -421,9 +410,10 @@ class CustomCLIP(nn.Module):
         )
         if self.student_adapters is not None:
             print(
-                "[Student Adapter] independent photo/sketch bottleneck adapters "
+                "[Student Adapter] independent photo/sketch output adapters "
                 f"(bottleneck={adapter_bottleneck}, "
-                f"depth={adapter_depth}, std={cfg.adapter_std}, "
+                f"output_dim={clip_model.visual.output_dim}, "
+                f"std={cfg.adapter_std}, "
                 f"dropout={cfg.adapter_dropout}, scale={cfg.adapter_scale}, "
                 "down=normal/up=zero, "
                 "trainable_params="
@@ -923,10 +913,10 @@ class CustomCLIP(nn.Module):
             return self.photo_visual_prompt()
         return self.sketch_visual_prompt()
 
-    def get_visual_adapters(self, modality):
+    def apply_student_output_adapter(self, features, modality):
         if self.student_adapters is None:
-            return None
-        return self.student_adapters.for_modality(modality)
+            return features
+        return self.student_adapters(features, modality)
 
     def get_student_text_features(self, modality):
         feature_name = f"_student_{modality}_text_features"
@@ -947,8 +937,8 @@ class CustomCLIP(nn.Module):
             image.type(self.dtype),
             visual_prompt,
             compound_prompts,
-            self.get_visual_adapters(modality),
         )
+        features = self.apply_student_output_adapter(features, modality)
         return features / features.norm(dim=-1, keepdim=True)
 
     def forward(self, x):

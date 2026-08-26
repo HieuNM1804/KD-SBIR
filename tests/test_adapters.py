@@ -2,8 +2,7 @@ import unittest
 
 import torch
 
-from clip.model import VisionTransformer
-from src.adapters import BottleneckAdapter, ModalityBottleneckAdapters
+from src.adapters import BottleneckAdapter, ModalityOutputAdapters
 
 
 class BottleneckAdapterTests(unittest.TestCase):
@@ -34,47 +33,30 @@ class BottleneckAdapterTests(unittest.TestCase):
         self.assertIsNotNone(x.grad)
 
     def test_photo_and_sketch_adapters_are_independent(self):
-        adapters = ModalityBottleneckAdapters(
+        adapters = ModalityOutputAdapters(
             width=8,
             bottleneck=3,
-            depth=2,
             std=0.02,
             seed=42,
         )
-        photo = adapters.for_modality("photo")[0]
-        sketch = adapters.for_modality("sketch")[0]
+        photo = adapters.for_modality("photo")
+        sketch = adapters.for_modality("sketch")
         self.assertIsNot(photo.down_weight, sketch.down_weight)
         self.assertFalse(torch.equal(photo.down_weight, sketch.down_weight))
 
-    def test_student_vit_applies_adapters_after_transformer_blocks(self):
-        visual = VisionTransformer(
-            input_resolution=4,
-            patch_size=2,
-            width=8,
-            layers=2,
-            heads=1,
-            output_dim=4,
-        ).eval()
-        adapters = ModalityBottleneckAdapters(
-            width=8,
+    def test_modality_adapter_changes_only_the_final_embedding(self):
+        adapters = ModalityOutputAdapters(
+            width=4,
             bottleneck=3,
-            depth=2,
             std=0.02,
             seed=42,
         ).eval()
-        images = torch.randn(2, 3, 4, 4)
-        baseline = visual(images)
-        initial = visual(
-            images,
-            adapters=adapters.for_modality("photo"),
-        )
+        baseline = torch.randn(2, 4)
+        initial = adapters(baseline, "photo")
         self.assertTrue(torch.equal(initial, baseline))
         with torch.no_grad():
-            adapters.for_modality("photo")[0].up_weight.fill_(0.1)
-        adapted = visual(
-            images,
-            adapters=adapters.for_modality("photo"),
-        )
+            adapters.for_modality("photo").up_weight.fill_(0.1)
+        adapted = adapters(baseline, "photo")
         self.assertFalse(torch.equal(adapted, baseline))
 
 

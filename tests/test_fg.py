@@ -121,7 +121,6 @@ class FineGrainedCacheTests(unittest.TestCase):
                 teacher_prompt_seed=42,
                 teacher_prompt_gradient_checkpointing=True,
                 teacher_adapter_bottleneck=64,
-                teacher_adapter_depth=-1,
                 teacher_adapter_std=0.02,
                 teacher_adapter_dropout=0.0,
                 teacher_adapter_scale=1.0,

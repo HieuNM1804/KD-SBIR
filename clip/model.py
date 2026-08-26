@@ -110,7 +110,6 @@ class VisionTransformer(nn.Module):
         x: torch.Tensor,
         prompt: torch.Tensor = None,
         compound_prompts=None,
-        adapters=None,
     ):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
@@ -143,12 +142,6 @@ class VisionTransformer(nn.Module):
 
         x = x.permute(1, 0, 2)  # NLD -> LND
         compound_prompts = compound_prompts or []
-        adapters = adapters or []
-        if len(adapters) > len(self.transformer.resblocks):
-            raise ValueError(
-                "Visual adapter count cannot exceed transformer depth: "
-                f"{len(adapters)} > {len(self.transformer.resblocks)}."
-            )
         for layer_index, block in enumerate(self.transformer.resblocks):
             deep_index = layer_index - 1
             if prompt_length and 0 <= deep_index < len(compound_prompts):
@@ -173,8 +166,6 @@ class VisionTransformer(nn.Module):
                     dim=0,
                 )
             x = block(x)
-            if layer_index < len(adapters):
-                x = adapters[layer_index](x)
         x = x.permute(1, 0, 2)  # LND -> NLD
 
         x = self.ln_post(x[:, 0, :])
