@@ -149,7 +149,18 @@ def build_parser():
     parser.add_argument("--teacher_cache_dir", default="")
     parser.add_argument("--rebuild_teacher_cache", action="store_true")
     parser.add_argument("--lambda_teacher_retrieval", type=float, default=1.5)
-    parser.add_argument("--teacher_triplet_margin", type=float, default=0.2)
+    parser.add_argument(
+        "--teacher_instance_temperature",
+        type=float,
+        default=0.07,
+        help="Temperature for teacher exact-instance InfoNCE over 100 photos.",
+    )
+    parser.add_argument(
+        "--teacher_triplet_margin",
+        type=float,
+        default=0.2,
+        help=argparse.SUPPRESS,
+    )
 
     parser.add_argument("--lambda_domain", type=float, default=3.0)
     parser.add_argument("--kd_temperature", type=float, default=0.07)
@@ -188,6 +199,7 @@ def validate_args(parser, args):
         "--teacher_prompt_lr": args.teacher_prompt_lr,
         "--teacher_prompt_std": args.teacher_prompt_std,
         "--teacher_scheduler_gamma": args.teacher_scheduler_gamma,
+        "--teacher_instance_temperature": args.teacher_instance_temperature,
         "--kd_temperature": args.kd_temperature,
         "--image_text_kd_temperature": args.image_text_kd_temperature,
         "--photo_text_kd_temperature": args.photo_text_kd_temperature,

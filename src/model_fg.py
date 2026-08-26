@@ -12,7 +12,7 @@ from tqdm.auto import tqdm
 from src.dataset_fg import FineGrainedFullGalleryBatchSampler
 from src.losses_fg import (
     fine_grained_distillation_loss,
-    fine_grained_teacher_triplet_loss,
+    fine_grained_teacher_infonce_loss,
 )
 from src.model import (
     DFN5B_OUTPUT_DIM,
@@ -23,7 +23,7 @@ from src.model import (
 )
 
 
-FG_CACHE_FORMAT_VERSION = 3
+FG_CACHE_FORMAT_VERSION = 4
 
 
 def better_acc1_acc5(acc1, acc5, best_acc1, best_acc5):
@@ -140,10 +140,15 @@ def _dataset_fingerprint(args, train_dataset):
 
 def _fg_teacher_config(args):
     config = _teacher_training_config(args)
+    config.pop("triplet_margin", None)
     config.update(
         {
             "task": "fine_grained_exact_instance",
             "teacher_negative_scope": "full_100_photo_category_gallery",
+            "teacher_objective": "exact_instance_infonce",
+            "teacher_instance_temperature": (
+                args.teacher_instance_temperature
+            ),
             "checkpoint_selection": "best_unseen_acc1_then_acc5",
         }
     )
@@ -241,6 +246,20 @@ class FineGrainedCustomCLIP(CustomCLIP):
         self.teacher_train_metric_history = []
         self.teacher_unseen_metric_history = []
 
+        train_acc1, train_acc5 = self._validate_teacher_train(
+            train_dataset,
+            epoch=0,
+            workers=workers,
+            show_progress=show_progress,
+        )
+        self.teacher_train_metric_history.append(
+            {
+                "epoch": 0,
+                "acc1": train_acc1,
+                "acc5": train_acc5,
+            }
+        )
+
         for epoch in range(cfg.teacher_pretrain_epochs):
             retrieval_total = 0.0
             steps = 0
@@ -270,11 +289,11 @@ class FineGrainedCustomCLIP(CustomCLIP):
                         sketch_features = self._encode_teacher_image(
                             sketch, "sketch"
                         )
-                        retrieval = fine_grained_teacher_triplet_loss(
+                        retrieval = fine_grained_teacher_infonce_loss(
                             sketch_features,
                             photo_features,
                             targets,
-                            cfg.teacher_triplet_margin,
+                            cfg.teacher_instance_temperature,
                         )
                         loss = cfg.lambda_teacher_retrieval * retrieval
                     optimizer.zero_grad(set_to_none=True)
@@ -284,14 +303,14 @@ class FineGrainedCustomCLIP(CustomCLIP):
                     retrieval_total += retrieval.detach().item()
                     steps += 1
                     if show_progress:
-                        batches.set_postfix(T_TRI=f"{retrieval.item():.3f}")
+                        batches.set_postfix(T_NCE=f"{retrieval.item():.3f}")
 
             scheduler.step()
             if steps == 0:
                 raise RuntimeError("Teacher pretraining produced no batches.")
             print(
                 f"[Teacher Pretrain] epoch={epoch + 1}, "
-                f"retrieval={retrieval_total / steps:.6f}"
+                f"instance_nce={retrieval_total / steps:.6f}"
             )
             train_acc1, train_acc5 = self._validate_teacher_train(
                 train_dataset,

@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from copy import copy
+from itertools import groupby
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +14,7 @@ from src.dataset_fg import (
     photo_id_from_sketch,
 )
 from src.losses_fg import (
-    fine_grained_teacher_triplet_loss,
+    fine_grained_teacher_infonce_loss,
     full_gallery_relational_kd_loss,
 )
 from src.model_fg import (
@@ -82,6 +83,23 @@ class FineGrainedSamplerTests(unittest.TestCase):
         second = FineGrainedFullGalleryBatchSampler(dataset, 4, seed=42)
         self.assertEqual(list(iter(first)), list(iter(second)))
 
+    def test_category_chunks_are_shuffled_globally(self):
+        dataset = SimpleNamespace(
+            sample_category_ids=[0] * 20 + [1] * 20 + [2] * 20
+        )
+        sampler = FineGrainedFullGalleryBatchSampler(
+            dataset,
+            batch_size=4,
+            seed=42,
+        )
+        category_sequence = [
+            dataset.sample_category_ids[batch[0]] for batch in sampler
+        ]
+        category_runs = [
+            category for category, _ in groupby(category_sequence)
+        ]
+        self.assertGreater(len(category_runs), 3)
+
 
 class FineGrainedCacheTests(unittest.TestCase):
     def test_student_settings_reuse_cache_but_teacher_settings_invalidate(self):
@@ -109,6 +127,7 @@ class FineGrainedCacheTests(unittest.TestCase):
                 teacher_pretrain_batch_size=64,
                 lambda_teacher_retrieval=1.5,
                 teacher_triplet_margin=0.2,
+                teacher_instance_temperature=0.07,
                 teacher_scheduler_step_size=5,
                 teacher_scheduler_gamma=0.1,
                 seed=42,
@@ -136,16 +155,29 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         self.assertFalse(better_acc1_acc5(0.2, 0.4, 0.2, 0.4))
         self.assertFalse(better_acc1_acc5(0.1, 0.9, 0.2, 0.4))
 
-    def test_teacher_triplet_uses_exact_pair_and_all_gallery_negatives(self):
+    def test_teacher_infonce_uses_exact_pair_and_all_gallery_negatives(self):
         gallery = torch.eye(100)
         queries = gallery[[7, 31, 99]]
-        loss = fine_grained_teacher_triplet_loss(
+        loss = fine_grained_teacher_infonce_loss(
             queries,
             gallery,
             torch.tensor([7, 31, 99]),
-            margin=0.2,
+            temperature=0.07,
         )
-        self.assertAlmostEqual(loss.item(), 0.0, places=7)
+        self.assertLess(loss.item(), 1e-3)
+
+    def test_teacher_infonce_backpropagates_through_all_gallery_photos(self):
+        generator = torch.Generator().manual_seed(42)
+        queries = torch.randn(3, 16, generator=generator)
+        gallery = torch.randn(100, 16, generator=generator, requires_grad=True)
+        loss = fine_grained_teacher_infonce_loss(
+            queries,
+            gallery,
+            torch.tensor([7, 31, 99]),
+            temperature=1.0,
+        )
+        loss.backward()
+        self.assertTrue(gallery.grad.norm(dim=-1).gt(0).all())
 
     def test_domain_kd_supports_rectangular_sketch_gallery_logits(self):
         generator = torch.Generator().manual_seed(42)

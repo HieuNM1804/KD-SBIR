@@ -306,15 +306,19 @@ class FineGrainedFullGalleryBatchSampler(torch.utils.data.Sampler):
         epoch = self.epoch
         self.epoch += 1
         rng = np.random.default_rng(self.seed + epoch)
-        categories = rng.permutation(
-            sorted(self.category_to_sketch_indices)
-        )
-        for category in categories:
+        batches = []
+        for category in sorted(self.category_to_sketch_indices):
             indices = rng.permutation(
                 self.category_to_sketch_indices[int(category)]
             ).tolist()
             for offset in range(0, len(indices), self.batch_size):
-                yield indices[offset : offset + self.batch_size]
+                batches.append(indices[offset : offset + self.batch_size])
+
+        # Keep each batch category-pure so it uses the correct 100-photo
+        # gallery, but mix category chunks globally to avoid long runs of SGD
+        # updates from one category overwriting the preceding categories.
+        for batch_index in rng.permutation(len(batches)):
+            yield batches[int(batch_index)]
 
 
 class FineGrainedValidDataset(torch.utils.data.Dataset):

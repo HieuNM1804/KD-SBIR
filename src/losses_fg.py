@@ -4,13 +4,15 @@ from torch.nn import functional as F
 from src.losses import image_text_kd_loss, relational_kd_loss
 
 
-def fine_grained_teacher_triplet_loss(
+def fine_grained_teacher_infonce_loss(
     sketch_features,
     photo_features,
     target_photo_indices,
-    margin=0.2,
+    temperature=0.07,
 ):
-    """Sketch-to-photo hard triplet against all 99 category negatives."""
+    """Exact-instance InfoNCE over a category's complete photo gallery."""
+    if temperature <= 0:
+        raise ValueError("InfoNCE temperature must be greater than zero.")
     sketch_features = F.normalize(sketch_features.float(), dim=-1)
     photo_features = F.normalize(photo_features.float(), dim=-1)
     targets = target_photo_indices.to(sketch_features.device).long()
@@ -18,15 +20,8 @@ def fine_grained_teacher_triplet_loss(
         raise RuntimeError("Fine-grained training expects a 100-photo gallery.")
     if targets.shape[0] != sketch_features.shape[0]:
         raise RuntimeError("Every sketch query needs one exact photo target.")
-
-    distance = 1.0 - sketch_features @ photo_features.t()
-    positive = distance.gather(1, targets[:, None]).squeeze(1)
-    negative_mask = torch.ones_like(distance, dtype=torch.bool)
-    negative_mask.scatter_(1, targets[:, None], False)
-    hardest_negative = distance.masked_fill(
-        ~negative_mask, torch.inf
-    ).min(dim=-1).values
-    return F.relu(positive - hardest_negative + margin).mean()
+    logits = sketch_features @ photo_features.t() / temperature
+    return F.cross_entropy(logits, targets)
 
 
 def full_gallery_relational_kd_loss(
