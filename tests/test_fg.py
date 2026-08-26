@@ -122,6 +122,12 @@ class FineGrainedCacheTests(unittest.TestCase):
                 teacher_prompt_std=0.02,
                 teacher_prompt_seed=42,
                 teacher_prompt_gradient_checkpointing=True,
+                teacher_adapter_bottleneck=64,
+                teacher_adapter_depth=-1,
+                teacher_adapter_std=0.02,
+                teacher_adapter_dropout=0.0,
+                teacher_adapter_scale=1.0,
+                teacher_adapter_seed=10042,
                 teacher_prompt_lr=3e-2,
                 teacher_momentum=0.9,
                 teacher_weight_decay=1e-3,
@@ -134,10 +140,12 @@ class FineGrainedCacheTests(unittest.TestCase):
                 teacher_scheduler_gamma=0.1,
                 seed=42,
                 lr=1e-2,
+                adapter_bottleneck=64,
             )
             original = default_teacher_cache_path(args, dataset)
             student_change = copy(args)
             student_change.lr = 1e-3
+            student_change.adapter_bottleneck = 32
             self.assertEqual(
                 original,
                 default_teacher_cache_path(student_change, dataset),
@@ -153,6 +161,12 @@ class FineGrainedCacheTests(unittest.TestCase):
             self.assertNotEqual(
                 original,
                 default_teacher_cache_path(scheduler_change, dataset),
+            )
+            teacher_adapter_change = copy(args)
+            teacher_adapter_change.teacher_adapter_bottleneck = 32
+            self.assertNotEqual(
+                original,
+                default_teacher_cache_path(teacher_adapter_change, dataset),
             )
 
 

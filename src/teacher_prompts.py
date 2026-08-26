@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 
+from src.adapters import ModalityBottleneckAdapters
+
 
 def _random_prompt(rows, width, std, seed, device):
     generator = torch.Generator(device="cpu").manual_seed(seed)
@@ -43,9 +45,22 @@ class ModalityVisualPrompts(nn.Module):
 
 
 class TeacherPromptController(nn.Module):
-    """Run a frozen OpenCLIP ViT with modality-specific visual prompts."""
+    """Run a frozen OpenCLIP ViT with modality prompts and adapters."""
 
-    def __init__(self, visual, n_ctx, depth, std, seed):
+    def __init__(
+        self,
+        visual,
+        n_ctx,
+        depth,
+        std,
+        seed,
+        adapter_bottleneck=0,
+        adapter_depth=0,
+        adapter_std=0.02,
+        adapter_dropout=0.0,
+        adapter_scale=1.0,
+        adapter_seed=None,
+    ):
         super().__init__()
         blocks = list(visual.transformer.resblocks)
         layer_count = len(blocks)
@@ -71,6 +86,36 @@ class TeacherPromptController(nn.Module):
             seed=seed,
             device=visual.conv1.weight.device,
         )
+        self.adapter_learner = None
+        if adapter_bottleneck > 0:
+            if adapter_depth == -1:
+                adapter_depth = layer_count
+            if not 1 <= adapter_depth <= layer_count:
+                raise ValueError(
+                    "teacher_adapter_depth must be -1 or in "
+                    f"[1, {layer_count}], got {adapter_depth}."
+                )
+            self.adapter_learner = ModalityBottleneckAdapters(
+                width=width,
+                bottleneck=adapter_bottleneck,
+                depth=adapter_depth,
+                std=adapter_std,
+                seed=seed + 10_000 if adapter_seed is None else adapter_seed,
+                dropout=adapter_dropout,
+                scale=adapter_scale,
+                device=visual.conv1.weight.device,
+            )
+
+    def prompt_parameter_count(self):
+        return sum(
+            parameter.numel()
+            for parameter in self.prompt_learner.parameters()
+        )
+
+    def adapter_parameter_count(self):
+        if self.adapter_learner is None:
+            return 0
+        return self.adapter_learner.trainable_parameter_count()
 
     def trainable_parameter_count(self):
         return sum(parameter.numel() for parameter in self.parameters())
@@ -114,6 +159,10 @@ class TeacherPromptController(nn.Module):
                         (x[:-self.n_ctx], prompt.transpose(0, 1)), dim=0
                     )
             x = block(x)
+            if self.adapter_learner is not None:
+                x = self.adapter_learner.apply_layer(
+                    x, modality, layer_index
+                )
 
         if not batch_first:
             x = x.transpose(0, 1)
@@ -129,6 +178,12 @@ def build_teacher_prompt_controller(
     depth,
     std=0.02,
     seed=42,
+    adapter_bottleneck=0,
+    adapter_depth=0,
+    adapter_std=0.02,
+    adapter_dropout=0.0,
+    adapter_scale=1.0,
+    adapter_seed=None,
 ):
     return TeacherPromptController(
         visual=teacher.visual,
@@ -136,4 +191,10 @@ def build_teacher_prompt_controller(
         depth=depth,
         std=std,
         seed=seed,
+        adapter_bottleneck=adapter_bottleneck,
+        adapter_depth=adapter_depth,
+        adapter_std=adapter_std,
+        adapter_dropout=adapter_dropout,
+        adapter_scale=adapter_scale,
+        adapter_seed=adapter_seed,
     )

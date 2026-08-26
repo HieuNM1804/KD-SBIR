@@ -111,6 +111,24 @@ def build_parser():
     parser.add_argument("--max_size", type=int, default=224)
     parser.add_argument("--n_ctx_visual", type=int, default=3)
     parser.add_argument("--prompt_depth", type=int, default=12)
+    parser.add_argument(
+        "--adapter_bottleneck",
+        type=int,
+        default=64,
+        help="Student adapter compression width; 0 disables student adapters.",
+    )
+    parser.add_argument(
+        "--adapter_depth",
+        type=int,
+        default=12,
+        help="Number of student ViT blocks with adapters; -1 uses all blocks.",
+    )
+    parser.add_argument("--adapter_std", type=float, default=0.02)
+    parser.add_argument("--adapter_dropout", type=float, default=0.0)
+    parser.add_argument("--adapter_scale", type=float, default=1.0)
+    parser.add_argument("--adapter_seed", type=int, default=None)
+    parser.add_argument("--adapter_lr", type=float, default=None)
+    parser.add_argument("--adapter_weight_decay", type=float, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--lr", type=float, default=1e-2)
     parser.add_argument("--momentum", type=float, default=0.9)
@@ -131,6 +149,26 @@ def build_parser():
     parser.add_argument("--teacher_prompt_std", type=float, default=0.02)
     parser.add_argument("--teacher_prompt_lr", type=float, default=3e-2)
     parser.add_argument("--teacher_prompt_seed", type=int, default=None)
+    parser.add_argument(
+        "--teacher_adapter_bottleneck",
+        type=int,
+        default=64,
+        help="Teacher adapter compression width; 0 disables teacher adapters.",
+    )
+    parser.add_argument(
+        "--teacher_adapter_depth",
+        type=int,
+        default=12,
+        help="Number of teacher ViT blocks with adapters; -1 uses all blocks.",
+    )
+    parser.add_argument("--teacher_adapter_std", type=float, default=0.02)
+    parser.add_argument("--teacher_adapter_dropout", type=float, default=0.0)
+    parser.add_argument("--teacher_adapter_scale", type=float, default=1.0)
+    parser.add_argument("--teacher_adapter_seed", type=int, default=None)
+    parser.add_argument("--teacher_adapter_lr", type=float, default=None)
+    parser.add_argument(
+        "--teacher_adapter_weight_decay", type=float, default=None
+    )
     parser.add_argument(
         "--teacher_prompt_gradient_checkpointing",
         action="store_true",
@@ -177,6 +215,18 @@ def build_parser():
 def validate_args(parser, args):
     if args.teacher_prompt_seed is None:
         args.teacher_prompt_seed = args.seed
+    if args.adapter_seed is None:
+        args.adapter_seed = args.seed + 30_000
+    if args.teacher_adapter_seed is None:
+        args.teacher_adapter_seed = args.teacher_prompt_seed + 10_000
+    if args.adapter_lr is None:
+        args.adapter_lr = args.lr
+    if args.adapter_weight_decay is None:
+        args.adapter_weight_decay = args.weight_decay
+    if args.teacher_adapter_lr is None:
+        args.teacher_adapter_lr = args.teacher_prompt_lr
+    if args.teacher_adapter_weight_decay is None:
+        args.teacher_adapter_weight_decay = args.teacher_weight_decay
     if args.photo_text_kd_temperature is None:
         args.photo_text_kd_temperature = args.image_text_kd_temperature
     if args.sketch_text_kd_temperature is None:
@@ -186,6 +236,12 @@ def validate_args(parser, args):
         parser.error("--n_ctx_visual must be at least 1.")
     if args.prompt_depth < 1:
         parser.error("--prompt_depth must be at least 1.")
+    if args.adapter_bottleneck < 0:
+        parser.error("--adapter_bottleneck must be non-negative.")
+    if args.adapter_bottleneck > 0 and (
+        args.adapter_depth == 0 or args.adapter_depth < -1
+    ):
+        parser.error("--adapter_depth must be -1 or greater than 0.")
     if args.batch_size < 1 or args.test_batch_size < 1:
         parser.error("Batch sizes must be positive.")
     if args.teacher_pretrain_batch_size < 1:
@@ -196,10 +252,23 @@ def validate_args(parser, args):
         parser.error("Teacher prompt pretraining requires visual prompts.")
     if args.teacher_prompt_depth == 0 or args.teacher_prompt_depth < -1:
         parser.error("--teacher_prompt_depth must be -1 or greater than 0.")
+    if args.teacher_adapter_bottleneck < 0:
+        parser.error("--teacher_adapter_bottleneck must be non-negative.")
+    if args.teacher_adapter_bottleneck > 0 and (
+        args.teacher_adapter_depth == 0
+        or args.teacher_adapter_depth < -1
+    ):
+        parser.error("--teacher_adapter_depth must be -1 or greater than 0.")
     positive_values = {
         "--lr": args.lr,
+        "--adapter_lr": args.adapter_lr,
         "--teacher_prompt_lr": args.teacher_prompt_lr,
+        "--teacher_adapter_lr": args.teacher_adapter_lr,
         "--teacher_prompt_std": args.teacher_prompt_std,
+        "--adapter_std": args.adapter_std,
+        "--adapter_scale": args.adapter_scale,
+        "--teacher_adapter_std": args.teacher_adapter_std,
+        "--teacher_adapter_scale": args.teacher_adapter_scale,
         "--teacher_scheduler_gamma": args.teacher_scheduler_gamma,
         "--scheduler_gamma": args.scheduler_gamma,
         "--teacher_instance_temperature": args.teacher_instance_temperature,
@@ -214,8 +283,14 @@ def validate_args(parser, args):
     nonnegative_values = {
         "--momentum": args.momentum,
         "--weight_decay": args.weight_decay,
+        "--adapter_dropout": args.adapter_dropout,
+        "--adapter_weight_decay": args.adapter_weight_decay,
         "--teacher_momentum": args.teacher_momentum,
         "--teacher_weight_decay": args.teacher_weight_decay,
+        "--teacher_adapter_dropout": args.teacher_adapter_dropout,
+        "--teacher_adapter_weight_decay": (
+            args.teacher_adapter_weight_decay
+        ),
         "--lambda_teacher_retrieval": args.lambda_teacher_retrieval,
         "--lambda_domain": args.lambda_domain,
         "--lambda_modality": args.lambda_modality,
@@ -231,6 +306,10 @@ def validate_args(parser, args):
         parser.error("--teacher_scheduler_gamma must be less than 1.")
     if args.scheduler_gamma >= 1:
         parser.error("--scheduler_gamma must be less than 1.")
+    if args.adapter_dropout >= 1:
+        parser.error("--adapter_dropout must be less than 1.")
+    if args.teacher_adapter_dropout >= 1:
+        parser.error("--teacher_adapter_dropout must be less than 1.")
     if args.lambda_domain == 0 and args.lambda_modality == 0:
         parser.error("At least one student distillation loss must be active.")
 

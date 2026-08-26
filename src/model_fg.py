@@ -20,6 +20,7 @@ from src.model import (
     _load_clip_model,
     _load_teacher,
     _reduce_on_plateau_patience,
+    _teacher_optimizer_parameter_groups,
     _teacher_training_config,
 )
 
@@ -228,10 +229,9 @@ class FineGrainedCustomCLIP(CustomCLIP):
             generator=torch.Generator().manual_seed(cfg.seed + 10_000),
         )
         optimizer = torch.optim.SGD(
-            self.teacher_prompts.parameters(),
+            _teacher_optimizer_parameter_groups(self.teacher_prompts, cfg),
             lr=cfg.teacher_prompt_lr,
             momentum=cfg.teacher_momentum,
-            weight_decay=cfg.teacher_weight_decay,
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
@@ -555,23 +555,53 @@ class FineGrainedZS_SBIR(pl.LightningModule):
         )
 
     def configure_optimizers(self):
-        parameters = [
+        adapter_parameters = (
+            list(self.model.student_adapters.parameters())
+            if self.model.student_adapters is not None
+            else []
+        )
+        adapter_ids = {id(parameter) for parameter in adapter_parameters}
+        prompt_parameters = [
             parameter
             for parameter in self.model.parameters()
-            if parameter.requires_grad
+            if parameter.requires_grad and id(parameter) not in adapter_ids
         ]
+        param_groups = [
+            {
+                "params": prompt_parameters,
+                "lr": self.args.lr,
+                "weight_decay": self.args.weight_decay,
+                "name": "prompts",
+            }
+        ]
+        if adapter_parameters:
+            param_groups.append(
+                {
+                    "params": adapter_parameters,
+                    "lr": self.args.adapter_lr,
+                    "weight_decay": self.args.adapter_weight_decay,
+                    "name": "adapters",
+                }
+            )
         optimizer = torch.optim.SGD(
-            parameters,
+            param_groups,
             lr=self.args.lr,
             momentum=self.args.momentum,
-            weight_decay=self.args.weight_decay,
         )
-        trainable = sum(parameter.numel() for parameter in parameters)
+        prompt_trainable = sum(
+            parameter.numel() for parameter in prompt_parameters
+        )
+        adapter_trainable = sum(
+            parameter.numel() for parameter in adapter_parameters
+        )
         print(
             "[Optimizer] SGD "
             f"lr={self.args.lr}, momentum={self.args.momentum}, "
             f"weight_decay={self.args.weight_decay}, "
-            f"trainable_params={trainable:,}"
+            f"prompt_params={prompt_trainable:,}, "
+            f"adapter_lr={self.args.adapter_lr}, "
+            f"adapter_weight_decay={self.args.adapter_weight_decay}, "
+            f"adapter_params={adapter_trainable:,}"
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
