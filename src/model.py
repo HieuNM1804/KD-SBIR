@@ -18,6 +18,7 @@ from tqdm.auto import tqdm
 
 from clip import clip
 from clip.model import build_model
+from src.adapters import ModalityBottleneckAdapters
 from src.dataset import (
     TeacherFeatureDataset,
     WorkerInvariantSampler,
@@ -36,7 +37,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DFN5B_MODEL = "ViT-H-14-quickgelu"
 DFN5B_PRETRAINED = "dfn5b"
 DFN5B_OUTPUT_DIM = 1024
-TEACHER_CACHE_FORMAT_VERSION = 6
+TEACHER_CACHE_FORMAT_VERSION = 7
 
 
 def _retrieval_metrics(
@@ -96,6 +97,24 @@ def _teacher_training_config(args):
         "teacher_prompt_seed": args.teacher_prompt_seed,
         "teacher_prompt_gradient_checkpointing": (
             args.teacher_prompt_gradient_checkpointing
+        ),
+        "teacher_adapter_bottleneck": getattr(
+            args, "teacher_adapter_bottleneck", 0
+        ),
+        "teacher_adapter_depth": getattr(args, "teacher_adapter_depth", 0),
+        "teacher_adapter_std": getattr(args, "teacher_adapter_std", 0.02),
+        "teacher_adapter_dropout": getattr(
+            args, "teacher_adapter_dropout", 0.0
+        ),
+        "teacher_adapter_scale": getattr(args, "teacher_adapter_scale", 1.0),
+        "teacher_adapter_seed": getattr(
+            args, "teacher_adapter_seed", args.teacher_prompt_seed + 10_000
+        ),
+        "teacher_adapter_lr": getattr(
+            args, "teacher_adapter_lr", args.teacher_prompt_lr
+        ),
+        "teacher_adapter_weight_decay": getattr(
+            args, "teacher_adapter_weight_decay", args.teacher_weight_decay
         ),
         "teacher_prompt_lr": args.teacher_prompt_lr,
         "teacher_momentum": args.teacher_momentum,
@@ -183,14 +202,51 @@ def _build_teacher_prompts(args, teacher):
         depth=args.teacher_prompt_depth,
         std=args.teacher_prompt_std,
         seed=args.teacher_prompt_seed,
+        adapter_bottleneck=getattr(args, "teacher_adapter_bottleneck", 0),
+        adapter_depth=getattr(args, "teacher_adapter_depth", 0),
+        adapter_std=getattr(args, "teacher_adapter_std", 0.02),
+        adapter_dropout=getattr(args, "teacher_adapter_dropout", 0.0),
+        adapter_scale=getattr(args, "teacher_adapter_scale", 1.0),
+        adapter_seed=getattr(args, "teacher_adapter_seed", None),
     )
     print(
         "[Teacher Prompt] initialized for teacher pretraining "
         f"(n_ctx_visual={args.teacher_n_ctx_visual}, "
         f"depth={controller.depth}, std={args.teacher_prompt_std}, "
-        f"trainable_params={controller.trainable_parameter_count():,})"
+        f"prompt_params={controller.prompt_parameter_count():,})"
     )
+    if controller.adapter_learner is not None:
+        print(
+            "[Teacher Adapter] independent photo/sketch bottleneck adapters "
+            f"(bottleneck={args.teacher_adapter_bottleneck}, "
+            f"depth={controller.adapter_learner.depth}, "
+            f"std={args.teacher_adapter_std}, "
+            f"dropout={args.teacher_adapter_dropout}, "
+            f"scale={args.teacher_adapter_scale}, "
+            f"trainable_params={controller.adapter_parameter_count():,})"
+        )
     return controller
+
+
+def _teacher_optimizer_parameter_groups(controller, cfg):
+    groups = [
+        {
+            "params": list(controller.prompt_learner.parameters()),
+            "lr": cfg.teacher_prompt_lr,
+            "weight_decay": cfg.teacher_weight_decay,
+            "name": "prompts",
+        }
+    ]
+    if controller.adapter_learner is not None:
+        groups.append(
+            {
+                "params": list(controller.adapter_learner.parameters()),
+                "lr": cfg.teacher_adapter_lr,
+                "weight_decay": cfg.teacher_adapter_weight_decay,
+                "name": "adapters",
+            }
+        )
+    return groups
 
 
 def _load_teacher(args):
@@ -296,6 +352,28 @@ class CustomCLIP(nn.Module):
             cfg.seed + 202,
             prompt_depth,
         )
+        adapter_bottleneck = getattr(cfg, "adapter_bottleneck", 0)
+        adapter_depth = getattr(cfg, "adapter_depth", 0)
+        if adapter_depth == -1:
+            adapter_depth = clip_model.visual.transformer.layers
+        self.student_adapters = None
+        if adapter_bottleneck > 0:
+            if not 1 <= adapter_depth <= clip_model.visual.transformer.layers:
+                raise ValueError(
+                    "adapter_depth must be -1 or in "
+                    f"[1, {clip_model.visual.transformer.layers}], "
+                    f"got {adapter_depth}."
+                )
+            self.student_adapters = ModalityBottleneckAdapters(
+                width=visual_width,
+                bottleneck=adapter_bottleneck,
+                depth=adapter_depth,
+                std=getattr(cfg, "adapter_std", 0.02),
+                seed=getattr(cfg, "adapter_seed", cfg.seed + 30_000),
+                dropout=getattr(cfg, "adapter_dropout", 0.0),
+                scale=getattr(cfg, "adapter_scale", 1.0),
+                device=clip_model.visual.conv1.weight.device,
+            )
         photo_texts = [
             f"a photo of a {name.replace('_', ' ')}."
             for name in self.classnames
@@ -341,6 +419,16 @@ class CustomCLIP(nn.Module):
             f"n_ctx_visual={cfg.n_ctx_visual}, "
             f"prompt_depth={prompt_depth}"
         )
+        if self.student_adapters is not None:
+            print(
+                "[Student Adapter] independent photo/sketch bottleneck adapters "
+                f"(bottleneck={adapter_bottleneck}, "
+                f"depth={adapter_depth}, std={cfg.adapter_std}, "
+                f"dropout={cfg.adapter_dropout}, scale={cfg.adapter_scale}, "
+                "down=normal/up=zero, "
+                "trainable_params="
+                f"{self.student_adapters.trainable_parameter_count():,})"
+            )
         print(
             "[Domain KD] sketch-photo branch -> "
             f"active={self.teacher_active}, lambda={cfg.lambda_domain}, "
@@ -478,10 +566,9 @@ class CustomCLIP(nn.Module):
             generator=torch.Generator().manual_seed(cfg.seed),
         )
         optimizer = torch.optim.SGD(
-            self.teacher_prompts.parameters(),
+            _teacher_optimizer_parameter_groups(self.teacher_prompts, cfg),
             lr=cfg.teacher_prompt_lr,
             momentum=cfg.teacher_momentum,
-            weight_decay=cfg.teacher_weight_decay,
         )
         scheduler = torch.optim.lr_scheduler.StepLR(
             optimizer,
@@ -836,6 +923,11 @@ class CustomCLIP(nn.Module):
             return self.photo_visual_prompt()
         return self.sketch_visual_prompt()
 
+    def get_visual_adapters(self, modality):
+        if self.student_adapters is None:
+            return None
+        return self.student_adapters.for_modality(modality)
+
     def get_student_text_features(self, modality):
         feature_name = f"_student_{modality}_text_features"
         features = getattr(self, feature_name)
@@ -855,6 +947,7 @@ class CustomCLIP(nn.Module):
             image.type(self.dtype),
             visual_prompt,
             compound_prompts,
+            self.get_visual_adapters(modality),
         )
         return features / features.norm(dim=-1, keepdim=True)
 
