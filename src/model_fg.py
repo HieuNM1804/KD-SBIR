@@ -23,7 +23,7 @@ from src.model import (
 )
 
 
-FG_CACHE_FORMAT_VERSION = 2
+FG_CACHE_FORMAT_VERSION = 3
 
 
 def better_acc1_acc5(acc1, acc5, best_acc1, best_acc5):
@@ -83,6 +83,42 @@ def fine_grained_accuracy(
     return (
         torch.tensor(top1 / query_count, dtype=torch.float32),
         torch.tensor(top5 / query_count, dtype=torch.float32),
+    )
+
+
+def fine_grained_train_metric_ids(train_dataset):
+    """Build exact-instance IDs for the seen sketch/photo retrieval split."""
+    sketch_categories = torch.as_tensor(
+        train_dataset.sample_category_ids,
+        dtype=torch.long,
+    )
+    sketch_instances = torch.as_tensor(
+        train_dataset.sample_local_photo_indices,
+        dtype=torch.long,
+    )
+    photo_categories = torch.empty(
+        len(train_dataset.all_photo_paths),
+        dtype=torch.long,
+    )
+    photo_instances = torch.empty_like(photo_categories)
+
+    for category, photo_indices in (
+        train_dataset.category_to_photo_indices.items()
+    ):
+        if len(photo_indices) != 100:
+            raise RuntimeError(
+                f"Seen category {category} has {len(photo_indices)} photos; "
+                "expected exactly 100."
+            )
+        indices = torch.as_tensor(photo_indices, dtype=torch.long)
+        photo_categories[indices] = int(category)
+        photo_instances[indices] = torch.arange(len(indices), dtype=torch.long)
+
+    return (
+        sketch_categories,
+        photo_categories,
+        sketch_instances,
+        photo_instances,
     )
 
 
@@ -202,6 +238,8 @@ class FineGrainedCustomCLIP(CustomCLIP):
         best_acc5 = -float("inf")
         best_epoch = 0
         best_prompt_state = None
+        self.teacher_train_metric_history = []
+        self.teacher_unseen_metric_history = []
 
         for epoch in range(cfg.teacher_pretrain_epochs):
             retrieval_total = 0.0
@@ -255,11 +293,31 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 f"[Teacher Pretrain] epoch={epoch + 1}, "
                 f"retrieval={retrieval_total / steps:.6f}"
             )
+            train_acc1, train_acc5 = self._validate_teacher_train(
+                train_dataset,
+                epoch + 1,
+                workers,
+                show_progress,
+            )
+            self.teacher_train_metric_history.append(
+                {
+                    "epoch": epoch + 1,
+                    "acc1": train_acc1,
+                    "acc5": train_acc5,
+                }
+            )
             acc1, acc5 = self._validate_teacher_unseen(
                 val_sketch_loader,
                 val_photo_loader,
                 epoch + 1,
                 show_progress,
+            )
+            self.teacher_unseen_metric_history.append(
+                {
+                    "epoch": epoch + 1,
+                    "acc1": acc1,
+                    "acc5": acc5,
+                }
             )
             improved = better_acc1_acc5(
                 acc1, acc5, best_acc1, best_acc5
@@ -284,6 +342,52 @@ class FineGrainedCustomCLIP(CustomCLIP):
             f"epoch={best_epoch}, Acc@1={best_acc1:.4f}, Acc@5={best_acc5:.4f}"
         )
         self.teacher_prompts.requires_grad_(False)
+
+    @torch.no_grad()
+    def _validate_teacher_train(
+        self,
+        train_dataset,
+        epoch,
+        workers,
+        show_progress,
+    ):
+        """Evaluate exact-instance retrieval on all seen training sketches."""
+        batch_size = self.cfg.test_batch_size
+        sketch_features = self._materialize_teacher_features(
+            train_dataset.all_sketches_path,
+            "train sketch",
+            batch_size,
+            workers,
+            show_progress,
+            generator_seed=self.cfg.seed + 20_000 + epoch * 2,
+        )
+        photo_features = self._materialize_teacher_features(
+            train_dataset.all_photo_paths,
+            "train photo",
+            batch_size,
+            workers,
+            show_progress,
+            generator_seed=self.cfg.seed + 20_001 + epoch * 2,
+        )
+        (
+            sketch_categories,
+            photo_categories,
+            sketch_instances,
+            photo_instances,
+        ) = fine_grained_train_metric_ids(train_dataset)
+        acc1, acc5 = fine_grained_accuracy(
+            sketch_features,
+            photo_features,
+            sketch_categories,
+            photo_categories,
+            sketch_instances,
+            photo_instances,
+        )
+        print(
+            f"[Teacher Train Evaluation] epoch={epoch}, "
+            f"Acc@1={acc1.item():.4f}, Acc@5={acc5.item():.4f}"
+        )
+        return acc1.item(), acc5.item()
 
     @torch.no_grad()
     def _validate_teacher_unseen(
@@ -362,6 +466,16 @@ class FineGrainedCustomCLIP(CustomCLIP):
             "teacher_best_epoch": getattr(self, "teacher_best_epoch", None),
             "teacher_best_acc1": getattr(self, "teacher_best_acc1", None),
             "teacher_best_acc5": getattr(self, "teacher_best_acc5", None),
+            "teacher_train_metric_history": getattr(
+                self,
+                "teacher_train_metric_history",
+                [],
+            ),
+            "teacher_unseen_metric_history": getattr(
+                self,
+                "teacher_unseen_metric_history",
+                [],
+            ),
         }
         torch.save(payload, temporary_path)
         os.replace(temporary_path, cache_path)

@@ -20,6 +20,7 @@ from src.model_fg import (
     better_acc1_acc5,
     default_teacher_cache_path,
     fine_grained_accuracy,
+    fine_grained_train_metric_ids,
 )
 
 
@@ -176,6 +177,33 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         )
         self.assertAlmostEqual(acc1.item(), 1 / 3, places=6)
         self.assertAlmostEqual(acc5.item(), 2 / 3, places=6)
+
+    def test_seen_metric_ids_preserve_category_local_photo_targets(self):
+        dataset = SimpleNamespace(
+            sample_category_ids=[0, 0, 1],
+            sample_local_photo_indices=[7, 31, 4],
+            all_photo_paths=[f"photo-{index}" for index in range(200)],
+            category_to_photo_indices={
+                0: list(range(100)),
+                1: list(range(100, 200)),
+            },
+        )
+        (
+            sketch_categories,
+            photo_categories,
+            sketch_instances,
+            photo_instances,
+        ) = fine_grained_train_metric_ids(dataset)
+        self.assertTrue(torch.equal(sketch_categories, torch.tensor([0, 0, 1])))
+        self.assertTrue(torch.equal(sketch_instances, torch.tensor([7, 31, 4])))
+        self.assertTrue(
+            torch.equal(photo_categories[:100], torch.zeros(100, dtype=torch.long))
+        )
+        self.assertTrue(
+            torch.equal(photo_categories[100:], torch.ones(100, dtype=torch.long))
+        )
+        self.assertTrue(torch.equal(photo_instances[:100], torch.arange(100)))
+        self.assertTrue(torch.equal(photo_instances[100:], torch.arange(100)))
 
 
 if __name__ == "__main__":

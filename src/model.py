@@ -642,6 +642,7 @@ class CustomCLIP(nn.Module):
         batch_size,
         workers,
         show_progress,
+        generator_seed=None,
     ):
         teacher_parameter = self._teacher.visual.conv1.weight
         teacher_device = teacher_parameter.device
@@ -655,6 +656,11 @@ class CustomCLIP(nn.Module):
             pin_memory=True,
             persistent_workers=False,
             prefetch_factor=4 if workers > 0 else None,
+            generator=(
+                torch.Generator().manual_seed(generator_seed)
+                if generator_seed is not None
+                else None
+            ),
         )
         output = torch.empty(
             len(paths),
