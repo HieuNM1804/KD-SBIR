@@ -117,12 +117,6 @@ def build_parser():
         default=64,
         help="Student adapter compression width; 0 disables student adapters.",
     )
-    parser.add_argument(
-        "--adapter_depth",
-        type=int,
-        default=12,
-        help="Number of student ViT blocks with adapters; -1 uses all blocks.",
-    )
     parser.add_argument("--adapter_std", type=float, default=0.02)
     parser.add_argument("--adapter_dropout", type=float, default=0.0)
     parser.add_argument("--adapter_scale", type=float, default=1.0)
@@ -154,12 +148,6 @@ def build_parser():
         type=int,
         default=64,
         help="Teacher adapter compression width; 0 disables teacher adapters.",
-    )
-    parser.add_argument(
-        "--teacher_adapter_depth",
-        type=int,
-        default=12,
-        help="Number of teacher ViT blocks with adapters; -1 uses all blocks.",
     )
     parser.add_argument("--teacher_adapter_std", type=float, default=0.02)
     parser.add_argument("--teacher_adapter_dropout", type=float, default=0.0)
@@ -238,10 +226,6 @@ def validate_args(parser, args):
         parser.error("--prompt_depth must be at least 1.")
     if args.adapter_bottleneck < 0:
         parser.error("--adapter_bottleneck must be non-negative.")
-    if args.adapter_bottleneck > 0 and (
-        args.adapter_depth == 0 or args.adapter_depth < -1
-    ):
-        parser.error("--adapter_depth must be -1 or greater than 0.")
     if args.batch_size < 1 or args.test_batch_size < 1:
         parser.error("Batch sizes must be positive.")
     if args.teacher_pretrain_batch_size < 1:
@@ -254,11 +238,6 @@ def validate_args(parser, args):
         parser.error("--teacher_prompt_depth must be -1 or greater than 0.")
     if args.teacher_adapter_bottleneck < 0:
         parser.error("--teacher_adapter_bottleneck must be non-negative.")
-    if args.teacher_adapter_bottleneck > 0 and (
-        args.teacher_adapter_depth == 0
-        or args.teacher_adapter_depth < -1
-    ):
-        parser.error("--teacher_adapter_depth must be -1 or greater than 0.")
     positive_values = {
         "--lr": args.lr,
         "--adapter_lr": args.adapter_lr,
