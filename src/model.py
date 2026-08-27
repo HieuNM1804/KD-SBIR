@@ -37,7 +37,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DFN5B_MODEL = "ViT-H-14-quickgelu"
 DFN5B_PRETRAINED = "dfn5b"
 DFN5B_OUTPUT_DIM = 1024
-TEACHER_CACHE_FORMAT_VERSION = 9
+TEACHER_CACHE_FORMAT_VERSION = 10
 
 
 def _reduce_on_plateau_patience(non_improving_epochs):
@@ -587,6 +587,7 @@ class CustomCLIP(nn.Module):
         best_prompt_state = None
 
         for epoch in range(cfg.teacher_pretrain_epochs):
+            self.teacher_prompts.train()
             retrieval_total = 0.0
             steps = 0
             batches = tqdm(
@@ -669,6 +670,7 @@ class CustomCLIP(nn.Module):
         if best_prompt_state is None:
             raise RuntimeError("Teacher best-precision state was not created.")
         self.teacher_prompts.load_state_dict(best_prompt_state, strict=True)
+        self.teacher_prompts.eval()
         self.teacher_best_precision = best_precision
         self.teacher_best_epoch = best_epoch
         print(
@@ -686,6 +688,7 @@ class CustomCLIP(nn.Module):
         epoch,
         show_progress,
     ):
+        self.teacher_prompts.eval()
         teacher_parameter = self._teacher.visual.conv1.weight
         teacher_device = teacher_parameter.device
         teacher_dtype = teacher_parameter.dtype
@@ -849,6 +852,11 @@ class CustomCLIP(nn.Module):
                 workers,
                 show_progress,
             )
+
+            # Pretraining restores the best checkpoint. Keep all subsequent
+            # feature and text materialization deterministic, including when
+            # an output adapter was configured with dropout.
+            self.teacher_prompts.eval()
 
         if self.image_text_kd_active or self.cfg.teacher_pretrain_epochs > 0:
             self.get_teacher_text_features()

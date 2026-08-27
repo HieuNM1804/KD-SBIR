@@ -263,6 +263,8 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         model = FineGrainedCustomCLIP.__new__(FineGrainedCustomCLIP)
         torch.nn.Module.__init__(model)
         model.cfg = SimpleNamespace(test_batch_size=128, seed=42)
+        model.teacher_prompts = torch.nn.Dropout(p=0.5)
+        model.teacher_prompts.train()
         calls = []
         gallery = torch.eye(100)
 
@@ -274,6 +276,7 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             _show_progress,
             generator_seed=None,
         ):
+            self.assertFalse(model.teacher_prompts.training)
             calls.append((modality, generator_seed))
             return gallery[[0]] if modality == "sketch" else gallery
 
@@ -294,6 +297,7 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         self.assertEqual([modality for modality, _ in calls], ["sketch", "photo"])
         self.assertEqual(acc1, 1.0)
         self.assertEqual(acc5, 1.0)
+        self.assertFalse(model.teacher_prompts.training)
 
 
 class PlateauSchedulerTests(unittest.TestCase):
@@ -319,10 +323,13 @@ class PlateauSchedulerTests(unittest.TestCase):
         model = FineGrainedZS_SBIR.__new__(FineGrainedZS_SBIR)
         torch.nn.Module.__init__(model)
         model.model = torch.nn.Linear(2, 2)
+        model.model.student_adapters = None
         model.args = SimpleNamespace(
             lr=1e-2,
             momentum=0.9,
             weight_decay=1e-3,
+            adapter_lr=1e-2,
+            adapter_weight_decay=1e-3,
             scheduler_gamma=0.1,
             scheduler_patience=3,
         )
