@@ -24,7 +24,7 @@ from src.model import (
 )
 
 
-FG_CACHE_FORMAT_VERSION = 6
+FG_CACHE_FORMAT_VERSION = 7
 
 
 def better_acc1_acc5(acc1, acc5, best_acc1, best_acc5):
