@@ -25,7 +25,7 @@ from src.model import (
 )
 
 
-FG_CACHE_FORMAT_VERSION = 8
+FG_CACHE_FORMAT_VERSION = 9
 
 
 def better_acc1_acc5(acc1, acc5, best_acc1, best_acc5):
@@ -272,6 +272,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
         )
 
         for epoch in range(cfg.teacher_pretrain_epochs):
+            self.teacher_prompts.train()
             retrieval_total = 0.0
             triplet_total = 0.0
             steps = 0
@@ -379,6 +380,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
         if best_prompt_state is None:
             raise RuntimeError("Teacher best-Acc@1 state was not created.")
         self.teacher_prompts.load_state_dict(best_prompt_state, strict=True)
+        self.teacher_prompts.eval()
         self.teacher_best_epoch = best_epoch
         self.teacher_best_acc1 = best_acc1
         self.teacher_best_acc5 = best_acc5
@@ -397,6 +399,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
         show_progress,
     ):
         """Evaluate exact-instance retrieval on all seen training sketches."""
+        self.teacher_prompts.eval()
         batch_size = self.cfg.test_batch_size
         sketch_features = self._materialize_teacher_features(
             train_dataset.all_sketches_path,
@@ -442,6 +445,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
         epoch,
         show_progress,
     ):
+        self.teacher_prompts.eval()
         teacher_parameter = self._teacher.visual.conv1.weight
         teacher_device = teacher_parameter.device
         teacher_dtype = teacher_parameter.dtype

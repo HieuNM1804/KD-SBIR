@@ -291,6 +291,8 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         model = FineGrainedCustomCLIP.__new__(FineGrainedCustomCLIP)
         torch.nn.Module.__init__(model)
         model.cfg = SimpleNamespace(test_batch_size=128, seed=42)
+        model.teacher_prompts = torch.nn.Dropout(p=0.5)
+        model.teacher_prompts.train()
         calls = []
         gallery = torch.eye(100)
 
@@ -302,6 +304,7 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             _show_progress,
             generator_seed=None,
         ):
+            self.assertFalse(model.teacher_prompts.training)
             calls.append((modality, generator_seed))
             return gallery[[0]] if modality == "sketch" else gallery
 
@@ -322,6 +325,7 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         self.assertEqual([modality for modality, _ in calls], ["sketch", "photo"])
         self.assertEqual(acc1, 1.0)
         self.assertEqual(acc5, 1.0)
+        self.assertFalse(model.teacher_prompts.training)
 
 
 if __name__ == "__main__":
