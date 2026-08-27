@@ -185,7 +185,13 @@ def build_parser():
         "--teacher_triplet_margin",
         type=float,
         default=0.2,
-        help=argparse.SUPPRESS,
+        help="Margin against the hardest wrong photo in the category gallery.",
+    )
+    parser.add_argument(
+        "--lambda_teacher_triplet",
+        type=float,
+        default=1.0,
+        help="Weight of teacher full-gallery hardest-negative triplet loss.",
     )
 
     parser.add_argument("--lambda_domain", type=float, default=3.0)
@@ -268,6 +274,8 @@ def validate_args(parser, args):
             args.teacher_adapter_weight_decay
         ),
         "--lambda_teacher_retrieval": args.lambda_teacher_retrieval,
+        "--lambda_teacher_triplet": args.lambda_teacher_triplet,
+        "--teacher_triplet_margin": args.teacher_triplet_margin,
         "--lambda_domain": args.lambda_domain,
         "--lambda_modality": args.lambda_modality,
     }
@@ -280,6 +288,12 @@ def validate_args(parser, args):
         parser.error("--teacher_adapter_dropout must be less than 1.")
     if args.teacher_scheduler_step_size < 1:
         parser.error("--teacher_scheduler_step_size must be at least 1.")
+    if (
+        args.teacher_pretrain_epochs > 0
+        and args.lambda_teacher_retrieval == 0
+        and args.lambda_teacher_triplet == 0
+    ):
+        parser.error("At least one teacher retrieval loss must be active.")
     if args.lambda_domain == 0 and args.lambda_modality == 0:
         parser.error("At least one student distillation loss must be active.")
 

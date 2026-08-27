@@ -12,6 +12,7 @@ from tqdm.auto import tqdm
 from src.dataset_fg import FineGrainedFullGalleryBatchSampler
 from src.losses_fg import (
     fine_grained_distillation_loss,
+    fine_grained_teacher_hard_triplet_loss,
     fine_grained_teacher_infonce_loss,
 )
 from src.model import (
@@ -24,7 +25,7 @@ from src.model import (
 )
 
 
-FG_CACHE_FORMAT_VERSION = 7
+FG_CACHE_FORMAT_VERSION = 8
 
 
 def better_acc1_acc5(acc1, acc5, best_acc1, best_acc5):
@@ -141,15 +142,17 @@ def _dataset_fingerprint(args, train_dataset):
 
 def _fg_teacher_config(args):
     config = _teacher_training_config(args)
-    config.pop("triplet_margin", None)
     config.update(
         {
             "task": "fine_grained_exact_instance",
             "teacher_negative_scope": "full_100_photo_category_gallery",
-            "teacher_objective": "exact_instance_infonce",
+            "teacher_objective": (
+                "exact_instance_infonce_plus_hardest_gallery_triplet"
+            ),
             "teacher_instance_temperature": (
                 args.teacher_instance_temperature
             ),
+            "lambda_teacher_triplet": args.lambda_teacher_triplet,
             "checkpoint_selection": "best_unseen_acc1_then_acc5",
         }
     )
@@ -245,6 +248,14 @@ class FineGrainedCustomCLIP(CustomCLIP):
         best_prompt_state = None
         self.teacher_train_metric_history = []
         self.teacher_unseen_metric_history = []
+        print(
+            "[Teacher Objective] exact-instance InfoNCE "
+            f"(lambda={cfg.lambda_teacher_retrieval}, "
+            f"temperature={cfg.teacher_instance_temperature}) + "
+            "hardest-gallery triplet "
+            f"(lambda={cfg.lambda_teacher_triplet}, "
+            f"margin={cfg.teacher_triplet_margin})"
+        )
 
         train_acc1, train_acc5 = self._validate_teacher_train(
             train_dataset,
@@ -262,6 +273,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
 
         for epoch in range(cfg.teacher_pretrain_epochs):
             retrieval_total = 0.0
+            triplet_total = 0.0
             steps = 0
             batches = tqdm(
                 loader,
@@ -295,22 +307,36 @@ class FineGrainedCustomCLIP(CustomCLIP):
                             targets,
                             cfg.teacher_instance_temperature,
                         )
-                        loss = cfg.lambda_teacher_retrieval * retrieval
+                        triplet = fine_grained_teacher_hard_triplet_loss(
+                            sketch_features,
+                            photo_features,
+                            targets,
+                            cfg.teacher_triplet_margin,
+                        )
+                        loss = (
+                            cfg.lambda_teacher_retrieval * retrieval
+                            + cfg.lambda_teacher_triplet * triplet
+                        )
                     optimizer.zero_grad(set_to_none=True)
                     scaler.scale(loss).backward()
                     scaler.step(optimizer)
                     scaler.update()
                     retrieval_total += retrieval.detach().item()
+                    triplet_total += triplet.detach().item()
                     steps += 1
                     if show_progress:
-                        batches.set_postfix(T_NCE=f"{retrieval.item():.3f}")
+                        batches.set_postfix(
+                            T_NCE=f"{retrieval.item():.3f}",
+                            T_TRI=f"{triplet.item():.3f}",
+                        )
 
             scheduler.step()
             if steps == 0:
                 raise RuntimeError("Teacher pretraining produced no batches.")
             print(
                 f"[Teacher Pretrain] epoch={epoch + 1}, "
-                f"instance_nce={retrieval_total / steps:.6f}"
+                f"instance_nce={retrieval_total / steps:.6f}, "
+                f"hard_triplet={triplet_total / steps:.6f}"
             )
             train_acc1, train_acc5 = self._validate_teacher_train(
                 train_dataset,

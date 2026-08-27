@@ -14,6 +14,7 @@ from src.dataset_fg import (
     photo_id_from_sketch,
 )
 from src.losses_fg import (
+    fine_grained_teacher_hard_triplet_loss,
     fine_grained_teacher_infonce_loss,
     full_gallery_relational_kd_loss,
 )
@@ -131,6 +132,7 @@ class FineGrainedCacheTests(unittest.TestCase):
                 teacher_pretrain_epochs=2,
                 teacher_pretrain_batch_size=64,
                 lambda_teacher_retrieval=1.5,
+                lambda_teacher_triplet=1.0,
                 teacher_triplet_margin=0.2,
                 teacher_instance_temperature=0.07,
                 teacher_scheduler_step_size=5,
@@ -158,6 +160,12 @@ class FineGrainedCacheTests(unittest.TestCase):
             self.assertNotEqual(
                 original,
                 default_teacher_cache_path(teacher_adapter_change, dataset),
+            )
+            teacher_triplet_change = copy(args)
+            teacher_triplet_change.lambda_teacher_triplet = 0.5
+            self.assertNotEqual(
+                original,
+                default_teacher_cache_path(teacher_triplet_change, dataset),
             )
 
 
@@ -191,6 +199,34 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         )
         loss.backward()
         self.assertTrue(gallery.grad.norm(dim=-1).gt(0).all())
+
+    def test_teacher_triplet_uses_exact_positive_and_hardest_negative(self):
+        gallery = torch.eye(100)
+        query = torch.zeros(1, 100)
+        query[0, 7] = 0.6
+        query[0, 8] = 0.8
+        loss = fine_grained_teacher_hard_triplet_loss(
+            query,
+            gallery,
+            torch.tensor([7]),
+            margin=0.2,
+        )
+        self.assertAlmostEqual(loss.item(), 0.4, places=5)
+
+    def test_teacher_triplet_backpropagates_only_selected_pair(self):
+        gallery = torch.eye(100, requires_grad=True)
+        query = torch.zeros(1, 100)
+        query[0, 7] = 0.6
+        query[0, 8] = 0.8
+        loss = fine_grained_teacher_hard_triplet_loss(
+            query,
+            gallery,
+            torch.tensor([7]),
+            margin=0.2,
+        )
+        loss.backward()
+        gradient_rows = gallery.grad.norm(dim=-1).gt(0).nonzero().flatten()
+        self.assertEqual(gradient_rows.tolist(), [7, 8])
 
     def test_domain_kd_supports_rectangular_sketch_gallery_logits(self):
         generator = torch.Generator().manual_seed(42)

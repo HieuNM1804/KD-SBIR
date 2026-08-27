@@ -24,6 +24,36 @@ def fine_grained_teacher_infonce_loss(
     return F.cross_entropy(logits, targets)
 
 
+def fine_grained_teacher_hard_triplet_loss(
+    sketch_features,
+    photo_features,
+    target_photo_indices,
+    margin=0.2,
+):
+    """Margin loss against the hardest wrong photo in the 100-photo gallery."""
+    if margin < 0:
+        raise ValueError("Triplet margin must be non-negative.")
+    if photo_features.shape[0] != 100:
+        raise RuntimeError("Fine-grained training expects a 100-photo gallery.")
+    if target_photo_indices.shape[0] != sketch_features.shape[0]:
+        raise RuntimeError("Every sketch query needs one exact photo target.")
+
+    sketch_features = F.normalize(sketch_features.float(), dim=-1)
+    photo_features = F.normalize(photo_features.float(), dim=-1)
+    targets = target_photo_indices.to(sketch_features.device).long()
+
+    similarities = sketch_features @ photo_features.t()
+    positive_similarity = similarities.gather(1, targets[:, None]).squeeze(1)
+
+    negative_similarities = similarities.clone()
+    negative_similarities.scatter_(1, targets[:, None], -torch.inf)
+    hardest_negative_similarity = negative_similarities.max(dim=1).values
+
+    return F.relu(
+        margin + hardest_negative_similarity - positive_similarity
+    ).mean()
+
+
 def full_gallery_relational_kd_loss(
     student_sketch,
     student_photo,
