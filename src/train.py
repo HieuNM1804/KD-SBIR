@@ -276,7 +276,12 @@ if __name__ == "__main__":
         default=1.5,
         help="Weight for the teacher prompt retrieval loss.",
     )
-    parser.add_argument("--teacher_triplet_margin", type=float, default=0.2)
+    parser.add_argument(
+        "--teacher_instance_temperature",
+        type=float,
+        default=0.07,
+        help="Temperature for class-masked multi-positive teacher InfoNCE.",
+    )
     parser.add_argument(
         "--lambda_domain",
         type=float,
@@ -359,6 +364,10 @@ if __name__ == "__main__":
         parser.error("--teacher_scheduler_step_size must be at least 1.")
     if args.teacher_scheduler_gamma <= 0:
         parser.error("--teacher_scheduler_gamma must be greater than 0.")
+    if args.lambda_teacher_retrieval < 0:
+        parser.error("--lambda_teacher_retrieval must be non-negative.")
+    if args.teacher_instance_temperature <= 0:
+        parser.error("--teacher_instance_temperature must be greater than 0.")
     if args.lambda_domain < 0:
         parser.error("--lambda_domain must be non-negative.")
     if args.lambda_modality < 0:

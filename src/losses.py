@@ -76,35 +76,35 @@ def image_text_kd_loss(
     return 0.5 * (teacher_to_student + student_to_teacher)
 
 
-def batch_hard_teacher_triplet_loss(
+def multipositive_teacher_infonce_loss(
     sketch_features,
     photo_features,
     labels,
-    margin=0.2,
+    temperature=0.07,
 ):
-    """Symmetric batch-hard triplet loss for jointly trained teacher adapters."""
+    """Symmetric InfoNCE where every same-class cross-modal pair is positive."""
+    if temperature <= 0:
+        raise ValueError("Teacher InfoNCE temperature must be positive.")
+    if len(sketch_features) != len(photo_features):
+        raise ValueError("Sketch and photo batches must have the same size.")
+    if len(labels) != len(sketch_features):
+        raise ValueError("Labels and feature batches must have the same size.")
+
     sketch_features = F.normalize(sketch_features.float(), dim=-1)
     photo_features = F.normalize(photo_features.float(), dim=-1)
     labels = labels.to(sketch_features.device)
-
-    distance = 1.0 - sketch_features @ photo_features.t()
+    logits = sketch_features @ photo_features.t() / temperature
     positive_mask = labels[:, None].eq(labels[None, :])
-    negative_mask = ~positive_mask
 
-    def one_direction(dist):
-        valid_negative = negative_mask.any(dim=-1)
-        hardest_positive = dist.masked_fill(
-            ~positive_mask, -torch.inf
-        ).max(dim=-1).values
-        hardest_negative = dist.masked_fill(
-            ~negative_mask, torch.inf
-        ).min(dim=-1).values
-        losses = F.relu(hardest_positive - hardest_negative + margin)
-        if valid_negative.any():
-            return losses[valid_negative].mean()
-        return dist.new_zeros(())
+    def one_direction(current_logits, current_positive_mask):
+        log_probs = F.log_softmax(current_logits, dim=-1)
+        mask = current_positive_mask.to(log_probs.dtype)
+        positive_count = mask.sum(dim=-1).clamp_min(1.0)
+        return -((log_probs * mask).sum(dim=-1) / positive_count).mean()
 
-    return 0.5 * (one_direction(distance) + one_direction(distance.t()))
+    sketch_to_photo = one_direction(logits, positive_mask)
+    photo_to_sketch = one_direction(logits.t(), positive_mask.t())
+    return 0.5 * (sketch_to_photo + photo_to_sketch)
 
 
 def loss_fn(args, features):
