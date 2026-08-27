@@ -1,21 +1,9 @@
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
-
-
-def _normal_parameter(shape, std, seed, device):
-    generator = torch.Generator(device="cpu").manual_seed(seed)
-    value = torch.empty(*shape, dtype=torch.float32)
-    nn.init.normal_(value, std=std, generator=generator)
-    return nn.Parameter(value.to(device=device))
-
-
-def _zero_parameter(shape, device):
-    return nn.Parameter(torch.zeros(*shape, dtype=torch.float32, device=device))
 
 
 class BottleneckAdapter(nn.Module):
-    """Residual adapter whose zero-initialized expansion starts as identity."""
+    """A simple down-project, activate, up-project residual adapter."""
 
     def __init__(
         self,
@@ -41,34 +29,26 @@ class BottleneckAdapter(nn.Module):
 
         self.width = width
         self.bottleneck = bottleneck
-        self.dropout = dropout
         self.scale = scale
-        self.down_weight = _normal_parameter(
-            (bottleneck, width), std, seed, device
-        )
-        self.down_bias = _zero_parameter((bottleneck,), device)
-        self.up_weight = _zero_parameter((width, bottleneck), device)
-        self.up_bias = _zero_parameter((width,), device)
+        self.norm = nn.LayerNorm(width)
+        self.down = nn.Linear(width, bottleneck)
+        self.activation = nn.GELU(approximate="tanh")
+        self.dropout = nn.Dropout(dropout)
+        self.up = nn.Linear(bottleneck, width)
 
-    @staticmethod
-    def _cast(parameter, reference):
-        return parameter.to(device=reference.device, dtype=reference.dtype)
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+        nn.init.normal_(self.down.weight, std=std, generator=generator)
+        nn.init.zeros_(self.down.bias)
+        nn.init.zeros_(self.up.weight)
+        nn.init.zeros_(self.up.bias)
+        if device is not None:
+            self.to(device=device)
 
     def forward(self, x):
-        # Parameter-free normalization prevents scale drift without introducing
-        # another set of affine LayerNorm parameters.
-        residual = F.layer_norm(x, (self.width,))
-        residual = F.linear(
-            residual,
-            self._cast(self.down_weight, x),
-            self._cast(self.down_bias, x),
-        )
-        residual = F.gelu(residual, approximate="tanh")
-        residual = F.dropout(residual, p=self.dropout, training=self.training)
-        residual = F.linear(
-            residual,
-            self._cast(self.up_weight, x),
-            self._cast(self.up_bias, x),
+        # Frozen CLIP/DFN encoders may emit FP16; train the small adapter in FP32.
+        x = x.float()
+        residual = self.up(
+            self.dropout(self.activation(self.down(self.norm(x))))
         )
         return x + self.scale * residual
 

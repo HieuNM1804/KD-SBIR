@@ -15,9 +15,9 @@ class BottleneckAdapterTests(unittest.TestCase):
         )
         x = torch.randn(5, 2, 8)
         self.assertTrue(torch.equal(adapter(x), x))
-        self.assertGreater(adapter.down_weight.std().item(), 0.0)
-        self.assertEqual(adapter.up_weight.count_nonzero().item(), 0)
-        self.assertEqual(adapter.up_bias.count_nonzero().item(), 0)
+        self.assertGreater(adapter.down.weight.std().item(), 0.0)
+        self.assertEqual(adapter.up.weight.count_nonzero().item(), 0)
+        self.assertEqual(adapter.up.bias.count_nonzero().item(), 0)
 
     def test_zero_expansion_receives_gradient_without_changing_backbone(self):
         adapter = BottleneckAdapter(
@@ -28,9 +28,21 @@ class BottleneckAdapterTests(unittest.TestCase):
         )
         x = torch.randn(5, 2, 8, requires_grad=True)
         adapter(x).square().mean().backward()
-        self.assertGreater(adapter.up_weight.grad.norm().item(), 0.0)
-        self.assertEqual(adapter.down_weight.grad.count_nonzero().item(), 0)
+        self.assertGreater(adapter.up.weight.grad.norm().item(), 0.0)
+        self.assertEqual(adapter.down.weight.grad.count_nonzero().item(), 0)
         self.assertIsNotNone(x.grad)
+
+    def test_fp16_encoder_output_is_adapted_in_fp32(self):
+        adapter = BottleneckAdapter(
+            width=8,
+            bottleneck=3,
+            std=0.02,
+            seed=42,
+        )
+        x = torch.randn(2, 8, dtype=torch.float16)
+        output = adapter(x)
+        self.assertEqual(output.dtype, torch.float32)
+        self.assertTrue(torch.equal(output, x.float()))
 
     def test_photo_and_sketch_adapters_are_independent(self):
         adapters = ModalityOutputAdapters(
@@ -41,8 +53,8 @@ class BottleneckAdapterTests(unittest.TestCase):
         )
         photo = adapters.for_modality("photo")
         sketch = adapters.for_modality("sketch")
-        self.assertIsNot(photo.down_weight, sketch.down_weight)
-        self.assertFalse(torch.equal(photo.down_weight, sketch.down_weight))
+        self.assertIsNot(photo.down.weight, sketch.down.weight)
+        self.assertFalse(torch.equal(photo.down.weight, sketch.down.weight))
 
     def test_modality_adapter_changes_only_the_final_embedding(self):
         adapters = ModalityOutputAdapters(
@@ -55,7 +67,7 @@ class BottleneckAdapterTests(unittest.TestCase):
         initial = adapters(baseline, "photo")
         self.assertTrue(torch.equal(initial, baseline))
         with torch.no_grad():
-            adapters.for_modality("photo").up_weight.fill_(0.1)
+            adapters.for_modality("photo").up.weight.fill_(0.1)
         adapted = adapters(baseline, "photo")
         self.assertFalse(torch.equal(adapted, baseline))
 

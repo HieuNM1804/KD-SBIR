@@ -37,7 +37,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DFN5B_MODEL = "ViT-H-14-quickgelu"
 DFN5B_PRETRAINED = "dfn5b"
 DFN5B_OUTPUT_DIM = 1024
-TEACHER_CACHE_FORMAT_VERSION = 8
+TEACHER_CACHE_FORMAT_VERSION = 9
 
 
 def _reduce_on_plateau_patience(non_improving_epochs):
