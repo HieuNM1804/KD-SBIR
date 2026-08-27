@@ -23,7 +23,7 @@ from src.dataset import (
     WorkerInvariantSampler,
 )
 from src.losses import (
-    batch_hard_teacher_triplet_loss,
+    diagonal_teacher_infonce_loss,
     loss_fn,
 )
 from src.teacher_prompts import build_teacher_prompt_controller
@@ -36,7 +36,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DFN5B_MODEL = "ViT-H-14-quickgelu"
 DFN5B_PRETRAINED = "dfn5b"
 DFN5B_OUTPUT_DIM = 1024
-TEACHER_CACHE_FORMAT_VERSION = 6
+TEACHER_CACHE_FORMAT_VERSION = 7
 
 
 def _retrieval_metrics(
@@ -103,7 +103,8 @@ def _teacher_training_config(args):
         "pretrain_epochs": args.teacher_pretrain_epochs,
         "pretrain_batch_size": args.teacher_pretrain_batch_size,
         "lambda_retrieval": args.lambda_teacher_retrieval,
-        "triplet_margin": args.teacher_triplet_margin,
+        "retrieval_objective": "diagonal_infonce",
+        "instance_temperature": args.teacher_instance_temperature,
         "scheduler": "StepLR",
         "scheduler_step_size": args.teacher_scheduler_step_size,
         "scheduler_gamma": args.teacher_scheduler_gamma,
@@ -495,6 +496,11 @@ class CustomCLIP(nn.Module):
         best_precision = -float("inf")
         best_epoch = 0
         best_prompt_state = None
+        print(
+            "[Teacher Objective] diagonal sketch-photo InfoNCE "
+            f"(lambda={cfg.lambda_teacher_retrieval}, "
+            f"temperature={cfg.teacher_instance_temperature})"
+        )
 
         for epoch in range(cfg.teacher_pretrain_epochs):
             retrieval_total = 0.0
@@ -508,14 +514,13 @@ class CustomCLIP(nn.Module):
                 disable=not show_progress,
             )
             with torch.enable_grad():
-                for photo, sketch, _, _, labels in batches:
+                for photo, sketch, _, _, _ in batches:
                     photo = photo.to(
                         teacher_device, dtype=teacher_dtype, non_blocking=True
                     )
                     sketch = sketch.to(
                         teacher_device, dtype=teacher_dtype, non_blocking=True
                     )
-                    labels = labels.to(teacher_device, non_blocking=True)
                     with torch.amp.autocast(
                         "cuda",
                         dtype=torch.float16,
@@ -527,11 +532,10 @@ class CustomCLIP(nn.Module):
                         sketch_features = self._encode_teacher_image(
                             sketch, "sketch"
                         )
-                        retrieval = batch_hard_teacher_triplet_loss(
+                        retrieval = diagonal_teacher_infonce_loss(
                             sketch_features,
                             photo_features,
-                            labels,
-                            cfg.teacher_triplet_margin,
+                            cfg.teacher_instance_temperature,
                         )
                         loss = cfg.lambda_teacher_retrieval * retrieval
                     optimizer.zero_grad(set_to_none=True)
@@ -543,7 +547,7 @@ class CustomCLIP(nn.Module):
                     steps += 1
                     if show_progress:
                         batches.set_postfix(
-                            T_TRI=f"{retrieval.item():.3f}",
+                            T_NCE=f"{retrieval.item():.3f}",
                         )
             scheduler.step()
             if steps == 0:
@@ -552,7 +556,7 @@ class CustomCLIP(nn.Module):
                 )
             print(
                 f"[Teacher Pretrain] epoch={epoch + 1}, "
-                f"retrieval={retrieval_total / steps:.6f}"
+                f"diagonal_infonce={retrieval_total / steps:.6f}"
             )
             precision = self._validate_teacher_unseen(
                 val_sketch_loader,
