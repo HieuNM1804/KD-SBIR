@@ -243,7 +243,7 @@ def _random_parameter(rows, width, seed):
     return nn.Parameter(parameter)
 
 
-class IndependentVisualPromptLearner(nn.Module):
+class VisualPromptLearner(nn.Module):
     def __init__(
         self,
         n_ctx_visual,
@@ -292,16 +292,10 @@ class CustomCLIP(nn.Module):
         self.image_text_kd_active = _image_text_kd_active(cfg)
         self.photo_text_active = self.image_text_kd_active
         self.sketch_text_active = self.image_text_kd_active
-        self.photo_visual_prompt = IndependentVisualPromptLearner(
+        self.visual_prompt = VisualPromptLearner(
             cfg.n_ctx_visual,
             visual_width,
             cfg.seed + 201,
-            prompt_depth,
-        )
-        self.sketch_visual_prompt = IndependentVisualPromptLearner(
-            cfg.n_ctx_visual,
-            visual_width,
-            cfg.seed + 202,
             prompt_depth,
         )
         photo_texts = [
@@ -345,7 +339,7 @@ class CustomCLIP(nn.Module):
 
         print(
             "[Student] frozen text encoder with fixed modality templates; "
-            "independent deep visual prompts; "
+            "shared sketch-photo deep visual prompt; "
             f"n_ctx_visual={cfg.n_ctx_visual}, "
             f"prompt_depth={prompt_depth}"
         )
@@ -853,9 +847,9 @@ class CustomCLIP(nn.Module):
         )
 
     def get_visual_prompt(self, modality):
-        if modality == "photo":
-            return self.photo_visual_prompt()
-        return self.sketch_visual_prompt()
+        if modality not in {"photo", "sketch"}:
+            raise ValueError(f"Unsupported student modality: {modality}")
+        return self.visual_prompt()
 
     def get_student_text_features(self, modality):
         feature_name = f"_student_{modality}_text_features"

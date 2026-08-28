@@ -25,7 +25,10 @@ from src.model_fg import (
     fine_grained_accuracy,
     fine_grained_train_metric_ids,
 )
-from src.model import _reduce_on_plateau_patience
+from src.model import (
+    VisualPromptLearner,
+    _reduce_on_plateau_patience,
+)
 
 
 class FineGrainedDataTests(unittest.TestCase):
@@ -157,6 +160,36 @@ class FineGrainedCacheTests(unittest.TestCase):
 
 
 class FineGrainedLossAndMetricTests(unittest.TestCase):
+    def test_student_reuses_one_visual_prompt_for_both_modalities(self):
+        model = FineGrainedCustomCLIP.__new__(FineGrainedCustomCLIP)
+        torch.nn.Module.__init__(model)
+        model.visual_prompt = VisualPromptLearner(
+            n_ctx_visual=3,
+            visual_width=8,
+            seed=42,
+            prompt_depth=3,
+        )
+
+        photo_prompt = model.get_visual_prompt("photo")
+        sketch_prompt = model.get_visual_prompt("sketch")
+
+        self.assertIs(photo_prompt[0], sketch_prompt[0])
+        self.assertTrue(
+            all(
+                photo is sketch
+                for photo, sketch in zip(photo_prompt[1], sketch_prompt[1])
+            )
+        )
+
+        photo_prompt[0].sum().backward(retain_graph=True)
+        sketch_prompt[0].sum().backward()
+        self.assertTrue(
+            torch.equal(
+                photo_prompt[0].grad,
+                torch.full_like(photo_prompt[0], 2.0),
+            )
+        )
+
     def test_acc1_primary_acc5_tie_break(self):
         self.assertTrue(better_acc1_acc5(0.2, 0.4, 0.1, 0.9))
         self.assertTrue(better_acc1_acc5(0.2, 0.5, 0.2, 0.4))
