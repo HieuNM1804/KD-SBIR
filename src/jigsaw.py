@@ -105,50 +105,26 @@ def apply_jigsaw(images, permutation_bank, permutation_labels):
 
 
 class ConditionalJigsawSolver(nn.Module):
-    """Two-layer transformer that predicts the applied tile permutation."""
+    """Small MLP that predicts a permutation from a pair of image features."""
 
     def __init__(
         self,
         input_dim,
         hidden_dim,
         num_permutations,
-        num_layers=2,
-        num_heads=8,
         dropout=0.1,
     ):
         super().__init__()
-        if hidden_dim % num_heads != 0:
-            raise ValueError("Jigsaw hidden dimension must be divisible by heads.")
-        self.input_projection = nn.Linear(input_dim, hidden_dim)
-        self.class_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
-        self.position_embedding = nn.Parameter(torch.zeros(1, 3, hidden_dim))
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_dim,
-            nhead=num_heads,
-            dim_feedforward=hidden_dim * 4,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.transformer = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=num_layers,
-            norm=nn.LayerNorm(hidden_dim),
-        )
+        self.hidden = nn.Linear(input_dim * 2, hidden_dim)
+        self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(hidden_dim, num_permutations)
-        nn.init.normal_(self.class_token, std=0.02)
-        nn.init.normal_(self.position_embedding, std=0.02)
 
     def forward(self, conditioning_features, shuffled_sketch_features):
         if conditioning_features.shape != shuffled_sketch_features.shape:
             raise ValueError("Both jigsaw inputs must have the same feature shape.")
-        pair = torch.stack(
+        pair = torch.cat(
             [conditioning_features.float(), shuffled_sketch_features.float()],
-            dim=1,
+            dim=-1,
         )
-        pair = self.input_projection(pair)
-        class_token = self.class_token.expand(pair.shape[0], -1, -1)
-        tokens = torch.cat([class_token, pair], dim=1)
-        tokens = tokens + self.position_embedding
-        return self.classifier(self.transformer(tokens)[:, 0])
+        hidden = F.gelu(self.hidden(pair))
+        return self.classifier(self.dropout(hidden))

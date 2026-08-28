@@ -159,8 +159,6 @@ def build_parser():
     parser.add_argument("--teacher_jigsaw_grid_size", type=int, default=3)
     parser.add_argument("--teacher_jigsaw_permutations", type=int, default=30)
     parser.add_argument("--teacher_jigsaw_dim", type=int, default=256)
-    parser.add_argument("--teacher_jigsaw_layers", type=int, default=2)
-    parser.add_argument("--teacher_jigsaw_heads", type=int, default=8)
     parser.add_argument("--teacher_jigsaw_dropout", type=float, default=0.1)
     parser.add_argument(
         "--teacher_jigsaw_hinge_margin", type=float, default=0.0
@@ -245,12 +243,8 @@ def validate_args(parser, args):
         parser.error("--teacher_jigsaw_grid_size must be at least 2.")
     if args.teacher_jigsaw_permutations < 2:
         parser.error("--teacher_jigsaw_permutations must be at least 2.")
-    if args.teacher_jigsaw_dim < 1 or args.teacher_jigsaw_layers < 1:
-        parser.error("Jigsaw dimension and layer count must be positive.")
-    if args.teacher_jigsaw_heads < 1:
-        parser.error("--teacher_jigsaw_heads must be positive.")
-    if args.teacher_jigsaw_dim % args.teacher_jigsaw_heads != 0:
-        parser.error("--teacher_jigsaw_dim must be divisible by heads.")
+    if args.teacher_jigsaw_dim < 1:
+        parser.error("--teacher_jigsaw_dim must be positive.")
     if not 0 <= args.teacher_jigsaw_dropout < 1:
         parser.error("--teacher_jigsaw_dropout must be in [0, 1).")
     if args.lambda_domain == 0 and args.lambda_modality == 0:

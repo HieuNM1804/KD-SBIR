@@ -138,8 +138,6 @@ class FineGrainedCacheTests(unittest.TestCase):
                 teacher_jigsaw_grid_size=3,
                 teacher_jigsaw_permutations=30,
                 teacher_jigsaw_dim=256,
-                teacher_jigsaw_layers=2,
-                teacher_jigsaw_heads=8,
                 teacher_jigsaw_dropout=0.1,
                 teacher_jigsaw_hinge_margin=0.0,
                 teacher_jigsaw_seed=30042,
@@ -333,9 +331,19 @@ class ConditionalJigsawTests(unittest.TestCase):
             input_dim=16,
             hidden_dim=16,
             num_permutations=4,
-            num_layers=2,
-            num_heads=4,
             dropout=0.0,
+        )
+        linear_layers = [
+            module
+            for module in solver.modules()
+            if isinstance(module, torch.nn.Linear)
+        ]
+        self.assertEqual(len(linear_layers), 2)
+        self.assertFalse(
+            any(
+                isinstance(module, torch.nn.TransformerEncoder)
+                for module in solver.modules()
+            )
         )
         features = [
             torch.randn(3, 16, generator=generator, requires_grad=True)

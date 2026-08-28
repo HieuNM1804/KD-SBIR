@@ -30,7 +30,7 @@ from src.model import (
 )
 
 
-FG_CACHE_FORMAT_VERSION = 5
+FG_CACHE_FORMAT_VERSION = 6
 
 
 def better_acc1_acc5(acc1, acc5, best_acc1, best_acc5):
@@ -160,9 +160,8 @@ def _fg_teacher_config(args):
             "lambda_teacher_jigsaw": args.lambda_teacher_jigsaw,
             "teacher_jigsaw_grid_size": args.teacher_jigsaw_grid_size,
             "teacher_jigsaw_permutations": args.teacher_jigsaw_permutations,
+            "teacher_jigsaw_solver": "two_linear_mlp_on_feature_pair",
             "teacher_jigsaw_dim": args.teacher_jigsaw_dim,
-            "teacher_jigsaw_layers": args.teacher_jigsaw_layers,
-            "teacher_jigsaw_heads": args.teacher_jigsaw_heads,
             "teacher_jigsaw_dropout": args.teacher_jigsaw_dropout,
             "teacher_jigsaw_hinge_margin": args.teacher_jigsaw_hinge_margin,
             "teacher_jigsaw_seed": args.teacher_jigsaw_seed,
@@ -246,8 +245,6 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 input_dim=DFN5B_OUTPUT_DIM,
                 hidden_dim=cfg.teacher_jigsaw_dim,
                 num_permutations=cfg.teacher_jigsaw_permutations,
-                num_layers=cfg.teacher_jigsaw_layers,
-                num_heads=cfg.teacher_jigsaw_heads,
                 dropout=cfg.teacher_jigsaw_dropout,
             )
         jigsaw_solver = jigsaw_solver.to(teacher_device)
@@ -256,6 +253,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
             f"grid={cfg.teacher_jigsaw_grid_size}x"
             f"{cfg.teacher_jigsaw_grid_size}, "
             f"permutations={cfg.teacher_jigsaw_permutations}, "
+            "solver=two-linear MLP, "
             f"lambda={cfg.lambda_teacher_jigsaw}, "
             "negative=hardest wrong instance in the 100-photo gallery"
         )
