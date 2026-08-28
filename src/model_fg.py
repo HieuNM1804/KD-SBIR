@@ -19,11 +19,12 @@ from src.model import (
     CustomCLIP,
     _load_clip_model,
     _load_teacher,
+    _reduce_on_plateau_patience,
     _teacher_training_config,
 )
 
 
-FG_CACHE_FORMAT_VERSION = 4
+FG_CACHE_FORMAT_VERSION = 5
 
 
 def better_acc1_acc5(acc1, acc5, best_acc1, best_acc5):
@@ -146,6 +147,7 @@ def _fg_teacher_config(args):
             "task": "fine_grained_exact_instance",
             "teacher_negative_scope": "full_100_photo_category_gallery",
             "teacher_objective": "exact_instance_infonce",
+            "scheduler_monitor": "best_unseen_acc1_then_acc5",
             "teacher_instance_temperature": (
                 args.teacher_instance_temperature
             ),
@@ -231,10 +233,15 @@ class FineGrainedCustomCLIP(CustomCLIP):
             momentum=cfg.teacher_momentum,
             weight_decay=cfg.teacher_weight_decay,
         )
-        scheduler = torch.optim.lr_scheduler.StepLR(
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
-            step_size=cfg.teacher_scheduler_step_size,
-            gamma=cfg.teacher_scheduler_gamma,
+            mode="max",
+            factor=cfg.teacher_scheduler_gamma,
+            patience=_reduce_on_plateau_patience(
+                cfg.teacher_scheduler_patience
+            ),
+            threshold=0.0,
+            threshold_mode="abs",
         )
         scaler = torch.amp.GradScaler(
             "cuda", enabled=teacher_device.type == "cuda"
@@ -305,7 +312,6 @@ class FineGrainedCustomCLIP(CustomCLIP):
                     if show_progress:
                         batches.set_postfix(T_NCE=f"{retrieval.item():.3f}")
 
-            scheduler.step()
             if steps == 0:
                 raise RuntimeError("Teacher pretraining produced no batches.")
             print(
@@ -331,6 +337,15 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 epoch + 1,
                 show_progress,
             )
+            previous_lr = optimizer.param_groups[0]["lr"]
+            scheduler.step(acc1 + acc5 * 1e-6)
+            current_lr = optimizer.param_groups[0]["lr"]
+            if current_lr != previous_lr:
+                print(
+                    "[Teacher LR] validation did not improve for "
+                    f"{cfg.teacher_scheduler_patience} epochs; "
+                    f"prompt_lr={current_lr:.3e}"
+                )
             self.teacher_unseen_metric_history.append(
                 {
                     "epoch": epoch + 1,
@@ -558,10 +573,25 @@ class FineGrainedZS_SBIR(pl.LightningModule):
             f"weight_decay={self.args.weight_decay}, "
             f"trainable_params={trainable:,}"
         )
-        scheduler = torch.optim.lr_scheduler.StepLR(
-            optimizer, step_size=5, gamma=0.1
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            factor=self.args.scheduler_gamma,
+            patience=_reduce_on_plateau_patience(
+                self.args.scheduler_patience
+            ),
+            threshold=0.0,
+            threshold_mode="abs",
         )
-        return [optimizer], [scheduler]
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "monitor": "fg_selection",
+                "interval": "epoch",
+                "frequency": 1,
+            },
+        }
 
     def training_step(self, batch, batch_idx):
         photo, sketch, teacher_photo, teacher_sketch, categories, _ = batch
