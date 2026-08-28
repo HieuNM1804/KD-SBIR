@@ -26,11 +26,13 @@ from src.jigsaw import (
 )
 from src.model_fg import (
     FineGrainedCustomCLIP,
+    FineGrainedZS_SBIR,
     better_acc1_acc5,
     default_teacher_cache_path,
     fine_grained_accuracy,
     fine_grained_train_metric_ids,
 )
+from src.model import _reduce_on_plateau_patience
 
 
 class FineGrainedDataTests(unittest.TestCase):
@@ -143,7 +145,7 @@ class FineGrainedCacheTests(unittest.TestCase):
                 teacher_jigsaw_seed=30042,
                 teacher_jigsaw_lr=3e-2,
                 teacher_jigsaw_weight_decay=1e-3,
-                teacher_scheduler_step_size=5,
+                teacher_scheduler_patience=3,
                 teacher_scheduler_gamma=0.1,
                 seed=42,
                 lr=1e-2,
@@ -166,6 +168,12 @@ class FineGrainedCacheTests(unittest.TestCase):
             self.assertNotEqual(
                 original,
                 default_teacher_cache_path(jigsaw_change, dataset),
+            )
+            scheduler_change = copy(args)
+            scheduler_change.teacher_scheduler_patience = 4
+            self.assertNotEqual(
+                original,
+                default_teacher_cache_path(scheduler_change, dataset),
             )
 
 
@@ -363,6 +371,44 @@ class ConditionalJigsawTests(unittest.TestCase):
         self.assertTrue(all(feature.grad is not None for feature in features))
         self.assertTrue(
             any(parameter.grad is not None for parameter in solver.parameters())
+        )
+
+
+class PlateauSchedulerTests(unittest.TestCase):
+    def test_lr_drops_after_exactly_three_non_improving_epochs(self):
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=1.0)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            factor=0.1,
+            patience=_reduce_on_plateau_patience(3),
+            threshold=0.0,
+            threshold_mode="abs",
+        )
+        scheduler.step(0.5)
+        scheduler.step(0.4)
+        scheduler.step(0.4)
+        self.assertEqual(optimizer.param_groups[0]["lr"], 1.0)
+        scheduler.step(0.4)
+        self.assertAlmostEqual(optimizer.param_groups[0]["lr"], 0.1)
+
+    def test_fg_student_scheduler_monitors_validation_selection(self):
+        model = FineGrainedZS_SBIR.__new__(FineGrainedZS_SBIR)
+        torch.nn.Module.__init__(model)
+        model.model = torch.nn.Linear(2, 2)
+        model.args = SimpleNamespace(
+            lr=1e-2,
+            momentum=0.9,
+            weight_decay=1e-3,
+            scheduler_gamma=0.1,
+            scheduler_patience=3,
+        )
+        config = model.configure_optimizers()
+        self.assertEqual(config["lr_scheduler"]["monitor"], "fg_selection")
+        self.assertIsInstance(
+            config["lr_scheduler"]["scheduler"],
+            torch.optim.lr_scheduler.ReduceLROnPlateau,
         )
 
 

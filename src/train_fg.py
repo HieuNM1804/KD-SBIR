@@ -115,6 +115,8 @@ def build_parser():
     parser.add_argument("--lr", type=float, default=1e-2)
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--weight_decay", type=float, default=1e-3)
+    parser.add_argument("--scheduler_patience", type=int, default=3)
+    parser.add_argument("--scheduler_gamma", type=float, default=0.1)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--test_batch_size", type=int, default=1024)
     parser.add_argument("--epochs", type=int, default=7)
@@ -143,7 +145,7 @@ def build_parser():
     parser.add_argument("--teacher_weight_decay", type=float, default=1e-3)
     parser.add_argument("--teacher_pretrain_epochs", type=int, default=2)
     parser.add_argument("--teacher_pretrain_batch_size", type=int, default=64)
-    parser.add_argument("--teacher_scheduler_step_size", type=int, default=5)
+    parser.add_argument("--teacher_scheduler_patience", type=int, default=3)
     parser.add_argument("--teacher_scheduler_gamma", type=float, default=0.1)
     parser.add_argument("--teacher_cache_path", default="")
     parser.add_argument("--teacher_cache_dir", default="")
@@ -211,6 +213,7 @@ def validate_args(parser, args):
         "--teacher_prompt_lr": args.teacher_prompt_lr,
         "--teacher_prompt_std": args.teacher_prompt_std,
         "--teacher_scheduler_gamma": args.teacher_scheduler_gamma,
+        "--scheduler_gamma": args.scheduler_gamma,
         "--teacher_instance_temperature": args.teacher_instance_temperature,
         "--teacher_jigsaw_lr": args.teacher_jigsaw_lr,
         "--kd_temperature": args.kd_temperature,
@@ -237,8 +240,14 @@ def validate_args(parser, args):
     for name, value in nonnegative_values.items():
         if value < 0:
             parser.error(f"{name} must be non-negative.")
-    if args.teacher_scheduler_step_size < 1:
-        parser.error("--teacher_scheduler_step_size must be at least 1.")
+    if args.teacher_scheduler_patience < 1:
+        parser.error("--teacher_scheduler_patience must be at least 1.")
+    if args.scheduler_patience < 1:
+        parser.error("--scheduler_patience must be at least 1.")
+    if args.teacher_scheduler_gamma >= 1:
+        parser.error("--teacher_scheduler_gamma must be less than 1.")
+    if args.scheduler_gamma >= 1:
+        parser.error("--scheduler_gamma must be less than 1.")
     if args.teacher_jigsaw_grid_size < 2:
         parser.error("--teacher_jigsaw_grid_size must be at least 2.")
     if args.teacher_jigsaw_permutations < 2:

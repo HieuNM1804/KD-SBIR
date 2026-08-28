@@ -142,6 +142,8 @@ if __name__ == "__main__":
         default=1e-3,
         help="SGD weight decay for student optimization.",
     )
+    parser.add_argument("--scheduler_patience", type=int, default=3)
+    parser.add_argument("--scheduler_gamma", type=float, default=0.1)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--test_batch_size", type=int, default=1024)
     parser.add_argument("--epochs", type=int, default=3)
@@ -236,16 +238,16 @@ if __name__ == "__main__":
         help="Image batch size used during teacher prompt pretraining.",
     )
     parser.add_argument(
-        "--teacher_scheduler_step_size",
+        "--teacher_scheduler_patience",
         type=int,
-        default=5,
-        help="StepLR step size for teacher prompt pretraining.",
+        default=3,
+        help="Epochs without validation improvement before reducing teacher LR.",
     )
     parser.add_argument(
         "--teacher_scheduler_gamma",
         type=float,
         default=0.1,
-        help="StepLR decay factor for teacher prompt pretraining.",
+        help="Plateau decay factor for teacher prompt pretraining.",
     )
     parser.add_argument(
         "--teacher_cache_path",
@@ -355,10 +357,14 @@ if __name__ == "__main__":
         parser.error("--teacher_pretrain_epochs must be non-negative.")
     if args.teacher_pretrain_batch_size < 2:
         parser.error("--teacher_pretrain_batch_size must be at least 2.")
-    if args.teacher_scheduler_step_size < 1:
-        parser.error("--teacher_scheduler_step_size must be at least 1.")
-    if args.teacher_scheduler_gamma <= 0:
-        parser.error("--teacher_scheduler_gamma must be greater than 0.")
+    if args.teacher_scheduler_patience < 1:
+        parser.error("--teacher_scheduler_patience must be at least 1.")
+    if args.scheduler_patience < 1:
+        parser.error("--scheduler_patience must be at least 1.")
+    if not 0 < args.teacher_scheduler_gamma < 1:
+        parser.error("--teacher_scheduler_gamma must be in (0, 1).")
+    if not 0 < args.scheduler_gamma < 1:
+        parser.error("--scheduler_gamma must be in (0, 1).")
     if args.lambda_domain < 0:
         parser.error("--lambda_domain must be non-negative.")
     if args.lambda_modality < 0:

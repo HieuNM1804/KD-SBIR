@@ -36,7 +36,14 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DFN5B_MODEL = "ViT-H-14-quickgelu"
 DFN5B_PRETRAINED = "dfn5b"
 DFN5B_OUTPUT_DIM = 1024
-TEACHER_CACHE_FORMAT_VERSION = 6
+TEACHER_CACHE_FORMAT_VERSION = 7
+
+
+def _reduce_on_plateau_patience(non_improving_epochs):
+    """Convert an exact bad-epoch count to PyTorch's `> patience` rule."""
+    if non_improving_epochs < 1:
+        raise ValueError("Plateau patience must be at least one epoch.")
+    return non_improving_epochs - 1
 
 
 def _retrieval_metrics(
@@ -103,12 +110,17 @@ def _teacher_training_config(args):
         "pretrain_epochs": args.teacher_pretrain_epochs,
         "pretrain_batch_size": args.teacher_pretrain_batch_size,
         "lambda_retrieval": args.lambda_teacher_retrieval,
-        "scheduler": "StepLR",
-        "scheduler_step_size": args.teacher_scheduler_step_size,
-        "scheduler_gamma": args.teacher_scheduler_gamma,
         "checkpoint_selection": "best_unseen_precision",
         "seed": args.seed,
     }
+    config.update(
+        {
+            "scheduler": "ReduceLROnPlateau",
+            "scheduler_monitor": "best_unseen_precision",
+            "scheduler_patience": args.teacher_scheduler_patience,
+            "scheduler_gamma": args.teacher_scheduler_gamma,
+        }
+    )
     if hasattr(args, "teacher_triplet_margin"):
         config["triplet_margin"] = args.teacher_triplet_margin
     return config
@@ -485,10 +497,15 @@ class CustomCLIP(nn.Module):
             momentum=cfg.teacher_momentum,
             weight_decay=cfg.teacher_weight_decay,
         )
-        scheduler = torch.optim.lr_scheduler.StepLR(
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
-            step_size=cfg.teacher_scheduler_step_size,
-            gamma=cfg.teacher_scheduler_gamma,
+            mode="max",
+            factor=cfg.teacher_scheduler_gamma,
+            patience=_reduce_on_plateau_patience(
+                cfg.teacher_scheduler_patience
+            ),
+            threshold=0.0,
+            threshold_mode="abs",
         )
         scaler = torch.amp.GradScaler(
             "cuda",
@@ -547,7 +564,6 @@ class CustomCLIP(nn.Module):
                         batches.set_postfix(
                             T_TRI=f"{retrieval.item():.3f}",
                         )
-            scheduler.step()
             if steps == 0:
                 raise RuntimeError(
                     "Teacher pretraining produced no complete batches."
@@ -562,6 +578,15 @@ class CustomCLIP(nn.Module):
                 epoch + 1,
                 show_progress,
             )
+            previous_lr = optimizer.param_groups[0]["lr"]
+            scheduler.step(precision)
+            current_lr = optimizer.param_groups[0]["lr"]
+            if current_lr != previous_lr:
+                print(
+                    "[Teacher LR] validation precision did not improve for "
+                    f"{cfg.teacher_scheduler_patience} epochs; "
+                    f"prompt_lr={current_lr:.3e}"
+                )
             if precision > best_precision:
                 best_precision = precision
                 best_epoch = epoch + 1
@@ -979,13 +1004,26 @@ class ZS_SBIR(pl.LightningModule):
             f"trainable_params={trainable:,}"
         )
         
-        scheduler = torch.optim.lr_scheduler.StepLR(
-            optimizer=optimizer,
-            step_size=5,
-            gamma=0.1,
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            factor=self.args.scheduler_gamma,
+            patience=_reduce_on_plateau_patience(
+                self.args.scheduler_patience
+            ),
+            threshold=0.0,
+            threshold_mode="abs",
         )
 
-        return [optimizer], [scheduler]
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "monitor": "precision",
+                "interval": "epoch",
+                "frequency": 1,
+            },
+        }
 
     def forward(self, data):
         return self.model(data)
