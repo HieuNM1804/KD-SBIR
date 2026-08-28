@@ -11,8 +11,15 @@ from tqdm.auto import tqdm
 
 from src.dataset_fg import FineGrainedFullGalleryBatchSampler
 from src.losses_fg import (
+    conditional_cross_modal_jigsaw_loss,
     fine_grained_distillation_loss,
     fine_grained_teacher_infonce_loss,
+    hardest_wrong_instance_features,
+)
+from src.jigsaw import (
+    ConditionalJigsawSolver,
+    apply_jigsaw,
+    build_permutation_bank,
 )
 from src.model import (
     DFN5B_OUTPUT_DIM,
@@ -23,7 +30,7 @@ from src.model import (
 )
 
 
-FG_CACHE_FORMAT_VERSION = 4
+FG_CACHE_FORMAT_VERSION = 5
 
 
 def better_acc1_acc5(acc1, acc5, best_acc1, best_acc5):
@@ -149,6 +156,21 @@ def _fg_teacher_config(args):
             "teacher_instance_temperature": (
                 args.teacher_instance_temperature
             ),
+            "teacher_auxiliary_objective": "conditional_cross_modal_jigsaw",
+            "lambda_teacher_jigsaw": args.lambda_teacher_jigsaw,
+            "teacher_jigsaw_grid_size": args.teacher_jigsaw_grid_size,
+            "teacher_jigsaw_permutations": args.teacher_jigsaw_permutations,
+            "teacher_jigsaw_dim": args.teacher_jigsaw_dim,
+            "teacher_jigsaw_layers": args.teacher_jigsaw_layers,
+            "teacher_jigsaw_heads": args.teacher_jigsaw_heads,
+            "teacher_jigsaw_dropout": args.teacher_jigsaw_dropout,
+            "teacher_jigsaw_hinge_margin": args.teacher_jigsaw_hinge_margin,
+            "teacher_jigsaw_seed": args.teacher_jigsaw_seed,
+            "teacher_jigsaw_lr": args.teacher_jigsaw_lr,
+            "teacher_jigsaw_weight_decay": (
+                args.teacher_jigsaw_weight_decay
+            ),
+            "teacher_jigsaw_negative": "hardest_wrong_instance_in_gallery",
             "checkpoint_selection": "best_unseen_acc1_then_acc5",
         }
     )
@@ -210,6 +232,33 @@ class FineGrainedCustomCLIP(CustomCLIP):
         teacher_device = teacher_parameter.device
         teacher_dtype = teacher_parameter.dtype
         self.teacher_prompts.requires_grad_(True)
+        permutation_bank = build_permutation_bank(
+            cfg.teacher_jigsaw_grid_size,
+            cfg.teacher_jigsaw_permutations,
+            cfg.teacher_jigsaw_seed,
+        ).to(teacher_device)
+        permutation_generator = torch.Generator().manual_seed(
+            cfg.teacher_jigsaw_seed + 1
+        )
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(cfg.teacher_jigsaw_seed)
+            jigsaw_solver = ConditionalJigsawSolver(
+                input_dim=DFN5B_OUTPUT_DIM,
+                hidden_dim=cfg.teacher_jigsaw_dim,
+                num_permutations=cfg.teacher_jigsaw_permutations,
+                num_layers=cfg.teacher_jigsaw_layers,
+                num_heads=cfg.teacher_jigsaw_heads,
+                dropout=cfg.teacher_jigsaw_dropout,
+            )
+        jigsaw_solver = jigsaw_solver.to(teacher_device)
+        print(
+            "[Teacher Jigsaw] "
+            f"grid={cfg.teacher_jigsaw_grid_size}x"
+            f"{cfg.teacher_jigsaw_grid_size}, "
+            f"permutations={cfg.teacher_jigsaw_permutations}, "
+            f"lambda={cfg.lambda_teacher_jigsaw}, "
+            "negative=hardest wrong instance in the 100-photo gallery"
+        )
         sampler = FineGrainedFullGalleryBatchSampler(
             train_dataset,
             batch_size=cfg.teacher_pretrain_batch_size,
@@ -226,10 +275,19 @@ class FineGrainedCustomCLIP(CustomCLIP):
             generator=torch.Generator().manual_seed(cfg.seed + 10_000),
         )
         optimizer = torch.optim.SGD(
-            self.teacher_prompts.parameters(),
-            lr=cfg.teacher_prompt_lr,
+            [
+                {
+                    "params": self.teacher_prompts.parameters(),
+                    "lr": cfg.teacher_prompt_lr,
+                    "weight_decay": cfg.teacher_weight_decay,
+                },
+                {
+                    "params": jigsaw_solver.parameters(),
+                    "lr": cfg.teacher_jigsaw_lr,
+                    "weight_decay": cfg.teacher_jigsaw_weight_decay,
+                },
+            ],
             momentum=cfg.teacher_momentum,
-            weight_decay=cfg.teacher_weight_decay,
         )
         scheduler = torch.optim.lr_scheduler.StepLR(
             optimizer,
@@ -262,7 +320,11 @@ class FineGrainedCustomCLIP(CustomCLIP):
 
         for epoch in range(cfg.teacher_pretrain_epochs):
             retrieval_total = 0.0
+            jigsaw_total = 0.0
+            jigsaw_accuracy_total = 0.0
+            jigsaw_active_total = 0.0
             steps = 0
+            jigsaw_solver.train()
             batches = tqdm(
                 loader,
                 desc=f"Teacher FG pretrain {epoch + 1}/{cfg.teacher_pretrain_epochs}",
@@ -278,6 +340,16 @@ class FineGrainedCustomCLIP(CustomCLIP):
                         teacher_device, dtype=teacher_dtype, non_blocking=True
                     )
                     targets = targets.to(teacher_device, non_blocking=True)
+                    permutation_labels = torch.randint(
+                        cfg.teacher_jigsaw_permutations,
+                        (sketch.shape[0],),
+                        generator=permutation_generator,
+                    ).to(teacher_device)
+                    shuffled_sketch = apply_jigsaw(
+                        sketch,
+                        permutation_bank,
+                        permutation_labels,
+                    )
                     with torch.amp.autocast(
                         "cuda",
                         dtype=torch.float16,
@@ -289,28 +361,62 @@ class FineGrainedCustomCLIP(CustomCLIP):
                         sketch_features = self._encode_teacher_image(
                             sketch, "sketch"
                         )
+                        shuffled_sketch_features = self._encode_teacher_image(
+                            shuffled_sketch, "sketch"
+                        )
                         retrieval = fine_grained_teacher_infonce_loss(
                             sketch_features,
                             photo_features,
                             targets,
                             cfg.teacher_instance_temperature,
                         )
-                        loss = cfg.lambda_teacher_retrieval * retrieval
+                        positive_photo_features = photo_features[targets]
+                        negative_photo_features, _ = (
+                            hardest_wrong_instance_features(
+                                sketch_features,
+                                photo_features,
+                                targets,
+                            )
+                        )
+                        jigsaw, jigsaw_metrics = (
+                            conditional_cross_modal_jigsaw_loss(
+                                jigsaw_solver,
+                                sketch_features,
+                                shuffled_sketch_features,
+                                positive_photo_features,
+                                negative_photo_features,
+                                permutation_labels,
+                                cfg.teacher_jigsaw_hinge_margin,
+                            )
+                        )
+                        loss = (
+                            cfg.lambda_teacher_retrieval * retrieval
+                            + cfg.lambda_teacher_jigsaw * jigsaw
+                        )
                     optimizer.zero_grad(set_to_none=True)
                     scaler.scale(loss).backward()
                     scaler.step(optimizer)
                     scaler.update()
                     retrieval_total += retrieval.detach().item()
+                    jigsaw_total += jigsaw.detach().item()
+                    jigsaw_accuracy_total += jigsaw_metrics["accuracy"].item()
+                    jigsaw_active_total += jigsaw_metrics["active_hinge"].item()
                     steps += 1
                     if show_progress:
-                        batches.set_postfix(T_NCE=f"{retrieval.item():.3f}")
+                        batches.set_postfix(
+                            T_NCE=f"{retrieval.item():.3f}",
+                            T_JIG=f"{jigsaw.item():.3f}",
+                        )
 
             scheduler.step()
             if steps == 0:
                 raise RuntimeError("Teacher pretraining produced no batches.")
             print(
                 f"[Teacher Pretrain] epoch={epoch + 1}, "
-                f"instance_nce={retrieval_total / steps:.6f}"
+                f"instance_nce={retrieval_total / steps:.6f}, "
+                f"jigsaw={jigsaw_total / steps:.6f}, "
+                f"jigsaw_acc={jigsaw_accuracy_total / steps:.4f}, "
+                f"jigsaw_active_hinge={jigsaw_active_total / steps:.4f}"
             )
             train_acc1, train_acc5 = self._validate_teacher_train(
                 train_dataset,

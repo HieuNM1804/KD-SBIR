@@ -155,13 +155,21 @@ def build_parser():
         default=0.07,
         help="Temperature for teacher exact-instance InfoNCE over 100 photos.",
     )
+    parser.add_argument("--lambda_teacher_jigsaw", type=float, default=0.1)
+    parser.add_argument("--teacher_jigsaw_grid_size", type=int, default=3)
+    parser.add_argument("--teacher_jigsaw_permutations", type=int, default=30)
+    parser.add_argument("--teacher_jigsaw_dim", type=int, default=256)
+    parser.add_argument("--teacher_jigsaw_layers", type=int, default=2)
+    parser.add_argument("--teacher_jigsaw_heads", type=int, default=8)
+    parser.add_argument("--teacher_jigsaw_dropout", type=float, default=0.1)
     parser.add_argument(
-        "--teacher_triplet_margin",
-        type=float,
-        default=0.2,
-        help=argparse.SUPPRESS,
+        "--teacher_jigsaw_hinge_margin", type=float, default=0.0
     )
-
+    parser.add_argument("--teacher_jigsaw_seed", type=int, default=None)
+    parser.add_argument("--teacher_jigsaw_lr", type=float, default=None)
+    parser.add_argument(
+        "--teacher_jigsaw_weight_decay", type=float, default=None
+    )
     parser.add_argument("--lambda_domain", type=float, default=3.0)
     parser.add_argument("--kd_temperature", type=float, default=0.07)
     parser.add_argument("--lambda_modality", type=float, default=1.0)
@@ -175,6 +183,12 @@ def build_parser():
 def validate_args(parser, args):
     if args.teacher_prompt_seed is None:
         args.teacher_prompt_seed = args.seed
+    if args.teacher_jigsaw_seed is None:
+        args.teacher_jigsaw_seed = args.seed + 30_000
+    if args.teacher_jigsaw_lr is None:
+        args.teacher_jigsaw_lr = args.teacher_prompt_lr
+    if args.teacher_jigsaw_weight_decay is None:
+        args.teacher_jigsaw_weight_decay = args.teacher_weight_decay
     if args.photo_text_kd_temperature is None:
         args.photo_text_kd_temperature = args.image_text_kd_temperature
     if args.sketch_text_kd_temperature is None:
@@ -200,6 +214,7 @@ def validate_args(parser, args):
         "--teacher_prompt_std": args.teacher_prompt_std,
         "--teacher_scheduler_gamma": args.teacher_scheduler_gamma,
         "--teacher_instance_temperature": args.teacher_instance_temperature,
+        "--teacher_jigsaw_lr": args.teacher_jigsaw_lr,
         "--kd_temperature": args.kd_temperature,
         "--image_text_kd_temperature": args.image_text_kd_temperature,
         "--photo_text_kd_temperature": args.photo_text_kd_temperature,
@@ -214,6 +229,10 @@ def validate_args(parser, args):
         "--teacher_momentum": args.teacher_momentum,
         "--teacher_weight_decay": args.teacher_weight_decay,
         "--lambda_teacher_retrieval": args.lambda_teacher_retrieval,
+        "--lambda_teacher_jigsaw": args.lambda_teacher_jigsaw,
+        "--teacher_jigsaw_dropout": args.teacher_jigsaw_dropout,
+        "--teacher_jigsaw_hinge_margin": args.teacher_jigsaw_hinge_margin,
+        "--teacher_jigsaw_weight_decay": args.teacher_jigsaw_weight_decay,
         "--lambda_domain": args.lambda_domain,
         "--lambda_modality": args.lambda_modality,
     }
@@ -222,6 +241,18 @@ def validate_args(parser, args):
             parser.error(f"{name} must be non-negative.")
     if args.teacher_scheduler_step_size < 1:
         parser.error("--teacher_scheduler_step_size must be at least 1.")
+    if args.teacher_jigsaw_grid_size < 2:
+        parser.error("--teacher_jigsaw_grid_size must be at least 2.")
+    if args.teacher_jigsaw_permutations < 2:
+        parser.error("--teacher_jigsaw_permutations must be at least 2.")
+    if args.teacher_jigsaw_dim < 1 or args.teacher_jigsaw_layers < 1:
+        parser.error("Jigsaw dimension and layer count must be positive.")
+    if args.teacher_jigsaw_heads < 1:
+        parser.error("--teacher_jigsaw_heads must be positive.")
+    if args.teacher_jigsaw_dim % args.teacher_jigsaw_heads != 0:
+        parser.error("--teacher_jigsaw_dim must be divisible by heads.")
+    if not 0 <= args.teacher_jigsaw_dropout < 1:
+        parser.error("--teacher_jigsaw_dropout must be in [0, 1).")
     if args.lambda_domain == 0 and args.lambda_modality == 0:
         parser.error("At least one student distillation loss must be active.")
 

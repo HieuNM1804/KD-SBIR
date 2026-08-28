@@ -85,7 +85,7 @@ def _retrieval_metrics(
 
 def _teacher_training_config(args):
     """Parameters that can change the prompt-tuned teacher targets."""
-    return {
+    config = {
         "teacher_model": DFN5B_MODEL,
         "teacher_pretrained": DFN5B_PRETRAINED,
         "teacher_output_dim": DFN5B_OUTPUT_DIM,
@@ -103,13 +103,15 @@ def _teacher_training_config(args):
         "pretrain_epochs": args.teacher_pretrain_epochs,
         "pretrain_batch_size": args.teacher_pretrain_batch_size,
         "lambda_retrieval": args.lambda_teacher_retrieval,
-        "triplet_margin": args.teacher_triplet_margin,
         "scheduler": "StepLR",
         "scheduler_step_size": args.teacher_scheduler_step_size,
         "scheduler_gamma": args.teacher_scheduler_gamma,
         "checkpoint_selection": "best_unseen_precision",
         "seed": args.seed,
     }
+    if hasattr(args, "teacher_triplet_margin"):
+        config["triplet_margin"] = args.teacher_triplet_margin
+    return config
 
 
 def default_teacher_cache_path(args, train_dataset):

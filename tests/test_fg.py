@@ -14,8 +14,15 @@ from src.dataset_fg import (
     photo_id_from_sketch,
 )
 from src.losses_fg import (
+    conditional_cross_modal_jigsaw_loss,
     fine_grained_teacher_infonce_loss,
     full_gallery_relational_kd_loss,
+    hardest_wrong_instance_features,
+)
+from src.jigsaw import (
+    ConditionalJigsawSolver,
+    apply_jigsaw,
+    build_permutation_bank,
 )
 from src.model_fg import (
     FineGrainedCustomCLIP,
@@ -126,8 +133,18 @@ class FineGrainedCacheTests(unittest.TestCase):
                 teacher_pretrain_epochs=2,
                 teacher_pretrain_batch_size=64,
                 lambda_teacher_retrieval=1.5,
-                teacher_triplet_margin=0.2,
                 teacher_instance_temperature=0.07,
+                lambda_teacher_jigsaw=0.1,
+                teacher_jigsaw_grid_size=3,
+                teacher_jigsaw_permutations=30,
+                teacher_jigsaw_dim=256,
+                teacher_jigsaw_layers=2,
+                teacher_jigsaw_heads=8,
+                teacher_jigsaw_dropout=0.1,
+                teacher_jigsaw_hinge_margin=0.0,
+                teacher_jigsaw_seed=30042,
+                teacher_jigsaw_lr=3e-2,
+                teacher_jigsaw_weight_decay=1e-3,
                 teacher_scheduler_step_size=5,
                 teacher_scheduler_gamma=0.1,
                 seed=42,
@@ -145,6 +162,12 @@ class FineGrainedCacheTests(unittest.TestCase):
             self.assertNotEqual(
                 original,
                 default_teacher_cache_path(teacher_change, dataset),
+            )
+            jigsaw_change = copy(args)
+            jigsaw_change.lambda_teacher_jigsaw = 0.2
+            self.assertNotEqual(
+                original,
+                default_teacher_cache_path(jigsaw_change, dataset),
             )
 
 
@@ -178,6 +201,19 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         )
         loss.backward()
         self.assertTrue(gallery.grad.norm(dim=-1).gt(0).all())
+
+    def test_hard_negative_excludes_exact_positive(self):
+        gallery = torch.eye(4)
+        queries = torch.stack(
+            [gallery[0] + 0.9 * gallery[2], gallery[1] + 0.8 * gallery[3]]
+        )
+        negatives, indices = hardest_wrong_instance_features(
+            queries,
+            gallery,
+            torch.tensor([0, 1]),
+        )
+        self.assertTrue(torch.equal(indices, torch.tensor([2, 3])))
+        self.assertTrue(torch.equal(negatives, gallery[[2, 3]]))
 
     def test_domain_kd_supports_rectangular_sketch_gallery_logits(self):
         generator = torch.Generator().manual_seed(42)
@@ -273,6 +309,53 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         self.assertEqual([modality for modality, _ in calls], ["sketch", "photo"])
         self.assertEqual(acc1, 1.0)
         self.assertEqual(acc5, 1.0)
+
+
+class ConditionalJigsawTests(unittest.TestCase):
+    def test_permutation_bank_is_deterministic_unique_and_non_identity(self):
+        first = build_permutation_bank(3, 30, seed=42)
+        second = build_permutation_bank(3, 30, seed=42)
+        self.assertTrue(torch.equal(first, second))
+        self.assertEqual(len(torch.unique(first, dim=0)), 30)
+        identity = torch.arange(9)
+        self.assertFalse(first.eq(identity).all(dim=1).any().item())
+
+    def test_apply_jigsaw_uses_output_to_source_tile_order(self):
+        image = torch.arange(4, dtype=torch.float32).reshape(1, 1, 2, 2)
+        bank = torch.tensor([[3, 2, 1, 0]])
+        shuffled = apply_jigsaw(image, bank, torch.tensor([0]))
+        expected = torch.tensor([[[[3.0, 2.0], [1.0, 0.0]]]])
+        self.assertTrue(torch.equal(shuffled, expected))
+
+    def test_jigsaw_solver_and_loss_backpropagate(self):
+        generator = torch.Generator().manual_seed(42)
+        solver = ConditionalJigsawSolver(
+            input_dim=16,
+            hidden_dim=16,
+            num_permutations=4,
+            num_layers=2,
+            num_heads=4,
+            dropout=0.0,
+        )
+        features = [
+            torch.randn(3, 16, generator=generator, requires_grad=True)
+            for _ in range(4)
+        ]
+        loss, metrics = conditional_cross_modal_jigsaw_loss(
+            solver,
+            *features,
+            permutation_labels=torch.tensor([0, 1, 2]),
+        )
+        loss.backward()
+        self.assertEqual(loss.ndim, 0)
+        self.assertEqual(
+            set(metrics),
+            {"anchor_ce", "hinge", "accuracy", "active_hinge"},
+        )
+        self.assertTrue(all(feature.grad is not None for feature in features))
+        self.assertTrue(
+            any(parameter.grad is not None for parameter in solver.parameters())
+        )
 
 
 if __name__ == "__main__":
