@@ -25,12 +25,30 @@ from src.model import (
 )
 
 
-FG_CACHE_FORMAT_VERSION = 8
+FG_CACHE_FORMAT_VERSION = 9
+FG_ACCURACY_KS = (1, 5, 10, 20, 30, 40, 50)
 
 
 def better_acc1_acc5(acc1, acc5, best_acc1, best_acc5):
     """Use Acc@1 as the primary metric and Acc@5 only as a tie-breaker."""
     return acc1 > best_acc1 or (acc1 == best_acc1 and acc5 > best_acc5)
+
+
+def format_fine_grained_accuracies(accuracies):
+    return ", ".join(
+        f"Acc@{top_k}={float(accuracies[top_k]):.4f}"
+        for top_k in FG_ACCURACY_KS
+    )
+
+
+def fine_grained_metric_history_entry(epoch, accuracies):
+    return {
+        "epoch": epoch,
+        **{
+            f"acc{top_k}": float(accuracies[top_k])
+            for top_k in FG_ACCURACY_KS
+        },
+    }
 
 
 def fine_grained_accuracy(
@@ -41,7 +59,7 @@ def fine_grained_accuracy(
     query_instances,
     gallery_instances,
 ):
-    """Micro Acc@1/Acc@5 with a per-category exact-instance gallery."""
+    """Micro Acc@K with a per-category exact-instance gallery."""
     query_features = F.normalize(query_features.float().cpu(), dim=-1)
     gallery_features = F.normalize(gallery_features.float().cpu(), dim=-1)
     query_categories = query_categories.long().cpu()
@@ -49,8 +67,7 @@ def fine_grained_accuracy(
     query_instances = query_instances.long().cpu()
     gallery_instances = gallery_instances.long().cpu()
 
-    top1 = 0
-    top5 = 0
+    correct = {top_k: 0 for top_k in FG_ACCURACY_KS}
     query_count = 0
     for category in torch.unique(query_categories, sorted=True):
         query_mask = query_categories.eq(category)
@@ -74,18 +91,23 @@ def fine_grained_accuracy(
             descending=True,
             stable=True,
         )
-        retrieved_ids = current_gallery_ids[ranking[:, :5]]
+        retrieved_ids = current_gallery_ids[
+            ranking[:, : max(FG_ACCURACY_KS)]
+        ]
         matches = retrieved_ids.eq(current_targets[:, None])
-        top1 += int(matches[:, 0].sum().item())
-        top5 += int(matches.any(dim=-1).sum().item())
+        for top_k in FG_ACCURACY_KS:
+            correct[top_k] += int(matches[:, :top_k].any(dim=-1).sum().item())
         query_count += len(current_queries)
 
     if query_count == 0:
         raise RuntimeError("Fine-grained validation contains no sketch queries.")
-    return (
-        torch.tensor(top1 / query_count, dtype=torch.float32),
-        torch.tensor(top5 / query_count, dtype=torch.float32),
-    )
+    return {
+        top_k: torch.tensor(
+            correct[top_k] / query_count,
+            dtype=torch.float32,
+        )
+        for top_k in FG_ACCURACY_KS
+    }
 
 
 def fine_grained_train_metric_ids(train_dataset):
@@ -250,22 +272,9 @@ class FineGrainedCustomCLIP(CustomCLIP):
         best_acc5 = -float("inf")
         best_epoch = 0
         best_prompt_state = None
+        best_unseen_metrics = None
         self.teacher_train_metric_history = []
         self.teacher_unseen_metric_history = []
-
-        train_acc1, train_acc5 = self._validate_teacher_train(
-            train_dataset,
-            epoch=0,
-            workers=workers,
-            show_progress=show_progress,
-        )
-        self.teacher_train_metric_history.append(
-            {
-                "epoch": 0,
-                "acc1": train_acc1,
-                "acc5": train_acc5,
-            }
-        )
 
         for epoch in range(cfg.teacher_pretrain_epochs):
             self.teacher_prompts.train()
@@ -319,25 +328,23 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 f"[Teacher Pretrain] epoch={epoch + 1}, "
                 f"instance_nce={retrieval_total / steps:.6f}"
             )
-            train_acc1, train_acc5 = self._validate_teacher_train(
+            train_metrics = self._validate_teacher_train(
                 train_dataset,
                 epoch + 1,
                 workers,
                 show_progress,
             )
             self.teacher_train_metric_history.append(
-                {
-                    "epoch": epoch + 1,
-                    "acc1": train_acc1,
-                    "acc5": train_acc5,
-                }
+                fine_grained_metric_history_entry(epoch + 1, train_metrics)
             )
-            acc1, acc5 = self._validate_teacher_unseen(
+            unseen_metrics = self._validate_teacher_unseen(
                 val_sketch_loader,
                 val_photo_loader,
                 epoch + 1,
                 show_progress,
             )
+            acc1 = unseen_metrics[1]
+            acc5 = unseen_metrics[5]
             previous_lr = optimizer.param_groups[0]["lr"]
             scheduler.step(acc1 + acc5 * 1e-6)
             current_lr = optimizer.param_groups[0]["lr"]
@@ -348,11 +355,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
                     f"prompt_lr={current_lr:.3e}"
                 )
             self.teacher_unseen_metric_history.append(
-                {
-                    "epoch": epoch + 1,
-                    "acc1": acc1,
-                    "acc5": acc5,
-                }
+                fine_grained_metric_history_entry(epoch + 1, unseen_metrics)
             )
             improved = better_acc1_acc5(
                 acc1, acc5, best_acc1, best_acc5
@@ -361,21 +364,24 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 best_acc1 = acc1
                 best_acc5 = acc5
                 best_epoch = epoch + 1
+                best_unseen_metrics = dict(unseen_metrics)
                 best_prompt_state = {
                     key: value.detach().cpu().clone()
                     for key, value in self.teacher_prompts.state_dict().items()
                 }
 
-        if best_prompt_state is None:
+        if best_prompt_state is None or best_unseen_metrics is None:
             raise RuntimeError("Teacher best-Acc@1 state was not created.")
         self.teacher_prompts.load_state_dict(best_prompt_state, strict=True)
         self.teacher_prompts.eval()
         self.teacher_best_epoch = best_epoch
         self.teacher_best_acc1 = best_acc1
         self.teacher_best_acc5 = best_acc5
+        self.teacher_best_metrics = best_unseen_metrics
         print(
             "[Teacher Best] restored visual prompts from "
-            f"epoch={best_epoch}, Acc@1={best_acc1:.4f}, Acc@5={best_acc5:.4f}"
+            f"epoch={best_epoch}, "
+            f"{format_fine_grained_accuracies(best_unseen_metrics)}"
         )
         self.teacher_prompts.requires_grad_(False)
 
@@ -412,7 +418,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
             sketch_instances,
             photo_instances,
         ) = fine_grained_train_metric_ids(train_dataset)
-        acc1, acc5 = fine_grained_accuracy(
+        accuracies = fine_grained_accuracy(
             sketch_features,
             photo_features,
             sketch_categories,
@@ -422,9 +428,12 @@ class FineGrainedCustomCLIP(CustomCLIP):
         )
         print(
             f"[Teacher Train Evaluation] epoch={epoch}, "
-            f"Acc@1={acc1.item():.4f}, Acc@5={acc5.item():.4f}"
+            f"{format_fine_grained_accuracies(accuracies)}"
         )
-        return acc1.item(), acc5.item()
+        return {
+            top_k: accuracy.item()
+            for top_k, accuracy in accuracies.items()
+        }
 
     @torch.no_grad()
     def _validate_teacher_unseen(
@@ -468,7 +477,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
         photo_features, photo_categories, photo_instances = encode_loader(
             val_photo_loader, "photo"
         )
-        acc1, acc5 = fine_grained_accuracy(
+        accuracies = fine_grained_accuracy(
             sketch_features,
             photo_features,
             sketch_categories,
@@ -478,9 +487,12 @@ class FineGrainedCustomCLIP(CustomCLIP):
         )
         print(
             f"[Teacher Validation] epoch={epoch}, "
-            f"Acc@1={acc1.item():.4f}, Acc@5={acc5.item():.4f}"
+            f"{format_fine_grained_accuracies(accuracies)}"
         )
-        return acc1.item(), acc5.item()
+        return {
+            top_k: accuracy.item()
+            for top_k, accuracy in accuracies.items()
+        }
 
     def _save_persistent_teacher_cache(
         self,
@@ -504,6 +516,11 @@ class FineGrainedCustomCLIP(CustomCLIP):
             "teacher_best_epoch": getattr(self, "teacher_best_epoch", None),
             "teacher_best_acc1": getattr(self, "teacher_best_acc1", None),
             "teacher_best_acc5": getattr(self, "teacher_best_acc5", None),
+            "teacher_best_metrics": getattr(
+                self,
+                "teacher_best_metrics",
+                None,
+            ),
             "teacher_train_metric_history": getattr(
                 self,
                 "teacher_train_metric_history",
@@ -673,7 +690,7 @@ class FineGrainedZS_SBIR(pl.LightningModule):
         photo_features, photo_categories, photo_instances = combine(
             self.val_step_outputs_photo
         )
-        acc1, acc5 = fine_grained_accuracy(
+        accuracies = fine_grained_accuracy(
             sketch_features,
             photo_features,
             sketch_categories,
@@ -681,9 +698,16 @@ class FineGrainedZS_SBIR(pl.LightningModule):
             sketch_instances,
             photo_instances,
         )
+        acc1 = accuracies[1]
+        acc5 = accuracies[5]
         selection = acc1 + acc5 * 1e-6
-        self.log("acc1", acc1, on_step=False, on_epoch=True)
-        self.log("acc5", acc5, on_step=False, on_epoch=True)
+        for top_k, accuracy in accuracies.items():
+            self.log(
+                f"acc{top_k}",
+                accuracy,
+                on_step=False,
+                on_epoch=True,
+            )
         self.log("fg_selection", selection, on_step=False, on_epoch=True)
 
         if self.global_step > 0 and better_acc1_acc5(
@@ -695,7 +719,7 @@ class FineGrainedZS_SBIR(pl.LightningModule):
             self.best_acc1 = acc1.item()
             self.best_acc5 = acc5.item()
         print(
-            f"Acc@1: {acc1.item():.4f}, Acc@5: {acc5.item():.4f}, "
+            f"{format_fine_grained_accuracies(accuracies)}, "
             f"Best Acc@1: {self.best_acc1:.4f}, "
             f"Best Acc@5: {self.best_acc5:.4f}"
         )
