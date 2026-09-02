@@ -199,7 +199,7 @@ def build_parser():
     )
     parser.add_argument("--teacher_momentum", type=float, default=0.9)
     parser.add_argument("--teacher_weight_decay", type=float, default=1e-3)
-    parser.add_argument("--teacher_pretrain_epochs", type=int, default=2)
+    parser.add_argument("--teacher_pretrain_epochs", type=int, default=0)
     parser.add_argument("--teacher_text_prompt_epochs", type=int, default=10)
     parser.add_argument("--teacher_text_prompt_lr", type=float, default=3e-4)
     parser.add_argument(
@@ -225,9 +225,9 @@ def build_parser():
         help=argparse.SUPPRESS,
     )
 
-    parser.add_argument("--lambda_domain", type=float, default=3.0)
+    parser.add_argument("--lambda_domain", type=float, default=0.0)
     parser.add_argument("--kd_temperature", type=float, default=0.07)
-    parser.add_argument("--lambda_modality", type=float, default=1.0)
+    parser.add_argument("--lambda_modality", type=float, default=0.0)
     parser.add_argument("--image_text_kd_temperature", type=float, default=0.1)
     parser.add_argument("--photo_text_kd_temperature", type=float, default=None)
     parser.add_argument("--sketch_text_kd_temperature", type=float, default=None)
