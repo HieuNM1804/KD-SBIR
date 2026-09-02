@@ -203,7 +203,15 @@ def build_parser():
     parser.add_argument("--teacher_momentum", type=float, default=0.9)
     parser.add_argument("--teacher_weight_decay", type=float, default=1e-3)
     parser.add_argument("--teacher_pretrain_epochs", type=int, default=2)
-    parser.add_argument("--teacher_text_prompt_epochs", type=int, default=10)
+    parser.add_argument(
+        "--teacher_text_prompt_epochs",
+        type=int,
+        default=0,
+        help=(
+            "Deprecated compatibility option; joint teacher text training "
+            "uses --teacher_pretrain_epochs."
+        ),
+    )
     parser.add_argument("--teacher_text_prompt_lr", type=float, default=3e-4)
     parser.add_argument(
         "--teacher_text_prompt_weight_decay", type=float, default=1e-4
@@ -215,6 +223,9 @@ def build_parser():
     parser.add_argument("--teacher_cache_dir", default="")
     parser.add_argument("--rebuild_teacher_cache", action="store_true")
     parser.add_argument("--lambda_teacher_retrieval", type=float, default=1.5)
+    parser.add_argument(
+        "--lambda_teacher_text_retrieval", type=float, default=1.0
+    )
     parser.add_argument(
         "--teacher_instance_temperature",
         type=float,
@@ -281,10 +292,10 @@ def validate_args(parser, args):
     if args.text_prompt_aspects < 0:
         parser.error("--text_prompt_aspects must be non-negative.")
     if args.text_prompt_aspects > 0:
-        if args.teacher_text_prompt_epochs < 1:
+        if args.teacher_pretrain_epochs < 1:
             parser.error(
-                "Multi-aspect text mode requires "
-                "--teacher_text_prompt_epochs greater than 0."
+                "Joint multi-aspect teacher training requires "
+                "--teacher_pretrain_epochs greater than 0."
             )
         if args.text_prompt_context_tokens < 1:
             parser.error("--text_prompt_context_tokens must be positive.")
@@ -343,6 +354,9 @@ def validate_args(parser, args):
             args.teacher_adapter_weight_decay
         ),
         "--lambda_teacher_retrieval": args.lambda_teacher_retrieval,
+        "--lambda_teacher_text_retrieval": (
+            args.lambda_teacher_text_retrieval
+        ),
         "--lambda_domain": args.lambda_domain,
         "--lambda_modality": args.lambda_modality,
         "--text_prompt_weight_decay": args.text_prompt_weight_decay,
@@ -388,13 +402,7 @@ def main():
     validate_args(parser, args)
     train_loader, val_sketch_loader, val_photo_loader = get_loaders(args)
 
-    teacher_training_active = (
-        args.teacher_pretrain_epochs > 0
-        or (
-            args.text_prompt_aspects > 0
-            and args.teacher_text_prompt_epochs > 0
-        )
-    )
+    teacher_training_active = args.teacher_pretrain_epochs > 0
     if not args.teacher_cache_path and teacher_training_active:
         args.teacher_cache_path = default_teacher_cache_path(
             args, train_loader.dataset

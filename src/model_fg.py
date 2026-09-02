@@ -34,7 +34,7 @@ from src.text_prompts import (
 )
 
 
-FG_CACHE_FORMAT_VERSION = 11
+FG_CACHE_FORMAT_VERSION = 12
 FG_ACCURACY_KS = (1, 5, 10, 20, 30, 40, 50)
 
 
@@ -261,8 +261,10 @@ def _fg_teacher_config(args):
             "text_prompt_diversity_weight": (
                 getattr(args, "text_prompt_diversity_weight", 0.01)
             ),
-            "teacher_text_prompt_epochs": getattr(
-                args, "teacher_text_prompt_epochs", 0
+            "teacher_training_mode": "joint_visual_text_from_epoch_1",
+            "teacher_joint_epochs": args.teacher_pretrain_epochs,
+            "lambda_teacher_text_retrieval": getattr(
+                args, "lambda_teacher_text_retrieval", 1.0
             ),
             "teacher_text_prompt_lr": getattr(
                 args, "teacher_text_prompt_lr", 3e-4
@@ -353,6 +355,11 @@ class FineGrainedCustomCLIP(CustomCLIP):
             "[Multi-Aspect Text] photo patches -> "
             f"R={cfg.text_prompt_aspects} aspect prompts x "
             f"M={cfg.text_prompt_context_tokens} context tokens; "
+            "student_params="
+            f"{self.student_text_prompts.trainable_parameter_count():,}, "
+            "teacher_params="
+            f"{self.teacher_text_prompts.trainable_parameter_count():,}; "
+            "teacher_mode=joint_from_epoch_1; "
             "CLIP backbones frozen; student visual prompts/adapters receive "
             "the auxiliary text gradients"
         )
@@ -433,10 +440,17 @@ class FineGrainedCustomCLIP(CustomCLIP):
             )
 
         cfg = self.cfg
+        joint_text = self.text_prompt_active
+        if joint_text and self.teacher_text_prompts is None:
+            raise RuntimeError(
+                "Joint teacher training requires a teacher text generator."
+            )
         teacher_parameter = self._teacher.visual.conv1.weight
         teacher_device = teacher_parameter.device
         teacher_dtype = teacher_parameter.dtype
         self.teacher_prompts.requires_grad_(True)
+        if joint_text:
+            self.teacher_text_prompts.requires_grad_(True)
         sampler = FineGrainedFullGalleryBatchSampler(
             train_dataset,
             batch_size=cfg.teacher_pretrain_batch_size,
@@ -457,6 +471,13 @@ class FineGrainedCustomCLIP(CustomCLIP):
             lr=cfg.teacher_prompt_lr,
             momentum=cfg.teacher_momentum,
         )
+        text_optimizer = None
+        if joint_text:
+            text_optimizer = torch.optim.AdamW(
+                self.teacher_text_prompts.parameters(),
+                lr=cfg.teacher_text_prompt_lr,
+                weight_decay=cfg.teacher_text_prompt_weight_decay,
+            )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             mode="max",
@@ -467,6 +488,26 @@ class FineGrainedCustomCLIP(CustomCLIP):
             threshold=0.0,
             threshold_mode="abs",
         )
+        text_scheduler = None
+        if joint_text:
+            text_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                text_optimizer,
+                mode="max",
+                factor=cfg.teacher_scheduler_gamma,
+                patience=_reduce_on_plateau_patience(
+                    cfg.teacher_scheduler_patience
+                ),
+                threshold=0.0,
+                threshold_mode="abs",
+            )
+            print(
+                "[Teacher Joint Optimizers] visual SGD "
+                f"prompt_lr={cfg.teacher_prompt_lr}, "
+                f"adapter_lr={cfg.teacher_adapter_lr}; text AdamW "
+                f"lr={cfg.teacher_text_prompt_lr}, "
+                f"weight_decay={cfg.teacher_text_prompt_weight_decay}, "
+                "joint_from_epoch=1"
+            )
         scaler = torch.amp.GradScaler(
             "cuda", enabled=teacher_device.type == "cuda"
         )
@@ -474,27 +515,42 @@ class FineGrainedCustomCLIP(CustomCLIP):
         best_acc5 = -float("inf")
         best_epoch = 0
         best_prompt_state = None
+        best_text_prompt_state = None
         best_unseen_metrics = None
+        best_text_metrics = None
         self.teacher_train_metric_history = []
         self.teacher_unseen_metric_history = []
 
         for epoch in range(cfg.teacher_pretrain_epochs):
             self.teacher_prompts.train()
+            if joint_text:
+                self.teacher_text_prompts.train()
             retrieval_total = 0.0
+            text_total = 0.0
+            diversity_total = 0.0
             steps = 0
             batches = tqdm(
                 loader,
-                desc=f"Teacher FG pretrain {epoch + 1}/{cfg.teacher_pretrain_epochs}",
+                desc=(
+                    "Teacher joint FG "
+                    f"{epoch + 1}/{cfg.teacher_pretrain_epochs}"
+                    if joint_text
+                    else "Teacher FG pretrain "
+                    f"{epoch + 1}/{cfg.teacher_pretrain_epochs}"
+                ),
                 disable=not show_progress,
             )
             with torch.enable_grad():
                 for batch in batches:
-                    photo, sketch, _, _, _, targets, _ = batch
+                    photo, sketch, _, _, categories, targets, _ = batch
                     photo = photo.to(
                         teacher_device, dtype=teacher_dtype, non_blocking=True
                     )
                     sketch = sketch.to(
                         teacher_device, dtype=teacher_dtype, non_blocking=True
+                    )
+                    categories = categories.to(
+                        teacher_device, non_blocking=True
                     )
                     targets = targets.to(teacher_device, non_blocking=True)
                     with torch.amp.autocast(
@@ -502,9 +558,18 @@ class FineGrainedCustomCLIP(CustomCLIP):
                         dtype=torch.float16,
                         enabled=teacher_device.type == "cuda",
                     ):
-                        photo_features = self._encode_teacher_image(
-                            photo, "photo"
-                        )
+                        if joint_text:
+                            photo_features, photo_patches = (
+                                self._encode_teacher_image(
+                                    photo,
+                                    "photo",
+                                    return_patch_tokens=True,
+                                )
+                            )
+                        else:
+                            photo_features = self._encode_teacher_image(
+                                photo, "photo"
+                            )
                         sketch_features = self._encode_teacher_image(
                             sketch, "sketch"
                         )
@@ -515,21 +580,83 @@ class FineGrainedCustomCLIP(CustomCLIP):
                             cfg.teacher_instance_temperature,
                         )
                         loss = cfg.lambda_teacher_retrieval * retrieval
+                        text_retrieval = loss.new_zeros(())
+                        diversity = loss.new_zeros(())
+                        if joint_text:
+                            gallery_categories = categories[:1].expand(
+                                len(photo)
+                            )
+                            aspects, attention = self.teacher_text_prompts(
+                                self._teacher,
+                                photo_patches,
+                                gallery_categories,
+                                split="seen",
+                            )
+                            sketch_text_nce, _ = multi_aspect_infonce_loss(
+                                sketch_features,
+                                aspects,
+                                targets,
+                                cfg.text_prompt_instance_temperature,
+                                cfg.text_prompt_aspect_temperature,
+                            )
+                            photo_text_nce, _ = multi_aspect_infonce_loss(
+                                photo_features,
+                                aspects,
+                                torch.arange(
+                                    len(photo), device=teacher_device
+                                ),
+                                cfg.text_prompt_instance_temperature,
+                                cfg.text_prompt_aspect_temperature,
+                            )
+                            text_retrieval = 0.5 * (
+                                sketch_text_nce + photo_text_nce
+                            )
+                            diversity = attention_diversity_loss(attention)
+                            loss = (
+                                loss
+                                + cfg.lambda_teacher_text_retrieval
+                                * text_retrieval
+                                + cfg.text_prompt_diversity_weight
+                                * diversity
+                            )
                     optimizer.zero_grad(set_to_none=True)
+                    if text_optimizer is not None:
+                        text_optimizer.zero_grad(set_to_none=True)
                     scaler.scale(loss).backward()
+                    if text_optimizer is not None:
+                        scaler.unscale_(text_optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            self.teacher_text_prompts.parameters(),
+                            cfg.text_prompt_gradient_clip,
+                        )
                     scaler.step(optimizer)
+                    if text_optimizer is not None:
+                        scaler.step(text_optimizer)
                     scaler.update()
                     retrieval_total += retrieval.detach().item()
+                    text_total += text_retrieval.detach().item()
+                    diversity_total += diversity.detach().item()
                     steps += 1
                     if show_progress:
-                        batches.set_postfix(T_NCE=f"{retrieval.item():.3f}")
+                        metrics = {"T_VIS": f"{retrieval.item():.3f}"}
+                        if joint_text:
+                            metrics["T_TEXT"] = f"{text_retrieval.item():.3f}"
+                        batches.set_postfix(**metrics)
 
             if steps == 0:
                 raise RuntimeError("Teacher pretraining produced no batches.")
-            print(
-                f"[Teacher Pretrain] epoch={epoch + 1}, "
-                f"instance_nce={retrieval_total / steps:.6f}"
-            )
+            if joint_text:
+                print(
+                    f"[Teacher Joint Pretrain] epoch={epoch + 1}, "
+                    f"visual_nce={retrieval_total / steps:.6f}, "
+                    f"text_nce={text_total / steps:.6f}, "
+                    f"diversity={diversity_total / steps:.6f}"
+                )
+            else:
+                print(
+                    f"[Teacher Pretrain] epoch={epoch + 1}, "
+                    f"instance_nce={retrieval_total / steps:.6f}"
+                )
             train_metrics = self._validate_teacher_train(
                 train_dataset,
                 epoch + 1,
@@ -545,10 +672,25 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 epoch + 1,
                 show_progress,
             )
+            text_metrics = None
+            if joint_text:
+                text_metrics = self._validate_teacher_text_unseen(
+                    val_sketch_loader,
+                    val_photo_loader,
+                    epoch + 1,
+                    show_progress,
+                )
             acc1 = unseen_metrics[1]
             acc5 = unseen_metrics[5]
             previous_lr = optimizer.param_groups[0]["lr"]
+            previous_text_lr = (
+                text_optimizer.param_groups[0]["lr"]
+                if text_optimizer is not None
+                else None
+            )
             scheduler.step(acc1 + acc5 * 1e-6)
+            if text_scheduler is not None:
+                text_scheduler.step(acc1 + acc5 * 1e-6)
             current_lr = optimizer.param_groups[0]["lr"]
             if current_lr != previous_lr:
                 print(
@@ -556,6 +698,14 @@ class FineGrainedCustomCLIP(CustomCLIP):
                     f"{cfg.teacher_scheduler_patience} epochs; "
                     f"prompt_lr={current_lr:.3e}"
                 )
+            if text_optimizer is not None:
+                current_text_lr = text_optimizer.param_groups[0]["lr"]
+                if current_text_lr != previous_text_lr:
+                    print(
+                        "[Teacher Text LR] visual validation did not improve "
+                        f"for {cfg.teacher_scheduler_patience} epochs; "
+                        f"text_lr={current_text_lr:.3e}"
+                    )
             self.teacher_unseen_metric_history.append(
                 fine_grained_metric_history_entry(epoch + 1, unseen_metrics)
             )
@@ -571,17 +721,36 @@ class FineGrainedCustomCLIP(CustomCLIP):
                     key: value.detach().cpu().clone()
                     for key, value in self.teacher_prompts.state_dict().items()
                 }
+                if joint_text:
+                    best_text_metrics = dict(text_metrics)
+                    best_text_prompt_state = {
+                        key: value.detach().cpu().clone()
+                        for key, value in (
+                            self.teacher_text_prompts.state_dict().items()
+                        )
+                    }
 
         if best_prompt_state is None or best_unseen_metrics is None:
             raise RuntimeError("Teacher best-Acc@1 state was not created.")
         self.teacher_prompts.load_state_dict(best_prompt_state, strict=True)
+        if joint_text:
+            if best_text_prompt_state is None or best_text_metrics is None:
+                raise RuntimeError(
+                    "Teacher best joint text state was not created."
+                )
+            self.teacher_text_prompts.load_state_dict(
+                best_text_prompt_state, strict=True
+            )
+            self.teacher_text_prompts.eval().requires_grad_(False)
+            self.teacher_text_best_epoch = best_epoch
+            self.teacher_text_best_metrics = best_text_metrics
         self.teacher_prompts.eval()
         self.teacher_best_epoch = best_epoch
         self.teacher_best_acc1 = best_acc1
         self.teacher_best_acc5 = best_acc5
         self.teacher_best_metrics = best_unseen_metrics
         print(
-            "[Teacher Best] restored visual prompts from "
+            "[Teacher Best] restored joint visual/text state from "
             f"epoch={best_epoch}, "
             f"{format_fine_grained_accuracies(best_unseen_metrics)}"
         )
@@ -1139,20 +1308,6 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 show_progress,
             )
             self.teacher_prompts.eval()
-
-        if self.text_prompt_active:
-            if self.cfg.teacher_text_prompt_epochs < 1:
-                raise RuntimeError(
-                    "A new multi-aspect teacher cache requires at least one "
-                    "--teacher_text_prompt_epochs epoch."
-                )
-            self._pretrain_teacher_text_prompts(
-                train_dataset,
-                val_sketch_loader,
-                val_photo_loader,
-                workers,
-                show_progress,
-            )
 
         # Preserve the original fixed class text targets for compatibility with
         # the optional legacy loss and with existing cache inspection tools.
