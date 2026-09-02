@@ -359,6 +359,36 @@ class PlateauSchedulerTests(unittest.TestCase):
             torch.optim.lr_scheduler.ReduceLROnPlateau,
         )
 
+    def test_visual_adapter_and_text_parameters_share_the_fg_optimizer(self):
+        wrapper = FineGrainedZS_SBIR.__new__(FineGrainedZS_SBIR)
+        torch.nn.Module.__init__(wrapper)
+        model = torch.nn.Module()
+        model.visual_prompt = torch.nn.Linear(2, 2)
+        model.student_adapters = torch.nn.Linear(2, 2)
+        model.student_text_prompts = torch.nn.Linear(2, 2)
+        model.text_prompt_active = True
+        wrapper.model = model
+        wrapper.args = SimpleNamespace(
+            lr=1e-2,
+            momentum=0.9,
+            weight_decay=1e-3,
+            adapter_lr=2e-2,
+            adapter_weight_decay=2e-3,
+            text_prompt_lr=3e-4,
+            text_prompt_weight_decay=1e-4,
+            scheduler_gamma=0.1,
+            scheduler_patience=3,
+        )
+        optimizer = wrapper.configure_optimizers()["optimizer"]
+        self.assertEqual(
+            [group["name"] for group in optimizer.param_groups],
+            ["prompts", "adapters", "multi_aspect_text"],
+        )
+        self.assertEqual(
+            [group["lr"] for group in optimizer.param_groups],
+            [1e-2, 2e-2, 3e-4],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

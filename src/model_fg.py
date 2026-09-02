@@ -34,7 +34,7 @@ from src.text_prompts import (
 )
 
 
-FG_CACHE_FORMAT_VERSION = 10
+FG_CACHE_FORMAT_VERSION = 11
 FG_ACCURACY_KS = (1, 5, 10, 20, 30, 40, 50)
 
 
@@ -353,7 +353,8 @@ class FineGrainedCustomCLIP(CustomCLIP):
             "[Multi-Aspect Text] photo patches -> "
             f"R={cfg.text_prompt_aspects} aspect prompts x "
             f"M={cfg.text_prompt_context_tokens} context tokens; "
-            "visual/text encoders detached for this objective"
+            "CLIP backbones frozen; student visual prompts/adapters receive "
+            "the auxiliary text gradients"
         )
 
     def _encode_student_text_source(self, images):
@@ -671,7 +672,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
                         sketch_features = self._encode_teacher_image(
                             sketch, "sketch"
                         ).float()
-                        _, photo_patches = self._encode_teacher_image(
+                        photo_features, photo_patches = self._encode_teacher_image(
                             photo, "photo", return_patch_tokens=True
                         )
                     with torch.amp.autocast(
@@ -685,12 +686,22 @@ class FineGrainedCustomCLIP(CustomCLIP):
                             gallery_categories,
                             split="seen",
                         )
-                        instance_loss, _ = multi_aspect_infonce_loss(
+                        sketch_instance_loss, _ = multi_aspect_infonce_loss(
                             sketch_features,
                             aspects,
                             targets,
                             cfg.text_prompt_instance_temperature,
                             cfg.text_prompt_aspect_temperature,
+                        )
+                        photo_instance_loss, _ = multi_aspect_infonce_loss(
+                            photo_features.float(),
+                            aspects,
+                            torch.arange(len(photo), device=photo.device),
+                            cfg.text_prompt_instance_temperature,
+                            cfg.text_prompt_aspect_temperature,
+                        )
+                        instance_loss = 0.5 * (
+                            sketch_instance_loss + photo_instance_loss
                         )
                         diversity = attention_diversity_loss(attention)
                         loss = (
@@ -1243,50 +1254,24 @@ class FineGrainedZS_SBIR(pl.LightningModule):
         )
 
     def configure_optimizers(self):
-        if getattr(self.model, "text_prompt_active", False):
-            parameters = list(self.model.student_text_prompts.parameters())
-            optimizer = torch.optim.AdamW(
-                parameters,
-                lr=self.args.text_prompt_lr,
-                weight_decay=self.args.text_prompt_weight_decay,
-            )
-            print(
-                "[Text Optimizer] AdamW "
-                f"lr={self.args.text_prompt_lr}, "
-                f"weight_decay={self.args.text_prompt_weight_decay}, "
-                f"params={sum(p.numel() for p in parameters):,}; "
-                "domain/modality losses bypassed"
-            )
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer,
-                mode="max",
-                factor=self.args.scheduler_gamma,
-                patience=_reduce_on_plateau_patience(
-                    self.args.scheduler_patience
-                ),
-                threshold=0.0,
-                threshold_mode="abs",
-            )
-            return {
-                "optimizer": optimizer,
-                "lr_scheduler": {
-                    "scheduler": scheduler,
-                    "monitor": "fg_selection",
-                    "interval": "epoch",
-                    "frequency": 1,
-                },
-            }
-
         adapter_parameters = (
             list(self.model.student_adapters.parameters())
             if self.model.student_adapters is not None
             else []
         )
         adapter_ids = {id(parameter) for parameter in adapter_parameters}
+        text_parameters = (
+            list(self.model.student_text_prompts.parameters())
+            if getattr(self.model, "text_prompt_active", False)
+            else []
+        )
+        text_ids = {id(parameter) for parameter in text_parameters}
         prompt_parameters = [
             parameter
             for parameter in self.model.parameters()
-            if parameter.requires_grad and id(parameter) not in adapter_ids
+            if parameter.requires_grad
+            and id(parameter) not in adapter_ids
+            and id(parameter) not in text_ids
         ]
         param_groups = [
             {
@@ -1305,6 +1290,15 @@ class FineGrainedZS_SBIR(pl.LightningModule):
                     "name": "adapters",
                 }
             )
+        if text_parameters:
+            param_groups.append(
+                {
+                    "params": text_parameters,
+                    "lr": self.args.text_prompt_lr,
+                    "weight_decay": self.args.text_prompt_weight_decay,
+                    "name": "multi_aspect_text",
+                }
+            )
         optimizer = torch.optim.SGD(
             param_groups,
             lr=self.args.lr,
@@ -1316,6 +1310,17 @@ class FineGrainedZS_SBIR(pl.LightningModule):
         adapter_trainable = sum(
             parameter.numel() for parameter in adapter_parameters
         )
+        text_trainable = sum(
+            parameter.numel() for parameter in text_parameters
+        )
+        text_lr = (
+            self.args.text_prompt_lr if text_parameters else "disabled"
+        )
+        text_weight_decay = (
+            self.args.text_prompt_weight_decay
+            if text_parameters
+            else "disabled"
+        )
         print(
             "[Optimizer] SGD "
             f"lr={self.args.lr}, momentum={self.args.momentum}, "
@@ -1323,7 +1328,10 @@ class FineGrainedZS_SBIR(pl.LightningModule):
             f"prompt_params={prompt_trainable:,}, "
             f"adapter_lr={self.args.adapter_lr}, "
             f"adapter_weight_decay={self.args.adapter_weight_decay}, "
-            f"adapter_params={adapter_trainable:,}"
+            f"adapter_params={adapter_trainable:,}, "
+            f"text_lr={text_lr}, "
+            f"text_weight_decay={text_weight_decay}, "
+            f"text_params={text_trainable:,}"
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
@@ -1355,70 +1363,10 @@ class FineGrainedZS_SBIR(pl.LightningModule):
             targets,
             teacher_photo_text_aspects,
         ) = batch
-        if self.model.text_prompt_active:
-            if teacher_photo_text_aspects.numel() == 0:
-                raise RuntimeError(
-                    "Student text KD requires cached teacher photo aspects."
-                )
-            gallery_categories = categories[:1].expand(len(photo))
-            with torch.no_grad():
-                student_sketch, _ = self.model._encode_student_text_source(
-                    sketch
-                )
-                _, student_photo_patches = (
-                    self.model._encode_student_text_source(photo)
-                )
-            student_aspects, attention = self.model.student_text_prompts(
-                self.model.clip_model,
-                student_photo_patches,
-                gallery_categories,
-                split="seen",
-            )
-            instance_loss, student_logits = multi_aspect_infonce_loss(
-                student_sketch,
-                student_aspects,
-                targets,
-                self.args.text_prompt_instance_temperature,
-                self.args.text_prompt_aspect_temperature,
-            )
-            teacher_logits = multi_aspect_similarity(
-                teacher_sketch,
-                teacher_photo_text_aspects,
-                self.args.text_prompt_aspect_temperature,
-            ) / self.args.text_prompt_instance_temperature
-            kd_loss = relational_logits_kd_loss(
-                student_logits,
-                teacher_logits,
-                self.args.text_prompt_kd_temperature,
-            )
-            diversity = attention_diversity_loss(attention)
-            loss = (
-                instance_loss
-                + self.args.lambda_text_prompt_kd * kd_loss
-                + self.args.text_prompt_diversity_weight * diversity
-            )
-            self.log("train_loss", loss, on_step=False, on_epoch=True)
-            self.log(
-                "TEXT_NCE",
-                instance_loss,
-                on_step=True,
-                on_epoch=False,
-                prog_bar=True,
-            )
-            self.log(
-                "TEXT_KD",
-                kd_loss,
-                on_step=True,
-                on_epoch=False,
-                prog_bar=True,
-            )
-            return loss
-
         features = self.model(
             (photo, sketch, teacher_photo, teacher_sketch, categories)
         )
         loss, loss_dict = fine_grained_distillation_loss(self.args, features)
-        self.log("train_loss", loss, on_step=False, on_epoch=True)
         self.log(
             "DOMAIN",
             loss_dict["domain_kd"],
@@ -1433,20 +1381,93 @@ class FineGrainedZS_SBIR(pl.LightningModule):
             on_epoch=False,
             prog_bar=True,
         )
+
+        if self.model.text_prompt_active:
+            if teacher_photo_text_aspects.numel() == 0:
+                raise RuntimeError(
+                    "Student text KD requires cached teacher photo aspects."
+                )
+            gallery_categories = categories[:1].expand(len(photo))
+            with torch.no_grad():
+                _, student_photo_patches = (
+                    self.model._encode_student_text_source(photo)
+                )
+            student_photo = features[0]
+            student_sketch = features[1]
+            student_aspects, attention = self.model.student_text_prompts(
+                self.model.clip_model,
+                student_photo_patches,
+                gallery_categories,
+                split="seen",
+            )
+            sketch_instance_loss, student_logits = multi_aspect_infonce_loss(
+                student_sketch,
+                student_aspects,
+                targets,
+                self.args.text_prompt_instance_temperature,
+                self.args.text_prompt_aspect_temperature,
+            )
+            photo_instance_loss, _ = multi_aspect_infonce_loss(
+                student_photo,
+                student_aspects,
+                torch.arange(len(photo), device=photo.device),
+                self.args.text_prompt_instance_temperature,
+                self.args.text_prompt_aspect_temperature,
+            )
+            instance_loss = 0.5 * (
+                sketch_instance_loss + photo_instance_loss
+            )
+            teacher_logits = multi_aspect_similarity(
+                teacher_sketch,
+                teacher_photo_text_aspects,
+                self.args.text_prompt_aspect_temperature,
+            ) / self.args.text_prompt_instance_temperature
+            kd_loss = relational_logits_kd_loss(
+                student_logits,
+                teacher_logits,
+                self.args.text_prompt_kd_temperature,
+            )
+            diversity = attention_diversity_loss(attention)
+            text_loss = (
+                self.args.lambda_text_prompt_retrieval * instance_loss
+                + self.args.lambda_text_prompt_kd * kd_loss
+                + self.args.text_prompt_diversity_weight * diversity
+            )
+            loss = loss + text_loss
+            self.log(
+                "TEXT_NCE",
+                instance_loss,
+                on_step=True,
+                on_epoch=False,
+                prog_bar=True,
+            )
+            self.log(
+                "TEXT_PHOTO",
+                photo_instance_loss,
+                on_step=False,
+                on_epoch=True,
+            )
+            self.log(
+                "TEXT_KD",
+                kd_loss,
+                on_step=True,
+                on_epoch=False,
+                prog_bar=True,
+            )
+        self.log("train_loss", loss, on_step=False, on_epoch=True)
         return loss
+
+    def on_before_optimizer_step(self, optimizer):
+        if getattr(self.model, "text_prompt_active", False):
+            torch.nn.utils.clip_grad_norm_(
+                self.model.student_text_prompts.parameters(),
+                self.args.text_prompt_gradient_clip,
+            )
 
     def validation_step(self, batch, batch_idx, dataloader_idx):
         images, categories, instances = batch
         modality = "sketch" if dataloader_idx == 0 else "photo"
-        if self.model.text_prompt_active:
-            if modality == "sketch":
-                features, _ = self.model._encode_student_text_source(images)
-            else:
-                features, _ = self.model._student_photo_text_aspects(
-                    images, categories, split="unseen"
-                )
-        else:
-            features = self.model.extract_feature(images, modality)
+        features = self.model.extract_feature(images, modality)
         output = (features.detach(), categories.detach(), instances.detach())
         if dataloader_idx == 0:
             self.val_step_outputs_sketch.append(output)
@@ -1466,25 +1487,14 @@ class FineGrainedZS_SBIR(pl.LightningModule):
         photo_features, photo_categories, photo_instances = combine(
             self.val_step_outputs_photo
         )
-        if self.model.text_prompt_active:
-            accuracies = fine_grained_multi_aspect_accuracy(
-                sketch_features,
-                photo_features,
-                sketch_categories,
-                photo_categories,
-                sketch_instances,
-                photo_instances,
-                self.args.text_prompt_aspect_temperature,
-            )
-        else:
-            accuracies = fine_grained_accuracy(
-                sketch_features,
-                photo_features,
-                sketch_categories,
-                photo_categories,
-                sketch_instances,
-                photo_instances,
-            )
+        accuracies = fine_grained_accuracy(
+            sketch_features,
+            photo_features,
+            sketch_categories,
+            photo_categories,
+            sketch_instances,
+            photo_instances,
+        )
         acc1 = accuracies[1]
         acc5 = accuracies[5]
         selection = acc1 + acc5 * 1e-6
@@ -1505,13 +1515,9 @@ class FineGrainedZS_SBIR(pl.LightningModule):
         ):
             self.best_acc1 = acc1.item()
             self.best_acc5 = acc5.item()
-        metric_prefix = (
-            "[Student Text Validation] "
-            if self.model.text_prompt_active
-            else ""
-        )
         print(
-            f"{metric_prefix}{format_fine_grained_accuracies(accuracies)}, "
+            f"[Student Validation] "
+            f"{format_fine_grained_accuracies(accuracies)}, "
             f"Best Acc@1: {self.best_acc1:.4f}, "
             f"Best Acc@5: {self.best_acc5:.4f}"
         )
