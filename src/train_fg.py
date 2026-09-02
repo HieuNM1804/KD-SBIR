@@ -138,6 +138,36 @@ def build_parser():
         "--no_progress", action="store_false", dest="progress"
     )
 
+    parser.add_argument(
+        "--text_prompt_aspects",
+        type=int,
+        default=4,
+        help="Number of photo-conditioned text prompts; 0 restores legacy mode.",
+    )
+    parser.add_argument("--text_prompt_context_tokens", type=int, default=4)
+    parser.add_argument("--text_prompt_latent_width", type=int, default=512)
+    parser.add_argument("--text_prompt_heads", type=int, default=8)
+    parser.add_argument(
+        "--text_prompt_encode_chunk_size",
+        type=int,
+        default=100,
+        help="Maximum number of soft prompts per text-encoder forward pass.",
+    )
+    parser.add_argument("--text_prompt_dropout", type=float, default=0.1)
+    parser.add_argument("--text_prompt_gate_init", type=float, default=0.1)
+    parser.add_argument("--text_prompt_lr", type=float, default=3e-4)
+    parser.add_argument("--text_prompt_weight_decay", type=float, default=1e-4)
+    parser.add_argument(
+        "--text_prompt_instance_temperature", type=float, default=0.07
+    )
+    parser.add_argument(
+        "--text_prompt_aspect_temperature", type=float, default=0.1
+    )
+    parser.add_argument("--text_prompt_diversity_weight", type=float, default=0.01)
+    parser.add_argument("--text_prompt_gradient_clip", type=float, default=1.0)
+    parser.add_argument("--lambda_text_prompt_kd", type=float, default=1.0)
+    parser.add_argument("--text_prompt_kd_temperature", type=float, default=1.0)
+
     parser.add_argument("--teacher_n_ctx_visual", type=int, default=10)
     parser.add_argument("--teacher_prompt_depth", type=int, default=12)
     parser.add_argument("--teacher_prompt_std", type=float, default=0.02)
@@ -170,6 +200,11 @@ def build_parser():
     parser.add_argument("--teacher_momentum", type=float, default=0.9)
     parser.add_argument("--teacher_weight_decay", type=float, default=1e-3)
     parser.add_argument("--teacher_pretrain_epochs", type=int, default=2)
+    parser.add_argument("--teacher_text_prompt_epochs", type=int, default=10)
+    parser.add_argument("--teacher_text_prompt_lr", type=float, default=3e-4)
+    parser.add_argument(
+        "--teacher_text_prompt_weight_decay", type=float, default=1e-4
+    )
     parser.add_argument("--teacher_pretrain_batch_size", type=int, default=64)
     parser.add_argument("--teacher_scheduler_patience", type=int, default=3)
     parser.add_argument("--teacher_scheduler_gamma", type=float, default=0.1)
@@ -232,12 +267,35 @@ def validate_args(parser, args):
         parser.error("--teacher_pretrain_batch_size must be positive.")
     if args.teacher_pretrain_epochs < 0:
         parser.error("--teacher_pretrain_epochs must be non-negative.")
+    if args.teacher_text_prompt_epochs < 0:
+        parser.error("--teacher_text_prompt_epochs must be non-negative.")
     if args.teacher_pretrain_epochs > 0 and args.teacher_n_ctx_visual < 1:
         parser.error("Teacher prompt pretraining requires visual prompts.")
     if args.teacher_prompt_depth == 0 or args.teacher_prompt_depth < -1:
         parser.error("--teacher_prompt_depth must be -1 or greater than 0.")
     if args.teacher_adapter_bottleneck < 0:
         parser.error("--teacher_adapter_bottleneck must be non-negative.")
+    if args.text_prompt_aspects < 0:
+        parser.error("--text_prompt_aspects must be non-negative.")
+    if args.text_prompt_aspects > 0:
+        if args.teacher_text_prompt_epochs < 1:
+            parser.error(
+                "Multi-aspect text mode requires "
+                "--teacher_text_prompt_epochs greater than 0."
+            )
+        if args.text_prompt_context_tokens < 1:
+            parser.error("--text_prompt_context_tokens must be positive.")
+        if args.text_prompt_latent_width < 1:
+            parser.error("--text_prompt_latent_width must be positive.")
+        if args.text_prompt_heads < 1:
+            parser.error("--text_prompt_heads must be positive.")
+        if args.text_prompt_encode_chunk_size < 1:
+            parser.error("--text_prompt_encode_chunk_size must be positive.")
+        if args.text_prompt_latent_width % args.text_prompt_heads:
+            parser.error(
+                "--text_prompt_latent_width must be divisible by "
+                "--text_prompt_heads."
+            )
     positive_values = {
         "--lr": args.lr,
         "--adapter_lr": args.adapter_lr,
@@ -255,6 +313,17 @@ def validate_args(parser, args):
         "--image_text_kd_temperature": args.image_text_kd_temperature,
         "--photo_text_kd_temperature": args.photo_text_kd_temperature,
         "--sketch_text_kd_temperature": args.sketch_text_kd_temperature,
+        "--text_prompt_lr": args.text_prompt_lr,
+        "--teacher_text_prompt_lr": args.teacher_text_prompt_lr,
+        "--text_prompt_gate_init": args.text_prompt_gate_init,
+        "--text_prompt_instance_temperature": (
+            args.text_prompt_instance_temperature
+        ),
+        "--text_prompt_aspect_temperature": (
+            args.text_prompt_aspect_temperature
+        ),
+        "--text_prompt_gradient_clip": args.text_prompt_gradient_clip,
+        "--text_prompt_kd_temperature": args.text_prompt_kd_temperature,
     }
     for name, value in positive_values.items():
         if value <= 0:
@@ -273,6 +342,14 @@ def validate_args(parser, args):
         "--lambda_teacher_retrieval": args.lambda_teacher_retrieval,
         "--lambda_domain": args.lambda_domain,
         "--lambda_modality": args.lambda_modality,
+        "--text_prompt_weight_decay": args.text_prompt_weight_decay,
+        "--teacher_text_prompt_weight_decay": (
+            args.teacher_text_prompt_weight_decay
+        ),
+        "--text_prompt_diversity_weight": (
+            args.text_prompt_diversity_weight
+        ),
+        "--lambda_text_prompt_kd": args.lambda_text_prompt_kd,
     }
     for name, value in nonnegative_values.items():
         if value < 0:
@@ -289,7 +366,13 @@ def validate_args(parser, args):
         parser.error("--adapter_dropout must be less than 1.")
     if args.teacher_adapter_dropout >= 1:
         parser.error("--teacher_adapter_dropout must be less than 1.")
-    if args.lambda_domain == 0 and args.lambda_modality == 0:
+    if not 0 <= args.text_prompt_dropout < 1:
+        parser.error("--text_prompt_dropout must be in [0, 1).")
+    if (
+        args.text_prompt_aspects == 0
+        and args.lambda_domain == 0
+        and args.lambda_modality == 0
+    ):
         parser.error("At least one student distillation loss must be active.")
 
 
@@ -299,7 +382,14 @@ def main():
     validate_args(parser, args)
     train_loader, val_sketch_loader, val_photo_loader = get_loaders(args)
 
-    if not args.teacher_cache_path and args.teacher_pretrain_epochs > 0:
+    teacher_training_active = (
+        args.teacher_pretrain_epochs > 0
+        or (
+            args.text_prompt_aspects > 0
+            and args.teacher_text_prompt_epochs > 0
+        )
+    )
+    if not args.teacher_cache_path and teacher_training_active:
         args.teacher_cache_path = default_teacher_cache_path(
             args, train_loader.dataset
         )
@@ -311,11 +401,11 @@ def main():
     if (
         args.teacher_cache_path
         and (args.rebuild_teacher_cache or not cache_exists)
-        and args.teacher_pretrain_epochs == 0
+        and not teacher_training_active
     ):
         parser.error(
             "Creating a persistent teacher cache requires "
-            "--teacher_pretrain_epochs greater than 0."
+            "teacher visual or text pretraining epochs greater than 0."
         )
     if args.rebuild_teacher_cache and not args.teacher_cache_path:
         parser.error("--rebuild_teacher_cache requires a cache path.")
@@ -342,7 +432,9 @@ def main():
         callbacks=[checkpoint_callback, TQDMProgressBar(refresh_rate=20)],
     )
     model = FineGrainedZS_SBIR(
-        args=args, classnames=train_loader.dataset.all_categories
+        args=args,
+        classnames=train_loader.dataset.all_categories,
+        unseen_classnames=train_loader.dataset.index.unseen_categories,
     )
     if os.path.isfile(args.ckpt_path):
         print(f"Resuming training from {args.ckpt_path}")

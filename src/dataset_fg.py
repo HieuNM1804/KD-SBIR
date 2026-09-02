@@ -225,6 +225,7 @@ class FineGrainedTrainDataset(torch.utils.data.Dataset):
 
         self.teacher_sketch_features = None
         self.teacher_photo_features = None
+        self.teacher_photo_text_aspects = None
 
     def set_teacher_features(self, sketch_features, photo_features):
         if len(sketch_features) != len(self.all_sketches_path):
@@ -233,6 +234,15 @@ class FineGrainedTrainDataset(torch.utils.data.Dataset):
             raise ValueError("Photo feature cache has the wrong length.")
         self.teacher_sketch_features = sketch_features
         self.teacher_photo_features = photo_features
+
+    def set_teacher_text_aspects(self, photo_text_aspects):
+        if len(photo_text_aspects) != len(self.all_photo_paths):
+            raise ValueError("Teacher photo text-aspect cache has the wrong length.")
+        if photo_text_aspects.ndim != 3:
+            raise ValueError(
+                "Teacher photo text aspects must have shape [photos, R, D]."
+            )
+        self.teacher_photo_text_aspects = photo_text_aspects
 
     def __len__(self):
         return len(self.all_sketches_path)
@@ -271,6 +281,12 @@ class FineGrainedTrainDataset(torch.utils.data.Dataset):
             teacher_photos = torch.empty(0)
         else:
             teacher_photos = self.teacher_photo_features[photo_indices]
+        if self.teacher_photo_text_aspects is None:
+            teacher_photo_text_aspects = torch.empty(0)
+        else:
+            teacher_photo_text_aspects = self.teacher_photo_text_aspects[
+                photo_indices
+            ]
 
         return (
             photos,
@@ -279,6 +295,7 @@ class FineGrainedTrainDataset(torch.utils.data.Dataset):
             torch.stack(teacher_sketches),
             torch.full((len(samples),), category, dtype=torch.long),
             torch.as_tensor(targets, dtype=torch.long),
+            teacher_photo_text_aspects,
         )
 
 

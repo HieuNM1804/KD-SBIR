@@ -23,6 +23,7 @@ from src.model_fg import (
     better_acc1_acc5,
     default_teacher_cache_path,
     fine_grained_accuracy,
+    fine_grained_multi_aspect_accuracy,
     fine_grained_train_metric_ids,
 )
 from src.model import _reduce_on_plateau_patience
@@ -221,7 +222,7 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         query[1, 1] = 1.0
         query[2, :5] = torch.tensor([6.0, 5.0, 4.0, 3.0, 2.0])
         query[2, 5] = 1.0
-        acc1, acc5 = fine_grained_accuracy(
+        accuracies = fine_grained_accuracy(
             query,
             gallery,
             torch.zeros(3, dtype=torch.long),
@@ -229,8 +230,9 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             torch.tensor([0, 1, 5]),
             torch.arange(100),
         )
-        self.assertAlmostEqual(acc1.item(), 1 / 3, places=6)
-        self.assertAlmostEqual(acc5.item(), 2 / 3, places=6)
+        self.assertAlmostEqual(accuracies[1].item(), 1 / 3, places=6)
+        self.assertAlmostEqual(accuracies[5].item(), 2 / 3, places=6)
+        self.assertAlmostEqual(accuracies[10].item(), 1.0, places=6)
 
     def test_seen_metric_ids_preserve_category_local_photo_targets(self):
         dataset = SimpleNamespace(
@@ -258,6 +260,23 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         )
         self.assertTrue(torch.equal(photo_instances[:100], torch.arange(100)))
         self.assertTrue(torch.equal(photo_instances[100:], torch.arange(100)))
+
+    def test_multi_aspect_accuracy_uses_best_matching_aspect(self):
+        gallery = torch.zeros(100, 2, 100)
+        gallery[:, 0] = torch.eye(100)
+        gallery[:, 1] = -torch.eye(100)
+        query = torch.eye(100)[[7, 31]]
+        accuracies = fine_grained_multi_aspect_accuracy(
+            query,
+            gallery,
+            torch.zeros(2, dtype=torch.long),
+            torch.zeros(100, dtype=torch.long),
+            torch.tensor([7, 31]),
+            torch.arange(100),
+            aspect_temperature=0.01,
+        )
+        for top_k in (1, 5, 10, 20, 30, 40, 50):
+            self.assertEqual(accuracies[top_k].item(), 1.0)
 
     def test_teacher_train_evaluation_uses_supported_modalities(self):
         model = FineGrainedCustomCLIP.__new__(FineGrainedCustomCLIP)
@@ -288,15 +307,15 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             sample_local_photo_indices=[0],
             category_to_photo_indices={0: list(range(100))},
         )
-        acc1, acc5 = model._validate_teacher_train(
+        accuracies = model._validate_teacher_train(
             dataset,
             epoch=1,
             workers=0,
             show_progress=False,
         )
         self.assertEqual([modality for modality, _ in calls], ["sketch", "photo"])
-        self.assertEqual(acc1, 1.0)
-        self.assertEqual(acc5, 1.0)
+        self.assertEqual(accuracies[1], 1.0)
+        self.assertEqual(accuracies[5], 1.0)
         self.assertFalse(model.teacher_prompts.training)
 
 

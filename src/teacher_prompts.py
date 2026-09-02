@@ -116,10 +116,11 @@ class TeacherPromptController(nn.Module):
     def trainable_parameter_count(self):
         return sum(parameter.numel() for parameter in self.parameters())
 
-    def forward(self, images, modality):
+    def forward(self, images, modality, return_patch_tokens=False):
         visual = self._visual
         x = visual.conv1(images)
         x = x.reshape(x.shape[0], x.shape[1], -1).permute(0, 2, 1)
+        spatial_token_count = x.shape[1]
         class_token = visual.class_embedding.to(dtype=x.dtype)
         class_token = class_token.unsqueeze(0).expand(x.shape[0], -1, -1)
         x = torch.cat((class_token, x), dim=1)
@@ -163,7 +164,15 @@ class TeacherPromptController(nn.Module):
             pooled = pooled @ visual.proj
         if self.output_adapters is not None:
             pooled = self.output_adapters(pooled, modality)
-        return pooled
+        if not return_patch_tokens:
+            return pooled
+
+        # Prompt tokens live after the original CLS + spatial sequence. They
+        # must not masquerade as image evidence for the text prompt generator.
+        patch_tokens = x[:, 1 : 1 + spatial_token_count]
+        if not visual.final_ln_after_pool and visual.attn_pool is None:
+            patch_tokens = visual.ln_post(patch_tokens)
+        return pooled, patch_tokens
 
 
 def build_teacher_prompt_controller(

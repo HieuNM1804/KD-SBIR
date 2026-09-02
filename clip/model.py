@@ -110,10 +110,12 @@ class VisionTransformer(nn.Module):
         x: torch.Tensor,
         prompt: torch.Tensor = None,
         compound_prompts=None,
+        return_patch_tokens: bool = False,
     ):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
+        spatial_token_count = x.shape[1]
         x = torch.cat(
             [
                 self.class_embedding.to(x.dtype)
@@ -168,12 +170,18 @@ class VisionTransformer(nn.Module):
             x = block(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
 
-        x = self.ln_post(x[:, 0, :])
+        pooled = self.ln_post(x[:, 0, :])
 
         if self.proj is not None:
-            x = x @ self.proj
+            pooled = pooled @ self.proj
 
-        return x
+        if not return_patch_tokens:
+            return pooled
+
+        # Visual prompts are appended after the original spatial sequence.
+        # Only return real image patches to an image-conditioned text prompt.
+        patch_tokens = self.ln_post(x[:, 1 : 1 + spatial_token_count, :])
+        return pooled, patch_tokens
 
 
 class CLIP(nn.Module):

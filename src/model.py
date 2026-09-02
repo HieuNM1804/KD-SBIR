@@ -268,6 +268,7 @@ def _load_teacher(args):
         args.lambda_domain <= 0
         and not _image_text_kd_active(args)
         and args.teacher_pretrain_epochs == 0
+        and getattr(args, "teacher_text_prompt_epochs", 0) == 0
     ):
         return None
 
@@ -279,7 +280,11 @@ def _load_teacher(args):
         device=device,
     )
     teacher.eval().requires_grad_(False)
-    if args.teacher_pretrain_epochs > 0 or _image_text_kd_active(args):
+    if (
+        args.teacher_pretrain_epochs > 0
+        or _image_text_kd_active(args)
+        or getattr(args, "teacher_text_prompt_epochs", 0) > 0
+    ):
         teacher.text_tokenizer = open_clip.get_tokenizer(DFN5B_MODEL)
     teacher.output_dim = DFN5B_OUTPUT_DIM
     return teacher
