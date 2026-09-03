@@ -16,6 +16,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from src.dataset import TrainDataset, ValidDataset, WorkerInvariantSampler
 from src.data_config import UNSEEN_CLASSES
+from src.losses import FEATURE_LOSS_CHOICES
 from src.model import ZS_SBIR, default_teacher_cache_path
 
 
@@ -41,6 +42,24 @@ def seed_worker(_worker_id):
     random.seed(worker_seed)
 
 
+def add_feature_distillation_args(parser):
+    """Register the mutually exclusive feature-distillation configuration."""
+    parser.add_argument(
+        "--feature_loss",
+        type=str,
+        default="mse",
+        choices=FEATURE_LOSS_CHOICES,
+        help="Feature matching objective; each run uses exactly one choice.",
+    )
+    parser.add_argument(
+        "--lambda_fd",
+        type=float,
+        default=1.0,
+        help="Weight for the photo/sketch feature-distillation loss.",
+    )
+    return parser
+
+
 def get_loaders(args):
     seed_everything(args.seed)
     
@@ -61,7 +80,7 @@ def get_loaders(args):
         batch_size=args.batch_size,
         shuffle=False,
         sampler=WorkerInvariantSampler(train_dataset, args.seed),
-        drop_last=True,  # RKD requires complete batches with at least two samples.
+        drop_last=True,
         generator=torch.Generator().manual_seed(args.seed),
         **loader_kwargs,
     )
@@ -277,58 +296,16 @@ if __name__ == "__main__":
         help="Weight for the teacher prompt retrieval loss.",
     )
     parser.add_argument("--teacher_triplet_margin", type=float, default=0.2)
-    parser.add_argument(
-        "--lambda_domain",
-        type=float,
-        default=3.0,
-        help="Weight for sketch-photo domain distillation.",
-    )
-    parser.add_argument(
-        "--kd_temperature",
-        type=float,
-        default=0.07,
-        help="Temperature for the sketch-photo similarity distribution.",
-    )
-    parser.add_argument(
-        "--lambda_modality",
-        type=float,
-        default=0.0,
-        help=(
-            "Shared weight for the sum of photo-text and sketch-text "
-            "modality distillation losses."
-        ),
-    )
-    parser.add_argument(
-        "--image_text_kd_temperature",
-        type=float,
-        default=0.1,
-        help="Shared fallback temperature for photo-text and sketch-text KD.",
-    )
-    parser.add_argument(
-        "--photo_text_kd_temperature",
-        type=float,
-        default=None,
-        help="Photo-text KD temperature; defaults to the shared temperature.",
-    )
-    parser.add_argument(
-        "--sketch_text_kd_temperature",
-        type=float,
-        default=None,
-        help="Sketch-text KD temperature; defaults to the shared temperature.",
-    )
+    add_feature_distillation_args(parser)
     parser.add_argument(
         "--exp_name",
         type=str,
-        default="teacher_visual_student_visual_only",
+        default="clip_kd_feature_distillation",
     )
 
     args = parser.parse_args()
     if args.teacher_prompt_seed is None:
         args.teacher_prompt_seed = args.seed
-    if args.photo_text_kd_temperature is None:
-        args.photo_text_kd_temperature = args.image_text_kd_temperature
-    if args.sketch_text_kd_temperature is None:
-        args.sketch_text_kd_temperature = args.image_text_kd_temperature
     if args.n_ctx_visual < 0:
         parser.error("--n_ctx_visual must be greater than or equal to 0.")
     if args.prompt_depth < 1:
@@ -359,16 +336,8 @@ if __name__ == "__main__":
         parser.error("--teacher_scheduler_step_size must be at least 1.")
     if args.teacher_scheduler_gamma <= 0:
         parser.error("--teacher_scheduler_gamma must be greater than 0.")
-    if args.lambda_domain < 0:
-        parser.error("--lambda_domain must be non-negative.")
-    if args.lambda_modality < 0:
-        parser.error("--lambda_modality must be non-negative.")
-    if args.image_text_kd_temperature <= 0:
-        parser.error("--image_text_kd_temperature must be greater than 0.")
-    if args.photo_text_kd_temperature <= 0:
-        parser.error("--photo_text_kd_temperature must be greater than 0.")
-    if args.sketch_text_kd_temperature <= 0:
-        parser.error("--sketch_text_kd_temperature must be greater than 0.")
+    if args.lambda_fd <= 0:
+        parser.error("--lambda_fd must be greater than 0.")
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
 
     checkpoint_callback = ModelCheckpoint(

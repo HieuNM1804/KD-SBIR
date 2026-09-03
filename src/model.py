@@ -36,6 +36,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DFN5B_MODEL = "ViT-H-14-quickgelu"
 DFN5B_PRETRAINED = "dfn5b"
 DFN5B_OUTPUT_DIM = 1024
+STUDENT_OUTPUT_DIM = 512
 TEACHER_CACHE_FORMAT_VERSION = 6
 
 
@@ -150,8 +151,8 @@ def default_teacher_cache_path(args, train_dataset):
     return str(Path(cache_dir) / f"{args.dataset}_{config_hash}.pt")
 
 
-def _image_text_kd_active(args):
-    return args.lambda_modality > 0
+def _feature_kd_active(args):
+    return args.lambda_fd > 0
 
 
 def _persistent_teacher_cache_available(args):
@@ -201,11 +202,7 @@ def _load_teacher(args):
         )
         return None
 
-    if (
-        args.lambda_domain <= 0
-        and not _image_text_kd_active(args)
-        and args.teacher_pretrain_epochs == 0
-    ):
+    if not _feature_kd_active(args) and args.teacher_pretrain_epochs == 0:
         return None
 
     print(f"[Teacher] Loading {DFN5B_MODEL} in FP16...")
@@ -216,7 +213,7 @@ def _load_teacher(args):
         device=device,
     )
     teacher.eval().requires_grad_(False)
-    if args.teacher_pretrain_epochs > 0 or _image_text_kd_active(args):
+    if args.teacher_pretrain_epochs > 0:
         teacher.text_tokenizer = open_clip.get_tokenizer(DFN5B_MODEL)
     teacher.output_dim = DFN5B_OUTPUT_DIM
     return teacher
@@ -261,6 +258,21 @@ class IndependentVisualPromptLearner(nn.Module):
         return self.ctx, list(self.compound_prompts)
 
 
+class SharedFeatureProjector(nn.Module):
+    """Shared train-time projection from CLIP student to teacher space."""
+
+    def __init__(
+        self,
+        input_dim=STUDENT_OUTPUT_DIM,
+        output_dim=DFN5B_OUTPUT_DIM,
+    ):
+        super().__init__()
+        self.projection = nn.Linear(input_dim, output_dim)
+
+    def forward(self, features):
+        return self.projection(features.float())
+
+
 class CustomCLIP(nn.Module):
     def __init__(
         self,
@@ -281,9 +293,6 @@ class CustomCLIP(nn.Module):
             clip_model.visual.transformer.layers,
         )
         self.classnames = tuple(classnames)
-        self.image_text_kd_active = _image_text_kd_active(cfg)
-        self.photo_text_active = self.image_text_kd_active
-        self.sketch_text_active = self.image_text_kd_active
         self.photo_visual_prompt = IndependentVisualPromptLearner(
             cfg.n_ctx_visual,
             visual_width,
@@ -296,33 +305,15 @@ class CustomCLIP(nn.Module):
             cfg.seed + 202,
             prompt_depth,
         )
-        photo_texts = [
-            f"a photo of a {name.replace('_', ' ')}."
-            for name in self.classnames
-        ]
-        sketch_texts = [
-            f"a sketch of a {name.replace('_', ' ')}."
-            for name in self.classnames
-        ]
-        self.register_buffer(
-            "_student_photo_tokens",
-            clip.tokenize(photo_texts),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_student_sketch_tokens",
-            clip.tokenize(sketch_texts),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_student_photo_text_features",
-            None,
-            persistent=False,
-        )
-        self.register_buffer(
-            "_student_sketch_text_features",
-            None,
-            persistent=False,
+        student_output_dim = clip_model.visual.output_dim
+        if student_output_dim != STUDENT_OUTPUT_DIM:
+            raise ValueError(
+                "This experiment requires a 512-dimensional CLIP student; "
+                f"got {student_output_dim}."
+            )
+        self.feature_projector = SharedFeatureProjector(
+            student_output_dim,
+            DFN5B_OUTPUT_DIM,
         )
 
         # The pretrained teacher is reloaded when needed and must not be saved
@@ -336,21 +327,15 @@ class CustomCLIP(nn.Module):
         self.register_buffer("_teacher_photo_text", None, persistent=False)
 
         print(
-            "[Student] frozen text encoder with fixed modality templates; "
-            "independent deep visual prompts; "
+            "[Student] frozen CLIP backbone; independent deep visual prompts; "
             f"n_ctx_visual={cfg.n_ctx_visual}, "
             f"prompt_depth={prompt_depth}"
         )
         print(
-            "[Domain KD] sketch-photo branch -> "
-            f"active={self.teacher_active}, lambda={cfg.lambda_domain}, "
-            f"temperature={cfg.kd_temperature}"
-        )
-        print(
-            "[Modality KD] photo-text + sketch-text -> "
-            f"lambda={cfg.lambda_modality}, "
-            f"photo_temperature={cfg.photo_text_kd_temperature}, "
-            f"sketch_temperature={cfg.sketch_text_kd_temperature}"
+            "[Feature KD] shared photo/sketch projector "
+            f"{student_output_dim}->{DFN5B_OUTPUT_DIM}; "
+            f"loss={cfg.feature_loss}, lambda={cfg.lambda_fd}, "
+            f"trainable_params={sum(p.numel() for p in self.feature_projector.parameters()):,}"
         )
 
     @staticmethod
@@ -746,7 +731,9 @@ class CustomCLIP(nn.Module):
                 show_progress,
             )
 
-        if self.image_text_kd_active or self.cfg.teacher_pretrain_epochs > 0:
+        # Preserve the main-branch cache format so the same teacher cache can
+        # be reused safely by this experiment and by the original pipeline.
+        if self.cfg.teacher_pretrain_epochs > 0:
             self.get_teacher_text_features()
 
         sketch_features = self._materialize_teacher_features(
@@ -830,19 +817,6 @@ class CustomCLIP(nn.Module):
             return self.photo_visual_prompt()
         return self.sketch_visual_prompt()
 
-    def get_student_text_features(self, modality):
-        feature_name = f"_student_{modality}_text_features"
-        features = getattr(self, feature_name)
-        if features is None:
-            tokens = getattr(self, f"_student_{modality}_tokens")
-            with torch.no_grad():
-                features = F.normalize(
-                    self.clip_model.encode_text(tokens).float(),
-                    dim=-1,
-                )
-            setattr(self, feature_name, features)
-        return features
-
     def encode_student_image(self, image, modality):
         visual_prompt, compound_prompts = self.get_visual_prompt(modality)
         features = self.clip_model.visual(
@@ -862,38 +836,17 @@ class CustomCLIP(nn.Module):
         ) = x
         photo_features = self.encode_student_image(photo_tensor, "photo")
         sketch_features = self.encode_student_image(sk_tensor, "sketch")
-        student_photo_text = (
-            F.normalize(self.get_student_text_features("photo"), dim=-1)
-            if self.photo_text_active
-            else None
-        )
-        student_sketch_text = (
-            F.normalize(self.get_student_text_features("sketch"), dim=-1)
-            if self.sketch_text_active
-            else None
-        )
-        teacher_photo_features = photo_features.detach()
-        teacher_sketch_features = sketch_features.detach()
-        teacher_sketch_text = None
-        teacher_photo_text = None
-        if self.teacher_active:
-            teacher_photo_features = teacher_photo_base
-            teacher_sketch_features = teacher_sketch_base
-            if self.image_text_kd_active:
-                teacher_sketch_text, teacher_photo_text = (
-                    self.get_teacher_text_features()
-                )
+        if not self.teacher_active:
+            raise RuntimeError(
+                "Feature distillation requires an active teacher or a "
+                "compatible persistent teacher cache."
+            )
 
         return (
-            photo_features,
-            sketch_features,
-            teacher_photo_features,
-            teacher_sketch_features,
-            self.teacher_active,
-            student_sketch_text,
-            student_photo_text,
-            teacher_sketch_text,
-            teacher_photo_text,
+            self.feature_projector(photo_features),
+            self.feature_projector(sketch_features),
+            teacher_photo_base,
+            teacher_sketch_base,
         )
 
     def extract_feature(self, image, modality):
@@ -904,6 +857,12 @@ class ZS_SBIR(pl.LightningModule):
     def __init__(self, args, classnames):
         super().__init__()
         self.args = args
+        self.save_hyperparameters(
+            {
+                "feature_loss": args.feature_loss,
+                "lambda_fd": args.lambda_fd,
+            }
+        )
         clip_model = _load_clip_model(args.backbone)
 
         self.distance_fn = lambda x, y: F.cosine_similarity(x, y)
@@ -987,8 +946,9 @@ class ZS_SBIR(pl.LightningModule):
         loss, loss_dict = loss_fn(self.args, features)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         bar_names = {
-            "domain_kd": "DOMAIN",
-            "modality_kd": "MODALITY",
+            "fd_photo": "FD_PHOTO",
+            "fd_sketch": "FD_SKETCH",
+            "fd": "FD",
         }
         for key, bar_name in bar_names.items():
             self.log(

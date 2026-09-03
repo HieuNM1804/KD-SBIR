@@ -1,23 +1,33 @@
-# KD-SBIR: Teacher Visual Prompts, Student Visual-Only Prompts
+# CLIP-KD Feature Distillation for ZS-SBIR
 
-This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from
-`experiment/teacher-visual-prompt-tuning`. The teacher has separate photo and
-sketch deep visual prompts, learns only from retrieval triplet loss, and is
-validated on the unseen retrieval split after each pretraining epoch.
+This experiment compares two direct feature-distillation objectives while
+keeping the teacher, student, data split, prompts, optimizer, and evaluation
+protocol fixed.
 
-The student CLIP backbone is fully frozen. Its only trainable parameters are
-independent photo and sketch deep visual prompts. The student text encoder has
-no learnable prompt tokens and remains fully frozen. Image-text distillation
-uses fixed CLIP features from these modality-specific templates:
+- Teacher: frozen DFN5B ViT-H/14 image features (1024 dimensions).
+- Student: frozen OpenAI CLIP ViT-B/32 with independent trainable photo and
+  sketch deep visual prompts (512 dimensions).
+- Alignment: one trainable `Linear(512, 1024)` shared by photo and sketch.
+- Inference: raw 512-dimensional student embeddings; the projector is not used.
 
-- `a photo of a {class}.`
-- `a sketch of a {class}.`
+Both sides are L2-normalized before matching. A run uses exactly one objective:
 
-The student objectives are sketch-photo relational KD, photo-text KD, and
-sketch-text KD. Setting an objective weight to zero disables that objective.
+```text
+MSE:    0.5 * (MSE(student_photo, teacher_photo)
+             + MSE(student_sketch, teacher_sketch))
+
+Cosine: 0.5 * ((1 - cosine(student_photo, teacher_photo))
+             + (1 - cosine(student_sketch, teacher_sketch)))
+```
+
+The teacher cache remains byte-layout compatible with `main`, including its
+text tensors, although this branch does not use text, relational, or modality
+distillation during student training.
+
+## MSE run
 
 ```bash
-!python -m src.train \
+python -m src.train \
     --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
     --dataset sketchy_1 \
     --epochs 7 \
@@ -26,10 +36,8 @@ sketch-text KD. Setting an objective weight to zero disables that objective.
     --test_batch_size 1024 \
     --n_ctx_visual 3 \
     --prompt_depth 12 \
-    --lambda_domain 1.0 \
-    --lambda_modality 1.0 \
-    --photo_text_kd_temperature 0.2 \
-    --sketch_text_kd_temperature 0.02 \
+    --feature_loss mse \
+    --lambda_fd 1.0 \
     --lr 1e-3 \
     --momentum 0.94 \
     --weight_decay 1e-3 \
@@ -45,18 +53,20 @@ sketch-text KD. Setting an objective weight to zero disables that objective.
     --lambda_teacher_retrieval 1.5 \
     --teacher_triplet_margin 0.2 \
     --seed 42 \
-    --exp_name teacher_visual_student_visual_only \
+    --exp_name clip_kd_fd_mse \
     --progress
 ```
 
-Teacher caches are named from the dataset and complete teacher configuration.
-Changing only student prompts, losses, or optimizer settings reuses a compatible
-teacher cache. Use `--rebuild_teacher_cache` only when intentionally replacing
-that cache.
+## Cosine run
 
-Teacher prompt pretraining keeps the epoch with the highest unseen P@K, restores
-that prompt state, and materializes the distillation cache from it. Student
-checkpoints are also ranked by unseen P@K instead of mAP. Ties keep the earlier
-teacher epoch. Neither state cloning nor checkpoint serialization consumes RNG.
-Because unseen labels determine both selections, this setting has test-set
-model-selection leakage and is not a strict inductive ZS-SBIR protocol.
+Use the same command and change only:
+
+```bash
+    --feature_loss cosine \
+    --lambda_fd 1.0 \
+    --exp_name clip_kd_fd_cosine
+```
+
+The logged training metrics are `FD_PHOTO`, `FD_SKETCH`, `FD`, and
+`train_loss`. Retrieval evaluation remains `mAP@200` and `P@200` for
+`sketchy_2`, with the existing metrics for the other configured splits.
