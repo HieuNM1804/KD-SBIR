@@ -9,6 +9,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
+from clip import clip
 from src.dataset_fg import FineGrainedFullGalleryBatchSampler
 from src.losses_fg import (
     fine_grained_distillation_loss,
@@ -22,6 +23,10 @@ from src.model import (
     _reduce_on_plateau_patience,
     _teacher_optimizer_parameter_groups,
     _teacher_training_config,
+)
+from src.patch_prompts import (
+    SharedImageConditionedPrompt,
+    shared_prompt_infonce_loss,
 )
 
 
@@ -202,6 +207,171 @@ def default_teacher_cache_path(args, train_dataset):
 
 
 class FineGrainedCustomCLIP(CustomCLIP):
+    def __init__(
+        self,
+        cfg,
+        clip_model,
+        classnames,
+        unseen_classnames,
+        teacher=None,
+    ):
+        super().__init__(cfg, clip_model, classnames, teacher)
+        self.unseen_classnames = tuple(unseen_classnames)
+        self.shared_patch_prompt = None
+        if cfg.patch_prompt_context_tokens > 0:
+            visual_width = clip_model.visual.ln_pre.normalized_shape[0]
+            self.shared_patch_prompt = SharedImageConditionedPrompt(
+                text_model=clip_model,
+                tokenizer=clip.tokenize,
+                seen_classnames=self.classnames,
+                unseen_classnames=self.unseen_classnames,
+                visual_width=visual_width,
+                latent_width=cfg.patch_prompt_latent_width,
+                context_tokens=cfg.patch_prompt_context_tokens,
+                heads=cfg.patch_prompt_heads,
+                dropout=cfg.patch_prompt_dropout,
+                gate_init=cfg.patch_prompt_gate_init,
+                seed=cfg.patch_prompt_seed,
+                encode_chunk_size=cfg.patch_prompt_encode_chunk_size,
+            )
+            print(
+                "[Shared Patch Prompt] one projector for photo + sketch; "
+                f"all patches -> M={cfg.patch_prompt_context_tokens} text "
+                f"tokens (latent={cfg.patch_prompt_latent_width}, "
+                f"heads={cfg.patch_prompt_heads}, "
+                f"trainable_params="
+                f"{self.shared_patch_prompt.trainable_parameter_count():,}); "
+                "patches_detached=True"
+            )
+
+    @property
+    def patch_prompt_active(self):
+        return self.shared_patch_prompt is not None
+
+    def encode_student_image(
+        self,
+        image,
+        modality,
+        return_patch_tokens=False,
+    ):
+        visual_prompt, compound_prompts = self.get_visual_prompt(modality)
+        output = self.clip_model.visual(
+            image.type(self.dtype),
+            visual_prompt,
+            compound_prompts,
+            return_patch_tokens=return_patch_tokens,
+        )
+        if return_patch_tokens:
+            features, patch_tokens = output
+        else:
+            features = output
+        features = self.apply_student_output_adapter(features, modality)
+        features = F.normalize(features.float(), dim=-1)
+        if return_patch_tokens:
+            return features, patch_tokens
+        return features
+
+    def prompt_features(self, patch_tokens, categories, split):
+        if self.shared_patch_prompt is None:
+            return None
+        features, _ = self.shared_patch_prompt(
+            self.clip_model,
+            patch_tokens,
+            categories,
+            split=split,
+        )
+        return features
+
+    def forward(self, x):
+        (
+            photo_tensor,
+            sketch_tensor,
+            teacher_photo_base,
+            teacher_sketch_base,
+            categories,
+        ) = x
+        if self.patch_prompt_active:
+            photo_features, photo_patches = self.encode_student_image(
+                photo_tensor,
+                "photo",
+                return_patch_tokens=True,
+            )
+            sketch_features, sketch_patches = self.encode_student_image(
+                sketch_tensor,
+                "sketch",
+                return_patch_tokens=True,
+            )
+            photo_categories = categories[:1].expand(len(photo_tensor))
+            photo_prompt_features = self.prompt_features(
+                photo_patches,
+                photo_categories,
+                split="seen",
+            )
+            sketch_prompt_features = self.prompt_features(
+                sketch_patches,
+                categories,
+                split="seen",
+            )
+        else:
+            photo_features = self.encode_student_image(photo_tensor, "photo")
+            sketch_features = self.encode_student_image(
+                sketch_tensor, "sketch"
+            )
+            photo_prompt_features = None
+            sketch_prompt_features = None
+
+        student_photo_text = (
+            F.normalize(self.get_student_text_features("photo"), dim=-1)
+            if self.photo_text_active
+            else None
+        )
+        student_sketch_text = (
+            F.normalize(self.get_student_text_features("sketch"), dim=-1)
+            if self.sketch_text_active
+            else None
+        )
+        teacher_photo_features = photo_features.detach()
+        teacher_sketch_features = sketch_features.detach()
+        teacher_sketch_text = None
+        teacher_photo_text = None
+        if self.teacher_active:
+            teacher_photo_features = teacher_photo_base
+            teacher_sketch_features = teacher_sketch_base
+            if self.image_text_kd_active:
+                teacher_sketch_text, teacher_photo_text = (
+                    self.get_teacher_text_features()
+                )
+
+        return (
+            photo_features,
+            sketch_features,
+            teacher_photo_features,
+            teacher_sketch_features,
+            self.teacher_active,
+            student_sketch_text,
+            student_photo_text,
+            teacher_sketch_text,
+            teacher_photo_text,
+            sketch_prompt_features,
+            photo_prompt_features,
+        )
+
+    def extract_feature_and_prompt(
+        self,
+        image,
+        modality,
+        categories,
+        split="unseen",
+    ):
+        if not self.patch_prompt_active:
+            return self.encode_student_image(image, modality), None
+        features, patches = self.encode_student_image(
+            image,
+            modality,
+            return_patch_tokens=True,
+        )
+        return features, self.prompt_features(patches, categories, split)
+
     def _teacher_cache_metadata(self, train_dataset):
         return {
             "format_version": FG_CACHE_FORMAT_VERSION,
@@ -541,7 +711,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
 
 
 class FineGrainedZS_SBIR(pl.LightningModule):
-    def __init__(self, args, classnames):
+    def __init__(self, args, classnames, unseen_classnames=()):
         super().__init__()
         self.args = args
         clip_model = _load_clip_model(args.backbone)
@@ -550,6 +720,7 @@ class FineGrainedZS_SBIR(pl.LightningModule):
             cfg=args,
             clip_model=clip_model,
             classnames=classnames,
+            unseen_classnames=unseen_classnames,
             teacher=teacher,
         )
         self.best_acc1 = 0.0
@@ -582,10 +753,20 @@ class FineGrainedZS_SBIR(pl.LightningModule):
             else []
         )
         adapter_ids = {id(parameter) for parameter in adapter_parameters}
+        patch_prompt_parameters = (
+            list(self.model.shared_patch_prompt.parameters())
+            if getattr(self.model, "shared_patch_prompt", None) is not None
+            else []
+        )
+        patch_prompt_ids = {
+            id(parameter) for parameter in patch_prompt_parameters
+        }
         prompt_parameters = [
             parameter
             for parameter in self.model.parameters()
-            if parameter.requires_grad and id(parameter) not in adapter_ids
+            if parameter.requires_grad
+            and id(parameter) not in adapter_ids
+            and id(parameter) not in patch_prompt_ids
         ]
         param_groups = [
             {
@@ -604,6 +785,15 @@ class FineGrainedZS_SBIR(pl.LightningModule):
                     "name": "adapters",
                 }
             )
+        if patch_prompt_parameters:
+            param_groups.append(
+                {
+                    "params": patch_prompt_parameters,
+                    "lr": self.args.patch_prompt_lr,
+                    "weight_decay": self.args.patch_prompt_weight_decay,
+                    "name": "shared_patch_prompt",
+                }
+            )
         optimizer = torch.optim.SGD(
             param_groups,
             lr=self.args.lr,
@@ -615,6 +805,9 @@ class FineGrainedZS_SBIR(pl.LightningModule):
         adapter_trainable = sum(
             parameter.numel() for parameter in adapter_parameters
         )
+        patch_prompt_trainable = sum(
+            parameter.numel() for parameter in patch_prompt_parameters
+        )
         print(
             "[Optimizer] SGD "
             f"lr={self.args.lr}, momentum={self.args.momentum}, "
@@ -622,7 +815,12 @@ class FineGrainedZS_SBIR(pl.LightningModule):
             f"prompt_params={prompt_trainable:,}, "
             f"adapter_lr={self.args.adapter_lr}, "
             f"adapter_weight_decay={self.args.adapter_weight_decay}, "
-            f"adapter_params={adapter_trainable:,}"
+            f"adapter_params={adapter_trainable:,}, "
+            "patch_prompt_lr="
+            f"{getattr(self.args, 'patch_prompt_lr', 0.0)}, "
+            "patch_prompt_weight_decay="
+            f"{getattr(self.args, 'patch_prompt_weight_decay', 0.0)}, "
+            f"patch_prompt_params={patch_prompt_trainable:,}"
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
@@ -645,11 +843,30 @@ class FineGrainedZS_SBIR(pl.LightningModule):
         }
 
     def training_step(self, batch, batch_idx):
-        photo, sketch, teacher_photo, teacher_sketch, categories, _ = batch
+        (
+            photo,
+            sketch,
+            teacher_photo,
+            teacher_sketch,
+            categories,
+            targets,
+        ) = batch
         features = self.model(
             (photo, sketch, teacher_photo, teacher_sketch, categories)
         )
-        loss, loss_dict = fine_grained_distillation_loss(self.args, features)
+        loss, loss_dict = fine_grained_distillation_loss(
+            self.args, features[:9]
+        )
+        prompt_loss = loss.new_zeros(())
+        sketch_prompt_features, photo_prompt_features = features[9:]
+        if self.model.patch_prompt_active:
+            prompt_loss = shared_prompt_infonce_loss(
+                sketch_prompt_features,
+                photo_prompt_features,
+                targets,
+                self.args.patch_prompt_temperature,
+            )
+            loss = loss + self.args.lambda_patch_prompt * prompt_loss
         self.log("train_loss", loss, on_step=False, on_epoch=True)
         self.log(
             "DOMAIN",
@@ -665,13 +882,34 @@ class FineGrainedZS_SBIR(pl.LightningModule):
             on_epoch=False,
             prog_bar=True,
         )
+        self.log(
+            "PROMPT_NCE",
+            prompt_loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=self.model.patch_prompt_active,
+        )
         return loss
 
     def validation_step(self, batch, batch_idx, dataloader_idx):
         images, categories, instances = batch
         modality = "sketch" if dataloader_idx == 0 else "photo"
-        features = self.model.extract_feature(images, modality)
-        output = (features.detach(), categories.detach(), instances.detach())
+        features, prompt_features = self.model.extract_feature_and_prompt(
+            images,
+            modality,
+            categories,
+            split="unseen",
+        )
+        output = (
+            features.detach(),
+            (
+                prompt_features.detach()
+                if prompt_features is not None
+                else None
+            ),
+            categories.detach(),
+            instances.detach(),
+        )
         if dataloader_idx == 0:
             self.val_step_outputs_sketch.append(output)
         else:
@@ -679,17 +917,28 @@ class FineGrainedZS_SBIR(pl.LightningModule):
 
     def on_validation_epoch_end(self):
         def combine(outputs):
-            return tuple(
-                torch.cat([output[index] for output in outputs]).cpu()
-                for index in range(3)
+            visual = torch.cat([output[0] for output in outputs]).cpu()
+            prompt = (
+                torch.cat([output[1] for output in outputs]).cpu()
+                if outputs[0][1] is not None
+                else None
             )
+            categories = torch.cat([output[2] for output in outputs]).cpu()
+            instances = torch.cat([output[3] for output in outputs]).cpu()
+            return visual, prompt, categories, instances
 
-        sketch_features, sketch_categories, sketch_instances = combine(
-            self.val_step_outputs_sketch
-        )
-        photo_features, photo_categories, photo_instances = combine(
-            self.val_step_outputs_photo
-        )
+        (
+            sketch_features,
+            sketch_prompt_features,
+            sketch_categories,
+            sketch_instances,
+        ) = combine(self.val_step_outputs_sketch)
+        (
+            photo_features,
+            photo_prompt_features,
+            photo_categories,
+            photo_instances,
+        ) = combine(self.val_step_outputs_photo)
         accuracies = fine_grained_accuracy(
             sketch_features,
             photo_features,
@@ -719,10 +968,31 @@ class FineGrainedZS_SBIR(pl.LightningModule):
             self.best_acc1 = acc1.item()
             self.best_acc5 = acc5.item()
         print(
+            "[Student Visual Validation] "
             f"{format_fine_grained_accuracies(accuracies)}, "
             f"Best Acc@1: {self.best_acc1:.4f}, "
             f"Best Acc@5: {self.best_acc5:.4f}"
         )
+        if sketch_prompt_features is not None:
+            prompt_accuracies = fine_grained_accuracy(
+                sketch_prompt_features,
+                photo_prompt_features,
+                sketch_categories,
+                photo_categories,
+                sketch_instances,
+                photo_instances,
+            )
+            for top_k, accuracy in prompt_accuracies.items():
+                self.log(
+                    f"prompt_acc{top_k}",
+                    accuracy,
+                    on_step=False,
+                    on_epoch=True,
+                )
+            print(
+                "[Student Prompt Validation] "
+                f"{format_fine_grained_accuracies(prompt_accuracies)}"
+            )
         train_loss = self.trainer.callback_metrics.get("train_loss")
         if train_loss is not None:
             print(f"Train loss (epoch avg): {train_loss.item():.6f}")

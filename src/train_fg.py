@@ -123,6 +123,31 @@ def build_parser():
     parser.add_argument("--adapter_seed", type=int, default=None)
     parser.add_argument("--adapter_lr", type=float, default=None)
     parser.add_argument("--adapter_weight_decay", type=float, default=None)
+    parser.add_argument(
+        "--patch_prompt_context_tokens",
+        type=int,
+        default=8,
+        help=(
+            "Number of image-conditioned soft text tokens; 0 disables the "
+            "shared photo/sketch patch-to-prompt branch."
+        ),
+    )
+    parser.add_argument("--patch_prompt_latent_width", type=int, default=256)
+    parser.add_argument("--patch_prompt_heads", type=int, default=8)
+    parser.add_argument("--patch_prompt_dropout", type=float, default=0.1)
+    parser.add_argument("--patch_prompt_gate_init", type=float, default=0.1)
+    parser.add_argument(
+        "--patch_prompt_encode_chunk_size", type=int, default=256
+    )
+    parser.add_argument("--patch_prompt_lr", type=float, default=1e-3)
+    parser.add_argument(
+        "--patch_prompt_weight_decay", type=float, default=1e-4
+    )
+    parser.add_argument(
+        "--patch_prompt_temperature", type=float, default=0.07
+    )
+    parser.add_argument("--lambda_patch_prompt", type=float, default=1.0)
+    parser.add_argument("--patch_prompt_seed", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--lr", type=float, default=1e-2)
     parser.add_argument("--momentum", type=float, default=0.9)
@@ -203,6 +228,8 @@ def build_parser():
 def validate_args(parser, args):
     if args.teacher_prompt_seed is None:
         args.teacher_prompt_seed = args.seed
+    if args.patch_prompt_seed is None:
+        args.patch_prompt_seed = args.seed + 40_000
     if args.adapter_seed is None:
         args.adapter_seed = args.seed + 30_000
     if args.teacher_adapter_seed is None:
@@ -226,6 +253,20 @@ def validate_args(parser, args):
         parser.error("--prompt_depth must be at least 1.")
     if args.adapter_bottleneck < 0:
         parser.error("--adapter_bottleneck must be non-negative.")
+    if args.patch_prompt_context_tokens < 0:
+        parser.error("--patch_prompt_context_tokens must be non-negative.")
+    if args.patch_prompt_context_tokens > 0:
+        if args.patch_prompt_latent_width < 1:
+            parser.error("--patch_prompt_latent_width must be positive.")
+        if args.patch_prompt_heads < 1:
+            parser.error("--patch_prompt_heads must be positive.")
+        if args.patch_prompt_latent_width % args.patch_prompt_heads:
+            parser.error(
+                "--patch_prompt_latent_width must be divisible by "
+                "--patch_prompt_heads."
+            )
+        if args.patch_prompt_encode_chunk_size < 1:
+            parser.error("--patch_prompt_encode_chunk_size must be positive.")
     if args.batch_size < 1 or args.test_batch_size < 1:
         parser.error("Batch sizes must be positive.")
     if args.teacher_pretrain_batch_size < 1:
@@ -255,6 +296,9 @@ def validate_args(parser, args):
         "--image_text_kd_temperature": args.image_text_kd_temperature,
         "--photo_text_kd_temperature": args.photo_text_kd_temperature,
         "--sketch_text_kd_temperature": args.sketch_text_kd_temperature,
+        "--patch_prompt_lr": args.patch_prompt_lr,
+        "--patch_prompt_temperature": args.patch_prompt_temperature,
+        "--patch_prompt_gate_init": args.patch_prompt_gate_init,
     }
     for name, value in positive_values.items():
         if value <= 0:
@@ -273,6 +317,9 @@ def validate_args(parser, args):
         "--lambda_teacher_retrieval": args.lambda_teacher_retrieval,
         "--lambda_domain": args.lambda_domain,
         "--lambda_modality": args.lambda_modality,
+        "--patch_prompt_dropout": args.patch_prompt_dropout,
+        "--patch_prompt_weight_decay": args.patch_prompt_weight_decay,
+        "--lambda_patch_prompt": args.lambda_patch_prompt,
     }
     for name, value in nonnegative_values.items():
         if value < 0:
@@ -289,6 +336,10 @@ def validate_args(parser, args):
         parser.error("--adapter_dropout must be less than 1.")
     if args.teacher_adapter_dropout >= 1:
         parser.error("--teacher_adapter_dropout must be less than 1.")
+    if args.patch_prompt_dropout >= 1:
+        parser.error("--patch_prompt_dropout must be less than 1.")
+    if args.patch_prompt_gate_init >= 1:
+        parser.error("--patch_prompt_gate_init must be less than 1.")
     if args.lambda_domain == 0 and args.lambda_modality == 0:
         parser.error("At least one student distillation loss must be active.")
 
@@ -339,10 +390,13 @@ def main():
         logger=logger,
         check_val_every_n_epoch=1,
         enable_progress_bar=args.progress,
+        num_sanity_val_steps=0,
         callbacks=[checkpoint_callback, TQDMProgressBar(refresh_rate=20)],
     )
     model = FineGrainedZS_SBIR(
-        args=args, classnames=train_loader.dataset.all_categories
+        args=args,
+        classnames=train_loader.dataset.all_categories,
+        unseen_classnames=train_loader.dataset.index.unseen_categories,
     )
     if os.path.isfile(args.ckpt_path):
         print(f"Resuming training from {args.ckpt_path}")

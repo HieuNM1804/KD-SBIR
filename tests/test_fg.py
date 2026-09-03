@@ -221,7 +221,7 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         query[1, 1] = 1.0
         query[2, :5] = torch.tensor([6.0, 5.0, 4.0, 3.0, 2.0])
         query[2, 5] = 1.0
-        acc1, acc5 = fine_grained_accuracy(
+        accuracies = fine_grained_accuracy(
             query,
             gallery,
             torch.zeros(3, dtype=torch.long),
@@ -229,8 +229,8 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             torch.tensor([0, 1, 5]),
             torch.arange(100),
         )
-        self.assertAlmostEqual(acc1.item(), 1 / 3, places=6)
-        self.assertAlmostEqual(acc5.item(), 2 / 3, places=6)
+        self.assertAlmostEqual(accuracies[1].item(), 1 / 3, places=6)
+        self.assertAlmostEqual(accuracies[5].item(), 2 / 3, places=6)
 
     def test_seen_metric_ids_preserve_category_local_photo_targets(self):
         dataset = SimpleNamespace(
@@ -288,15 +288,15 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             sample_local_photo_indices=[0],
             category_to_photo_indices={0: list(range(100))},
         )
-        acc1, acc5 = model._validate_teacher_train(
+        accuracies = model._validate_teacher_train(
             dataset,
             epoch=1,
             workers=0,
             show_progress=False,
         )
         self.assertEqual([modality for modality, _ in calls], ["sketch", "photo"])
-        self.assertEqual(acc1, 1.0)
-        self.assertEqual(acc5, 1.0)
+        self.assertEqual(accuracies[1], 1.0)
+        self.assertEqual(accuracies[5], 1.0)
         self.assertFalse(model.teacher_prompts.training)
 
 
