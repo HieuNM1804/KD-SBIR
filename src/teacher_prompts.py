@@ -116,7 +116,7 @@ class TeacherPromptController(nn.Module):
     def trainable_parameter_count(self):
         return sum(parameter.numel() for parameter in self.parameters())
 
-    def forward(self, images, modality):
+    def forward(self, images, modality, return_patch_tokens=False):
         visual = self._visual
         x = visual.conv1(images)
         x = x.reshape(x.shape[0], x.shape[1], -1).permute(0, 2, 1)
@@ -125,6 +125,7 @@ class TeacherPromptController(nn.Module):
         x = torch.cat((class_token, x), dim=1)
         x = x + visual.positional_embedding.to(dtype=x.dtype)
         x = visual.patch_dropout(x)
+        spatial_token_count = x.shape[1] - 1
 
         prompt = self.prompt_learner.for_layer(
             modality,
@@ -163,7 +164,15 @@ class TeacherPromptController(nn.Module):
             pooled = pooled @ visual.proj
         if self.output_adapters is not None:
             pooled = self.output_adapters(pooled, modality)
-        return pooled
+        if not return_patch_tokens:
+            return pooled
+
+        # The modality prompts live after the original image sequence. Return
+        # only normalized spatial tokens to the image-to-text projector.
+        patch_tokens = visual.ln_post(
+            x[:, 1 : 1 + spatial_token_count, :]
+        )
+        return pooled, patch_tokens
 
 
 def build_teacher_prompt_controller(

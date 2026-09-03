@@ -167,6 +167,12 @@ class FineGrainedCacheTests(unittest.TestCase):
                 original,
                 default_teacher_cache_path(teacher_adapter_change, dataset),
             )
+            teacher_patch_change = copy(args)
+            teacher_patch_change.teacher_patch_prompt_context_tokens = 4
+            self.assertNotEqual(
+                original,
+                default_teacher_cache_path(teacher_patch_change, dataset),
+            )
 
 
 class FineGrainedLossAndMetricTests(unittest.TestCase):
@@ -211,6 +217,20 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             photos.clone(),
         )
         self.assertAlmostEqual(loss.item(), 0.0, places=5)
+
+    def test_prompt_kd_supports_different_teacher_student_widths(self):
+        generator = torch.Generator().manual_seed(42)
+        student_sketch = torch.randn(7, 16, generator=generator)
+        student_photo = torch.randn(100, 16, generator=generator)
+        teacher_sketch = torch.randn(7, 32, generator=generator)
+        teacher_photo = torch.randn(100, 32, generator=generator)
+        loss = full_gallery_relational_kd_loss(
+            student_sketch,
+            student_photo,
+            teacher_sketch,
+            teacher_photo,
+        )
+        self.assertTrue(torch.isfinite(loss))
 
     def test_micro_acc_at_1_and_5(self):
         gallery = torch.eye(100)
@@ -264,7 +284,9 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         torch.nn.Module.__init__(model)
         model.cfg = SimpleNamespace(test_batch_size=128, seed=42)
         model.teacher_prompts = torch.nn.Dropout(p=0.5)
+        model.teacher_patch_prompt = torch.nn.Dropout(p=0.5)
         model.teacher_prompts.train()
+        model.teacher_patch_prompt.train()
         calls = []
         gallery = torch.eye(100)
 
@@ -275,10 +297,13 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             _workers,
             _show_progress,
             generator_seed=None,
+            **_kwargs,
         ):
             self.assertFalse(model.teacher_prompts.training)
+            self.assertFalse(model.teacher_patch_prompt.training)
             calls.append((modality, generator_seed))
-            return gallery[[0]] if modality == "sketch" else gallery
+            visual = gallery[[0]] if modality == "sketch" else gallery
+            return visual, visual
 
         model._materialize_teacher_features = materialize
         dataset = SimpleNamespace(
@@ -288,7 +313,7 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             sample_local_photo_indices=[0],
             category_to_photo_indices={0: list(range(100))},
         )
-        accuracies = model._validate_teacher_train(
+        accuracies, prompt_accuracies = model._validate_teacher_train(
             dataset,
             epoch=1,
             workers=0,
@@ -297,7 +322,10 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         self.assertEqual([modality for modality, _ in calls], ["sketch", "photo"])
         self.assertEqual(accuracies[1], 1.0)
         self.assertEqual(accuracies[5], 1.0)
+        self.assertEqual(prompt_accuracies[1], 1.0)
+        self.assertEqual(prompt_accuracies[5], 1.0)
         self.assertFalse(model.teacher_prompts.training)
+        self.assertFalse(model.teacher_patch_prompt.training)
 
 
 class PlateauSchedulerTests(unittest.TestCase):

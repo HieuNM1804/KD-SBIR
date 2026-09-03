@@ -225,14 +225,37 @@ class FineGrainedTrainDataset(torch.utils.data.Dataset):
 
         self.teacher_sketch_features = None
         self.teacher_photo_features = None
+        self.teacher_sketch_prompt_features = None
+        self.teacher_photo_prompt_features = None
 
-    def set_teacher_features(self, sketch_features, photo_features):
+    def set_teacher_features(
+        self,
+        sketch_features,
+        photo_features,
+        sketch_prompt_features=None,
+        photo_prompt_features=None,
+    ):
         if len(sketch_features) != len(self.all_sketches_path):
             raise ValueError("Sketch feature cache has the wrong length.")
         if len(photo_features) != len(self.all_photo_paths):
             raise ValueError("Photo feature cache has the wrong length.")
         self.teacher_sketch_features = sketch_features
         self.teacher_photo_features = photo_features
+        if (sketch_prompt_features is None) != (photo_prompt_features is None):
+            raise ValueError(
+                "Teacher sketch/photo prompt features must be set together."
+            )
+        if sketch_prompt_features is not None:
+            if len(sketch_prompt_features) != len(self.all_sketches_path):
+                raise ValueError(
+                    "Teacher sketch prompt cache has the wrong length."
+                )
+            if len(photo_prompt_features) != len(self.all_photo_paths):
+                raise ValueError(
+                    "Teacher photo prompt cache has the wrong length."
+                )
+        self.teacher_sketch_prompt_features = sketch_prompt_features
+        self.teacher_photo_prompt_features = photo_prompt_features
 
     def __len__(self):
         return len(self.all_sketches_path)
@@ -245,17 +268,28 @@ class FineGrainedTrainDataset(torch.utils.data.Dataset):
             teacher_sketch = torch.empty(0)
         else:
             teacher_sketch = self.teacher_sketch_features[index]
+        if self.teacher_sketch_prompt_features is None:
+            teacher_sketch_prompt = torch.empty(0)
+        else:
+            teacher_sketch_prompt = self.teacher_sketch_prompt_features[index]
 
         return (
             sketch,
             teacher_sketch,
+            teacher_sketch_prompt,
             self.sample_category_ids[index],
             self.sample_local_photo_indices[index],
         )
 
     def collate_full_gallery(self, samples):
         """Load one category's 100-photo gallery once for a sketch batch."""
-        sketches, teacher_sketches, categories, targets = zip(*samples)
+        (
+            sketches,
+            teacher_sketches,
+            teacher_sketch_prompts,
+            categories,
+            targets,
+        ) = zip(*samples)
         if len(set(categories)) != 1:
             raise RuntimeError("A full-gallery batch must contain one category.")
 
@@ -271,12 +305,20 @@ class FineGrainedTrainDataset(torch.utils.data.Dataset):
             teacher_photos = torch.empty(0)
         else:
             teacher_photos = self.teacher_photo_features[photo_indices]
+        if self.teacher_photo_prompt_features is None:
+            teacher_photo_prompts = torch.empty(0)
+        else:
+            teacher_photo_prompts = self.teacher_photo_prompt_features[
+                photo_indices
+            ]
 
         return (
             photos,
             torch.stack(sketches),
             teacher_photos,
             torch.stack(teacher_sketches),
+            teacher_photo_prompts,
+            torch.stack(teacher_sketch_prompts),
             torch.full((len(samples),), category, dtype=torch.long),
             torch.as_tensor(targets, dtype=torch.long),
         )

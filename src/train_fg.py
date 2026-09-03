@@ -148,6 +148,37 @@ def build_parser():
     )
     parser.add_argument("--lambda_patch_prompt", type=float, default=1.0)
     parser.add_argument("--patch_prompt_seed", type=int, default=None)
+    parser.add_argument(
+        "--teacher_patch_prompt_context_tokens", type=int, default=8
+    )
+    parser.add_argument(
+        "--teacher_patch_prompt_latent_width", type=int, default=256
+    )
+    parser.add_argument("--teacher_patch_prompt_heads", type=int, default=8)
+    parser.add_argument(
+        "--teacher_patch_prompt_dropout", type=float, default=0.1
+    )
+    parser.add_argument(
+        "--teacher_patch_prompt_gate_init", type=float, default=0.1
+    )
+    parser.add_argument(
+        "--teacher_patch_prompt_encode_chunk_size", type=int, default=128
+    )
+    parser.add_argument(
+        "--teacher_patch_prompt_lr", type=float, default=1e-3
+    )
+    parser.add_argument(
+        "--teacher_patch_prompt_weight_decay", type=float, default=1e-4
+    )
+    parser.add_argument(
+        "--teacher_patch_prompt_temperature", type=float, default=0.07
+    )
+    parser.add_argument(
+        "--lambda_teacher_patch_prompt", type=float, default=1.0
+    )
+    parser.add_argument("--teacher_patch_prompt_seed", type=int, default=None)
+    parser.add_argument("--lambda_prompt_kd", type=float, default=1.0)
+    parser.add_argument("--prompt_kd_temperature", type=float, default=0.07)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--lr", type=float, default=1e-2)
     parser.add_argument("--momentum", type=float, default=0.9)
@@ -230,6 +261,8 @@ def validate_args(parser, args):
         args.teacher_prompt_seed = args.seed
     if args.patch_prompt_seed is None:
         args.patch_prompt_seed = args.seed + 40_000
+    if args.teacher_patch_prompt_seed is None:
+        args.teacher_patch_prompt_seed = args.seed + 50_000
     if args.adapter_seed is None:
         args.adapter_seed = args.seed + 30_000
     if args.teacher_adapter_seed is None:
@@ -267,6 +300,29 @@ def validate_args(parser, args):
             )
         if args.patch_prompt_encode_chunk_size < 1:
             parser.error("--patch_prompt_encode_chunk_size must be positive.")
+    if args.teacher_patch_prompt_context_tokens < 0:
+        parser.error(
+            "--teacher_patch_prompt_context_tokens must be non-negative."
+        )
+    if args.teacher_patch_prompt_context_tokens > 0:
+        if args.teacher_patch_prompt_latent_width < 1:
+            parser.error(
+                "--teacher_patch_prompt_latent_width must be positive."
+            )
+        if args.teacher_patch_prompt_heads < 1:
+            parser.error("--teacher_patch_prompt_heads must be positive.")
+        if (
+            args.teacher_patch_prompt_latent_width
+            % args.teacher_patch_prompt_heads
+        ):
+            parser.error(
+                "--teacher_patch_prompt_latent_width must be divisible by "
+                "--teacher_patch_prompt_heads."
+            )
+        if args.teacher_patch_prompt_encode_chunk_size < 1:
+            parser.error(
+                "--teacher_patch_prompt_encode_chunk_size must be positive."
+            )
     if args.batch_size < 1 or args.test_batch_size < 1:
         parser.error("Batch sizes must be positive.")
     if args.teacher_pretrain_batch_size < 1:
@@ -299,6 +355,14 @@ def validate_args(parser, args):
         "--patch_prompt_lr": args.patch_prompt_lr,
         "--patch_prompt_temperature": args.patch_prompt_temperature,
         "--patch_prompt_gate_init": args.patch_prompt_gate_init,
+        "--teacher_patch_prompt_lr": args.teacher_patch_prompt_lr,
+        "--teacher_patch_prompt_temperature": (
+            args.teacher_patch_prompt_temperature
+        ),
+        "--teacher_patch_prompt_gate_init": (
+            args.teacher_patch_prompt_gate_init
+        ),
+        "--prompt_kd_temperature": args.prompt_kd_temperature,
     }
     for name, value in positive_values.items():
         if value <= 0:
@@ -320,6 +384,16 @@ def validate_args(parser, args):
         "--patch_prompt_dropout": args.patch_prompt_dropout,
         "--patch_prompt_weight_decay": args.patch_prompt_weight_decay,
         "--lambda_patch_prompt": args.lambda_patch_prompt,
+        "--teacher_patch_prompt_dropout": (
+            args.teacher_patch_prompt_dropout
+        ),
+        "--teacher_patch_prompt_weight_decay": (
+            args.teacher_patch_prompt_weight_decay
+        ),
+        "--lambda_teacher_patch_prompt": (
+            args.lambda_teacher_patch_prompt
+        ),
+        "--lambda_prompt_kd": args.lambda_prompt_kd,
     }
     for name, value in nonnegative_values.items():
         if value < 0:
@@ -340,6 +414,27 @@ def validate_args(parser, args):
         parser.error("--patch_prompt_dropout must be less than 1.")
     if args.patch_prompt_gate_init >= 1:
         parser.error("--patch_prompt_gate_init must be less than 1.")
+    if args.teacher_patch_prompt_dropout >= 1:
+        parser.error("--teacher_patch_prompt_dropout must be less than 1.")
+    if args.teacher_patch_prompt_gate_init >= 1:
+        parser.error("--teacher_patch_prompt_gate_init must be less than 1.")
+    if args.lambda_prompt_kd > 0 and (
+        args.patch_prompt_context_tokens == 0
+        or args.teacher_patch_prompt_context_tokens == 0
+    ):
+        parser.error(
+            "--lambda_prompt_kd requires both student and teacher patch "
+            "prompt projectors."
+        )
+    if (
+        args.lambda_prompt_kd > 0
+        and args.teacher_pretrain_epochs == 0
+        and not args.teacher_cache_path
+    ):
+        parser.error(
+            "--lambda_prompt_kd requires teacher prompt pretraining or an "
+            "explicit compatible --teacher_cache_path."
+        )
     if args.lambda_domain == 0 and args.lambda_modality == 0:
         parser.error("At least one student distillation loss must be active.")
 

@@ -7,6 +7,7 @@ import pytorch_lightning as pl
 import torch
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
+from torch.utils.checkpoint import checkpoint
 from tqdm.auto import tqdm
 
 from clip import clip
@@ -14,10 +15,12 @@ from src.dataset_fg import FineGrainedFullGalleryBatchSampler
 from src.losses_fg import (
     fine_grained_distillation_loss,
     fine_grained_teacher_infonce_loss,
+    full_gallery_relational_kd_loss,
 )
 from src.model import (
     DFN5B_OUTPUT_DIM,
     CustomCLIP,
+    TeacherFeatureDataset,
     _load_clip_model,
     _load_teacher,
     _reduce_on_plateau_patience,
@@ -30,7 +33,7 @@ from src.patch_prompts import (
 )
 
 
-FG_CACHE_FORMAT_VERSION = 9
+FG_CACHE_FORMAT_VERSION = 10
 FG_ACCURACY_KS = (1, 5, 10, 20, 30, 40, 50)
 
 
@@ -180,6 +183,36 @@ def _fg_teacher_config(args):
                 args.teacher_instance_temperature
             ),
             "checkpoint_selection": "best_unseen_acc1_then_acc5",
+            "teacher_patch_prompt_context_tokens": getattr(
+                args, "teacher_patch_prompt_context_tokens", 0
+            ),
+            "teacher_patch_prompt_latent_width": getattr(
+                args, "teacher_patch_prompt_latent_width", 256
+            ),
+            "teacher_patch_prompt_heads": getattr(
+                args, "teacher_patch_prompt_heads", 8
+            ),
+            "teacher_patch_prompt_dropout": getattr(
+                args, "teacher_patch_prompt_dropout", 0.1
+            ),
+            "teacher_patch_prompt_gate_init": getattr(
+                args, "teacher_patch_prompt_gate_init", 0.1
+            ),
+            "teacher_patch_prompt_seed": getattr(
+                args, "teacher_patch_prompt_seed", args.seed + 50_000
+            ),
+            "teacher_patch_prompt_lr": getattr(
+                args, "teacher_patch_prompt_lr", 1e-3
+            ),
+            "teacher_patch_prompt_weight_decay": getattr(
+                args, "teacher_patch_prompt_weight_decay", 1e-4
+            ),
+            "teacher_patch_prompt_temperature": getattr(
+                args, "teacher_patch_prompt_temperature", 0.07
+            ),
+            "lambda_teacher_patch_prompt": getattr(
+                args, "lambda_teacher_patch_prompt", 1.0
+            ),
         }
     )
     return config
@@ -217,6 +250,37 @@ class FineGrainedCustomCLIP(CustomCLIP):
     ):
         super().__init__(cfg, clip_model, classnames, teacher)
         self.unseen_classnames = tuple(unseen_classnames)
+        self.teacher_patch_prompt = None
+        self.teacher_patch_prompt_enabled = (
+            cfg.teacher_patch_prompt_context_tokens > 0
+        )
+        if teacher is not None and self.teacher_patch_prompt_enabled:
+            teacher_visual_width = teacher.visual.conv1.out_channels
+            self.teacher_patch_prompt = SharedImageConditionedPrompt(
+                text_model=teacher,
+                tokenizer=teacher.text_tokenizer,
+                seen_classnames=self.classnames,
+                unseen_classnames=self.unseen_classnames,
+                visual_width=teacher_visual_width,
+                latent_width=cfg.teacher_patch_prompt_latent_width,
+                context_tokens=cfg.teacher_patch_prompt_context_tokens,
+                heads=cfg.teacher_patch_prompt_heads,
+                dropout=cfg.teacher_patch_prompt_dropout,
+                gate_init=cfg.teacher_patch_prompt_gate_init,
+                seed=cfg.teacher_patch_prompt_seed,
+                encode_chunk_size=cfg.teacher_patch_prompt_encode_chunk_size,
+                text_backend="open_clip",
+            ).to(device=teacher.visual.conv1.weight.device)
+            print(
+                "[Teacher Shared Patch Prompt] one projector for photo + "
+                "sketch; all teacher patches -> "
+                f"M={cfg.teacher_patch_prompt_context_tokens} text tokens "
+                f"(latent={cfg.teacher_patch_prompt_latent_width}, "
+                f"heads={cfg.teacher_patch_prompt_heads}, "
+                "trainable_params="
+                f"{self.teacher_patch_prompt.trainable_parameter_count():,}); "
+                "patches_detached=True"
+            )
         self.shared_patch_prompt = None
         if cfg.patch_prompt_context_tokens > 0:
             visual_width = clip_model.visual.ln_pre.normalized_shape[0]
@@ -233,6 +297,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 gate_init=cfg.patch_prompt_gate_init,
                 seed=cfg.patch_prompt_seed,
                 encode_chunk_size=cfg.patch_prompt_encode_chunk_size,
+                text_backend="openai",
             )
             print(
                 "[Shared Patch Prompt] one projector for photo + sketch; "
@@ -243,6 +308,11 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 f"{self.shared_patch_prompt.trainable_parameter_count():,}); "
                 "patches_detached=True"
             )
+        print(
+            "[Prompt KD] teacher image-conditioned text -> student "
+            f"image-conditioned text; lambda={cfg.lambda_prompt_kd}, "
+            f"temperature={cfg.prompt_kd_temperature}"
+        )
 
     @property
     def patch_prompt_active(self):
@@ -288,6 +358,8 @@ class FineGrainedCustomCLIP(CustomCLIP):
             sketch_tensor,
             teacher_photo_base,
             teacher_sketch_base,
+            teacher_photo_prompt_base,
+            teacher_sketch_prompt_base,
             categories,
         ) = x
         if self.patch_prompt_active:
@@ -354,6 +426,8 @@ class FineGrainedCustomCLIP(CustomCLIP):
             teacher_photo_text,
             sketch_prompt_features,
             photo_prompt_features,
+            teacher_sketch_prompt_base,
+            teacher_photo_prompt_base,
         )
 
     def extract_feature_and_prompt(
@@ -371,6 +445,44 @@ class FineGrainedCustomCLIP(CustomCLIP):
             return_patch_tokens=True,
         )
         return features, self.prompt_features(patches, categories, split)
+
+    def _encode_teacher_image(
+        self,
+        images,
+        modality,
+        return_patch_tokens=False,
+    ):
+        if self.teacher_prompts is None:
+            if return_patch_tokens:
+                raise RuntimeError(
+                    "Teacher patch tokens require teacher visual prompts."
+                )
+            return self._teacher.encode_image(images)
+
+        def encode(current_images):
+            return self.teacher_prompts(
+                current_images,
+                modality,
+                return_patch_tokens=return_patch_tokens,
+            )
+
+        if (
+            self.cfg.teacher_prompt_gradient_checkpointing
+            and torch.is_grad_enabled()
+        ):
+            return checkpoint(encode, images, use_reentrant=False)
+        return encode(images)
+
+    def teacher_prompt_features(self, patch_tokens, categories, split):
+        if self.teacher_patch_prompt is None:
+            return None
+        features, _ = self.teacher_patch_prompt(
+            self._teacher,
+            patch_tokens,
+            categories,
+            split=split,
+        )
+        return features
 
     def _teacher_cache_metadata(self, train_dataset):
         return {
@@ -405,6 +517,12 @@ class FineGrainedCustomCLIP(CustomCLIP):
         teacher_device = teacher_parameter.device
         teacher_dtype = teacher_parameter.dtype
         self.teacher_prompts.requires_grad_(True)
+        if self.teacher_patch_prompt is None:
+            raise RuntimeError(
+                "Teacher image-to-text training requires a teacher shared "
+                "patch prompt projector."
+            )
+        self.teacher_patch_prompt.requires_grad_(True)
         sampler = FineGrainedFullGalleryBatchSampler(
             train_dataset,
             batch_size=cfg.teacher_pretrain_batch_size,
@@ -420,8 +538,19 @@ class FineGrainedCustomCLIP(CustomCLIP):
             prefetch_factor=4 if workers > 0 else None,
             generator=torch.Generator().manual_seed(cfg.seed + 10_000),
         )
+        teacher_parameter_groups = _teacher_optimizer_parameter_groups(
+            self.teacher_prompts, cfg
+        )
+        teacher_parameter_groups.append(
+            {
+                "params": list(self.teacher_patch_prompt.parameters()),
+                "lr": cfg.teacher_patch_prompt_lr,
+                "weight_decay": cfg.teacher_patch_prompt_weight_decay,
+                "name": "teacher_shared_patch_prompt",
+            }
+        )
         optimizer = torch.optim.SGD(
-            _teacher_optimizer_parameter_groups(self.teacher_prompts, cfg),
+            teacher_parameter_groups,
             lr=cfg.teacher_prompt_lr,
             momentum=cfg.teacher_momentum,
         )
@@ -441,14 +570,20 @@ class FineGrainedCustomCLIP(CustomCLIP):
         best_acc1 = -float("inf")
         best_acc5 = -float("inf")
         best_epoch = 0
-        best_prompt_state = None
+        best_visual_prompt_state = None
+        best_patch_prompt_state = None
         best_unseen_metrics = None
+        best_unseen_prompt_metrics = None
         self.teacher_train_metric_history = []
         self.teacher_unseen_metric_history = []
+        self.teacher_prompt_train_metric_history = []
+        self.teacher_prompt_unseen_metric_history = []
 
         for epoch in range(cfg.teacher_pretrain_epochs):
             self.teacher_prompts.train()
+            self.teacher_patch_prompt.train()
             retrieval_total = 0.0
+            prompt_retrieval_total = 0.0
             steps = 0
             batches = tqdm(
                 loader,
@@ -457,7 +592,16 @@ class FineGrainedCustomCLIP(CustomCLIP):
             )
             with torch.enable_grad():
                 for batch in batches:
-                    photo, sketch, _, _, _, targets = batch
+                    (
+                        photo,
+                        sketch,
+                        _,
+                        _,
+                        _,
+                        _,
+                        categories,
+                        targets,
+                    ) = batch
                     photo = photo.to(
                         teacher_device, dtype=teacher_dtype, non_blocking=True
                     )
@@ -465,16 +609,27 @@ class FineGrainedCustomCLIP(CustomCLIP):
                         teacher_device, dtype=teacher_dtype, non_blocking=True
                     )
                     targets = targets.to(teacher_device, non_blocking=True)
+                    categories = categories.to(
+                        teacher_device, non_blocking=True
+                    )
                     with torch.amp.autocast(
                         "cuda",
                         dtype=torch.float16,
                         enabled=teacher_device.type == "cuda",
                     ):
-                        photo_features = self._encode_teacher_image(
-                            photo, "photo"
+                        photo_features, photo_patches = (
+                            self._encode_teacher_image(
+                                photo,
+                                "photo",
+                                return_patch_tokens=True,
+                            )
                         )
-                        sketch_features = self._encode_teacher_image(
-                            sketch, "sketch"
+                        sketch_features, sketch_patches = (
+                            self._encode_teacher_image(
+                                sketch,
+                                "sketch",
+                                return_patch_tokens=True,
+                            )
                         )
                         retrieval = fine_grained_teacher_infonce_loss(
                             sketch_features,
@@ -482,23 +637,52 @@ class FineGrainedCustomCLIP(CustomCLIP):
                             targets,
                             cfg.teacher_instance_temperature,
                         )
-                        loss = cfg.lambda_teacher_retrieval * retrieval
+                        photo_categories = categories[:1].expand(len(photo))
+                        photo_prompt_features = self.teacher_prompt_features(
+                            photo_patches,
+                            photo_categories,
+                            split="seen",
+                        )
+                        sketch_prompt_features = self.teacher_prompt_features(
+                            sketch_patches,
+                            categories,
+                            split="seen",
+                        )
+                        prompt_retrieval = shared_prompt_infonce_loss(
+                            sketch_prompt_features,
+                            photo_prompt_features,
+                            targets,
+                            cfg.teacher_patch_prompt_temperature,
+                        )
+                        loss = (
+                            cfg.lambda_teacher_retrieval * retrieval
+                            + cfg.lambda_teacher_patch_prompt
+                            * prompt_retrieval
+                        )
                     optimizer.zero_grad(set_to_none=True)
                     scaler.scale(loss).backward()
                     scaler.step(optimizer)
                     scaler.update()
                     retrieval_total += retrieval.detach().item()
+                    prompt_retrieval_total += (
+                        prompt_retrieval.detach().item()
+                    )
                     steps += 1
                     if show_progress:
-                        batches.set_postfix(T_NCE=f"{retrieval.item():.3f}")
+                        batches.set_postfix(
+                            T_NCE=f"{retrieval.item():.3f}",
+                            T_PROMPT=f"{prompt_retrieval.item():.3f}",
+                        )
 
             if steps == 0:
                 raise RuntimeError("Teacher pretraining produced no batches.")
             print(
                 f"[Teacher Pretrain] epoch={epoch + 1}, "
-                f"instance_nce={retrieval_total / steps:.6f}"
+                f"instance_nce={retrieval_total / steps:.6f}, "
+                "prompt_instance_nce="
+                f"{prompt_retrieval_total / steps:.6f}"
             )
-            train_metrics = self._validate_teacher_train(
+            train_metrics, train_prompt_metrics = self._validate_teacher_train(
                 train_dataset,
                 epoch + 1,
                 workers,
@@ -507,7 +691,12 @@ class FineGrainedCustomCLIP(CustomCLIP):
             self.teacher_train_metric_history.append(
                 fine_grained_metric_history_entry(epoch + 1, train_metrics)
             )
-            unseen_metrics = self._validate_teacher_unseen(
+            self.teacher_prompt_train_metric_history.append(
+                fine_grained_metric_history_entry(
+                    epoch + 1, train_prompt_metrics
+                )
+            )
+            unseen_metrics, unseen_prompt_metrics = self._validate_teacher_unseen(
                 val_sketch_loader,
                 val_photo_loader,
                 epoch + 1,
@@ -527,6 +716,11 @@ class FineGrainedCustomCLIP(CustomCLIP):
             self.teacher_unseen_metric_history.append(
                 fine_grained_metric_history_entry(epoch + 1, unseen_metrics)
             )
+            self.teacher_prompt_unseen_metric_history.append(
+                fine_grained_metric_history_entry(
+                    epoch + 1, unseen_prompt_metrics
+                )
+            )
             improved = better_acc1_acc5(
                 acc1, acc5, best_acc1, best_acc5
             )
@@ -535,25 +729,135 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 best_acc5 = acc5
                 best_epoch = epoch + 1
                 best_unseen_metrics = dict(unseen_metrics)
-                best_prompt_state = {
+                best_unseen_prompt_metrics = dict(unseen_prompt_metrics)
+                best_visual_prompt_state = {
                     key: value.detach().cpu().clone()
                     for key, value in self.teacher_prompts.state_dict().items()
                 }
+                best_patch_prompt_state = {
+                    key: value.detach().cpu().clone()
+                    for key, value in (
+                        self.teacher_patch_prompt.state_dict().items()
+                    )
+                }
 
-        if best_prompt_state is None or best_unseen_metrics is None:
+        if (
+            best_visual_prompt_state is None
+            or best_patch_prompt_state is None
+            or best_unseen_metrics is None
+            or best_unseen_prompt_metrics is None
+        ):
             raise RuntimeError("Teacher best-Acc@1 state was not created.")
-        self.teacher_prompts.load_state_dict(best_prompt_state, strict=True)
+        self.teacher_prompts.load_state_dict(
+            best_visual_prompt_state, strict=True
+        )
+        self.teacher_patch_prompt.load_state_dict(
+            best_patch_prompt_state, strict=True
+        )
         self.teacher_prompts.eval()
+        self.teacher_patch_prompt.eval()
         self.teacher_best_epoch = best_epoch
         self.teacher_best_acc1 = best_acc1
         self.teacher_best_acc5 = best_acc5
         self.teacher_best_metrics = best_unseen_metrics
+        self.teacher_best_prompt_metrics = best_unseen_prompt_metrics
         print(
-            "[Teacher Best] restored visual prompts from "
+            "[Teacher Best] restored visual + image-to-text prompts from "
             f"epoch={best_epoch}, "
             f"{format_fine_grained_accuracies(best_unseen_metrics)}"
         )
+        print(
+            "[Teacher Prompt Best] "
+            f"{format_fine_grained_accuracies(best_unseen_prompt_metrics)}"
+        )
         self.teacher_prompts.requires_grad_(False)
+        self.teacher_patch_prompt.requires_grad_(False)
+
+    @torch.no_grad()
+    def _materialize_teacher_features(
+        self,
+        paths,
+        modality,
+        batch_size,
+        workers,
+        show_progress,
+        generator_seed=None,
+        category_ids=None,
+        split="seen",
+        return_prompt=False,
+    ):
+        if return_prompt:
+            if self.teacher_patch_prompt is None:
+                raise RuntimeError("Teacher patch prompt projector is missing.")
+            if category_ids is None or len(category_ids) != len(paths):
+                raise ValueError(
+                    "Teacher prompt materialization requires one category ID "
+                    "per image."
+                )
+            category_ids = torch.as_tensor(category_ids, dtype=torch.long)
+
+        teacher_parameter = self._teacher.visual.conv1.weight
+        teacher_device = teacher_parameter.device
+        teacher_dtype = teacher_parameter.dtype
+        dataset = TeacherFeatureDataset(paths, self.cfg.max_size)
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=workers,
+            pin_memory=True,
+            persistent_workers=False,
+            prefetch_factor=4 if workers > 0 else None,
+            generator=(
+                torch.Generator().manual_seed(generator_seed)
+                if generator_seed is not None
+                else None
+            ),
+        )
+        visual_output = torch.empty(
+            len(paths),
+            DFN5B_OUTPUT_DIM,
+            dtype=torch.float16,
+        )
+        prompt_outputs = []
+        offset = 0
+        batches = tqdm(
+            loader,
+            desc=f"Caching {modality} teacher features",
+            disable=not show_progress,
+        )
+        for images in batches:
+            images = images.to(
+                teacher_device, dtype=teacher_dtype, non_blocking=True
+            )
+            if return_prompt:
+                features, patches = self._encode_teacher_image(
+                    images,
+                    modality,
+                    return_patch_tokens=True,
+                )
+                current_categories = category_ids[
+                    offset : offset + len(images)
+                ].to(teacher_device, non_blocking=True)
+                prompt_features = self.teacher_prompt_features(
+                    patches,
+                    current_categories,
+                    split=split,
+                )
+                prompt_outputs.append(
+                    prompt_features.to(dtype=torch.float16).cpu()
+                )
+            else:
+                features = self._encode_teacher_image(images, modality)
+            end = offset + len(features)
+            visual_output[offset:end].copy_(
+                features.to(dtype=torch.float16).cpu()
+            )
+            offset = end
+
+        if return_prompt:
+            return visual_output, torch.cat(prompt_outputs)
+        return visual_output
 
     @torch.no_grad()
     def _validate_teacher_train(
@@ -565,29 +869,36 @@ class FineGrainedCustomCLIP(CustomCLIP):
     ):
         """Evaluate exact-instance retrieval on all seen training sketches."""
         self.teacher_prompts.eval()
+        self.teacher_patch_prompt.eval()
         batch_size = self.cfg.test_batch_size
-        sketch_features = self._materialize_teacher_features(
-            train_dataset.all_sketches_path,
-            "sketch",
-            batch_size,
-            workers,
-            show_progress,
-            generator_seed=self.cfg.seed + 20_000 + epoch * 2,
-        )
-        photo_features = self._materialize_teacher_features(
-            train_dataset.all_photo_paths,
-            "photo",
-            batch_size,
-            workers,
-            show_progress,
-            generator_seed=self.cfg.seed + 20_001 + epoch * 2,
-        )
         (
             sketch_categories,
             photo_categories,
             sketch_instances,
             photo_instances,
         ) = fine_grained_train_metric_ids(train_dataset)
+        sketch_features, sketch_prompt_features = self._materialize_teacher_features(
+            train_dataset.all_sketches_path,
+            "sketch",
+            batch_size,
+            workers,
+            show_progress,
+            generator_seed=self.cfg.seed + 20_000 + epoch * 2,
+            category_ids=sketch_categories,
+            split="seen",
+            return_prompt=True,
+        )
+        photo_features, photo_prompt_features = self._materialize_teacher_features(
+            train_dataset.all_photo_paths,
+            "photo",
+            batch_size,
+            workers,
+            show_progress,
+            generator_seed=self.cfg.seed + 20_001 + epoch * 2,
+            category_ids=photo_categories,
+            split="seen",
+            return_prompt=True,
+        )
         accuracies = fine_grained_accuracy(
             sketch_features,
             photo_features,
@@ -597,13 +908,30 @@ class FineGrainedCustomCLIP(CustomCLIP):
             photo_instances,
         )
         print(
-            f"[Teacher Train Evaluation] epoch={epoch}, "
+            f"[Teacher Visual Train Evaluation] epoch={epoch}, "
             f"{format_fine_grained_accuracies(accuracies)}"
         )
-        return {
+        prompt_accuracies = fine_grained_accuracy(
+            sketch_prompt_features,
+            photo_prompt_features,
+            sketch_categories,
+            photo_categories,
+            sketch_instances,
+            photo_instances,
+        )
+        print(
+            f"[Teacher Prompt Train Evaluation] epoch={epoch}, "
+            f"{format_fine_grained_accuracies(prompt_accuracies)}"
+        )
+        visual_result = {
             top_k: accuracy.item()
             for top_k, accuracy in accuracies.items()
         }
+        prompt_result = {
+            top_k: accuracy.item()
+            for top_k, accuracy in prompt_accuracies.items()
+        }
+        return visual_result, prompt_result
 
     @torch.no_grad()
     def _validate_teacher_unseen(
@@ -614,12 +942,14 @@ class FineGrainedCustomCLIP(CustomCLIP):
         show_progress,
     ):
         self.teacher_prompts.eval()
+        self.teacher_patch_prompt.eval()
         teacher_parameter = self._teacher.visual.conv1.weight
         teacher_device = teacher_parameter.device
         teacher_dtype = teacher_parameter.dtype
 
         def encode_loader(loader, modality):
             features = []
+            prompt_features = []
             categories = []
             instances = []
             batches = tqdm(
@@ -631,22 +961,44 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 images = images.to(
                     teacher_device, dtype=teacher_dtype, non_blocking=True
                 )
-                current_features = self._encode_teacher_image(images, modality)
+                current_categories_device = current_categories.to(
+                    teacher_device, non_blocking=True
+                )
+                current_features, current_patches = (
+                    self._encode_teacher_image(
+                        images,
+                        modality,
+                        return_patch_tokens=True,
+                    )
+                )
+                current_prompt_features = self.teacher_prompt_features(
+                    current_patches,
+                    current_categories_device,
+                    split="unseen",
+                )
                 features.append(current_features.float().cpu())
+                prompt_features.append(current_prompt_features.float().cpu())
                 categories.append(current_categories.cpu())
                 instances.append(current_instances.cpu())
             return (
                 torch.cat(features),
+                torch.cat(prompt_features),
                 torch.cat(categories),
                 torch.cat(instances),
             )
 
-        sketch_features, sketch_categories, sketch_instances = encode_loader(
-            val_sketch_loader, "sketch"
-        )
-        photo_features, photo_categories, photo_instances = encode_loader(
-            val_photo_loader, "photo"
-        )
+        (
+            sketch_features,
+            sketch_prompt_features,
+            sketch_categories,
+            sketch_instances,
+        ) = encode_loader(val_sketch_loader, "sketch")
+        (
+            photo_features,
+            photo_prompt_features,
+            photo_categories,
+            photo_instances,
+        ) = encode_loader(val_photo_loader, "photo")
         accuracies = fine_grained_accuracy(
             sketch_features,
             photo_features,
@@ -656,20 +1008,40 @@ class FineGrainedCustomCLIP(CustomCLIP):
             photo_instances,
         )
         print(
-            f"[Teacher Validation] epoch={epoch}, "
+            f"[Teacher Visual Validation] epoch={epoch}, "
             f"{format_fine_grained_accuracies(accuracies)}"
         )
-        return {
+        prompt_accuracies = fine_grained_accuracy(
+            sketch_prompt_features,
+            photo_prompt_features,
+            sketch_categories,
+            photo_categories,
+            sketch_instances,
+            photo_instances,
+        )
+        print(
+            f"[Teacher Prompt Validation] epoch={epoch}, "
+            f"{format_fine_grained_accuracies(prompt_accuracies)}"
+        )
+        visual_result = {
             top_k: accuracy.item()
             for top_k, accuracy in accuracies.items()
         }
+        prompt_result = {
+            top_k: accuracy.item()
+            for top_k, accuracy in prompt_accuracies.items()
+        }
+        return visual_result, prompt_result
 
     def _save_persistent_teacher_cache(
         self,
         train_dataset,
         sketch_features,
         photo_features,
-        prompt_state,
+        sketch_prompt_features,
+        photo_prompt_features,
+        visual_prompt_state,
+        patch_prompt_state,
     ):
         if not self.cfg.teacher_cache_path:
             return
@@ -680,15 +1052,25 @@ class FineGrainedCustomCLIP(CustomCLIP):
             "metadata": self._teacher_cache_metadata(train_dataset),
             "teacher_sketch_features": sketch_features.cpu(),
             "teacher_photo_features": photo_features.cpu(),
+            "teacher_sketch_prompt_features": (
+                sketch_prompt_features.cpu()
+            ),
+            "teacher_photo_prompt_features": photo_prompt_features.cpu(),
             "teacher_sketch_text": self._teacher_sketch_text.detach().cpu(),
             "teacher_photo_text": self._teacher_photo_text.detach().cpu(),
-            "teacher_prompt_state_dict": prompt_state,
+            "teacher_prompt_state_dict": visual_prompt_state,
+            "teacher_patch_prompt_state_dict": patch_prompt_state,
             "teacher_best_epoch": getattr(self, "teacher_best_epoch", None),
             "teacher_best_acc1": getattr(self, "teacher_best_acc1", None),
             "teacher_best_acc5": getattr(self, "teacher_best_acc5", None),
             "teacher_best_metrics": getattr(
                 self,
                 "teacher_best_metrics",
+                None,
+            ),
+            "teacher_best_prompt_metrics": getattr(
+                self,
+                "teacher_best_prompt_metrics",
                 None,
             ),
             "teacher_train_metric_history": getattr(
@@ -701,12 +1083,171 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 "teacher_unseen_metric_history",
                 [],
             ),
+            "teacher_prompt_train_metric_history": getattr(
+                self,
+                "teacher_prompt_train_metric_history",
+                [],
+            ),
+            "teacher_prompt_unseen_metric_history": getattr(
+                self,
+                "teacher_prompt_unseen_metric_history",
+                [],
+            ),
         }
         torch.save(payload, temporary_path)
         os.replace(temporary_path, cache_path)
         print(
             f"[Teacher Cache] saved {cache_path} "
             f"({cache_path.stat().st_size / 1024**2:.1f} MB)."
+        )
+
+    def _load_persistent_teacher_cache(self, train_dataset):
+        cache_path = Path(self.cfg.teacher_cache_path)
+        try:
+            payload = torch.load(
+                cache_path,
+                map_location="cpu",
+                weights_only=True,
+            )
+        except TypeError:
+            payload = torch.load(cache_path, map_location="cpu")
+
+        expected = self._teacher_cache_metadata(train_dataset)
+        actual = payload.get("metadata", {})
+        mismatches = [
+            key
+            for key, expected_value in expected.items()
+            if actual.get(key) != expected_value
+        ]
+        required_tensors = (
+            "teacher_sketch_features",
+            "teacher_photo_features",
+            "teacher_sketch_prompt_features",
+            "teacher_photo_prompt_features",
+            "teacher_sketch_text",
+            "teacher_photo_text",
+        )
+        missing = [key for key in required_tensors if key not in payload]
+        if mismatches or missing:
+            details = []
+            if mismatches:
+                details.append("metadata: " + ", ".join(mismatches))
+            if missing:
+                details.append("tensors: " + ", ".join(missing))
+            raise RuntimeError(
+                f"Teacher cache {cache_path} is incompatible "
+                f"({'; '.join(details)}). Use another "
+                "--teacher_cache_path or pass --rebuild_teacher_cache."
+            )
+
+        train_dataset.set_teacher_features(
+            payload["teacher_sketch_features"],
+            payload["teacher_photo_features"],
+            payload["teacher_sketch_prompt_features"],
+            payload["teacher_photo_prompt_features"],
+        )
+        self._teacher_sketch_text = payload["teacher_sketch_text"]
+        self._teacher_photo_text = payload["teacher_photo_text"]
+        self.teacher_active = True
+        self.teacher_prompts = None
+        self.teacher_patch_prompt = None
+        object.__setattr__(self, "_teacher", None)
+        print(
+            f"[Teacher Cache] loaded visual + prompt features from "
+            f"{cache_path} ({cache_path.stat().st_size / 1024**2:.1f} MB)."
+        )
+
+    def cache_teacher_features(
+        self,
+        train_dataset,
+        val_sketch_loader,
+        val_photo_loader,
+        batch_size,
+        workers,
+        show_progress,
+    ):
+        if self.persistent_teacher_cache:
+            self._load_persistent_teacher_cache(train_dataset)
+            return
+        if self._teacher is None:
+            return
+        if self.teacher_prompts is None or self.teacher_patch_prompt is None:
+            raise RuntimeError(
+                "Teacher visual and patch-to-text prompts must both be active."
+            )
+
+        self._pretrain_teacher_prompts(
+            train_dataset,
+            val_sketch_loader,
+            val_photo_loader,
+            workers,
+            show_progress,
+        )
+        self.teacher_prompts.eval()
+        self.teacher_patch_prompt.eval()
+        self.get_teacher_text_features()
+
+        (
+            sketch_categories,
+            photo_categories,
+            _,
+            _,
+        ) = fine_grained_train_metric_ids(train_dataset)
+        sketch_features, sketch_prompt_features = self._materialize_teacher_features(
+                train_dataset.all_sketches_path,
+                "sketch",
+                batch_size,
+                workers,
+                show_progress,
+                category_ids=sketch_categories,
+                split="seen",
+                return_prompt=True,
+            )
+        photo_features, photo_prompt_features = self._materialize_teacher_features(
+                train_dataset.all_photo_paths,
+                "photo",
+                batch_size,
+                workers,
+                show_progress,
+                category_ids=photo_categories,
+                split="seen",
+                return_prompt=True,
+            )
+        train_dataset.set_teacher_features(
+            sketch_features,
+            photo_features,
+            sketch_prompt_features,
+            photo_prompt_features,
+        )
+
+        visual_prompt_state = {
+            key: value.detach().cpu()
+            for key, value in self.teacher_prompts.state_dict().items()
+        }
+        patch_prompt_state = {
+            key: value.detach().cpu()
+            for key, value in self.teacher_patch_prompt.state_dict().items()
+        }
+        self._save_persistent_teacher_cache(
+            train_dataset,
+            sketch_features,
+            photo_features,
+            sketch_prompt_features,
+            photo_prompt_features,
+            visual_prompt_state,
+            patch_prompt_state,
+        )
+
+        teacher = self._teacher
+        self.teacher_prompts = None
+        self.teacher_patch_prompt = None
+        object.__setattr__(self, "_teacher", None)
+        del teacher
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print(
+            "[Teacher Cache] materialized tuned visual + image-conditioned "
+            "text features; DFN5B released."
         )
 
 
@@ -848,17 +1389,33 @@ class FineGrainedZS_SBIR(pl.LightningModule):
             sketch,
             teacher_photo,
             teacher_sketch,
+            teacher_photo_prompt,
+            teacher_sketch_prompt,
             categories,
             targets,
         ) = batch
         features = self.model(
-            (photo, sketch, teacher_photo, teacher_sketch, categories)
+            (
+                photo,
+                sketch,
+                teacher_photo,
+                teacher_sketch,
+                teacher_photo_prompt,
+                teacher_sketch_prompt,
+                categories,
+            )
         )
         loss, loss_dict = fine_grained_distillation_loss(
             self.args, features[:9]
         )
         prompt_loss = loss.new_zeros(())
-        sketch_prompt_features, photo_prompt_features = features[9:]
+        (
+            sketch_prompt_features,
+            photo_prompt_features,
+            teacher_sketch_prompt_features,
+            teacher_photo_prompt_features,
+        ) = features[9:]
+        prompt_kd_loss = loss.new_zeros(())
         if self.model.patch_prompt_active:
             prompt_loss = shared_prompt_infonce_loss(
                 sketch_prompt_features,
@@ -867,6 +1424,15 @@ class FineGrainedZS_SBIR(pl.LightningModule):
                 self.args.patch_prompt_temperature,
             )
             loss = loss + self.args.lambda_patch_prompt * prompt_loss
+            if self.args.lambda_prompt_kd > 0:
+                prompt_kd_loss = full_gallery_relational_kd_loss(
+                    sketch_prompt_features,
+                    photo_prompt_features,
+                    teacher_sketch_prompt_features,
+                    teacher_photo_prompt_features,
+                    self.args.prompt_kd_temperature,
+                )
+                loss = loss + self.args.lambda_prompt_kd * prompt_kd_loss
         self.log("train_loss", loss, on_step=False, on_epoch=True)
         self.log(
             "DOMAIN",
@@ -888,6 +1454,13 @@ class FineGrainedZS_SBIR(pl.LightningModule):
             on_step=True,
             on_epoch=True,
             prog_bar=self.model.patch_prompt_active,
+        )
+        self.log(
+            "PROMPT_KD",
+            prompt_kd_loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=self.args.lambda_prompt_kd > 0,
         )
         return loss
 

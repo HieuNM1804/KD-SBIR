@@ -145,6 +145,29 @@ def encode_openai_soft_prompts(model, token_ids, contexts):
     )
 
 
+def encode_openclip_soft_prompts(model, token_ids, contexts):
+    """Encode continuous context tokens with an OpenCLIP text tower."""
+    cast_dtype = model.transformer.get_cast_dtype()
+    x = model.token_embedding(token_ids).to(cast_dtype)
+    x = _replace_context_embeddings(
+        x, contexts.to(device=x.device, dtype=x.dtype)
+    )
+    x = x + model.positional_embedding.to(x.dtype)
+    x = model.transformer(x, attn_mask=model.attn_mask)
+    x = model.ln_final(x)
+
+    # DFN uses CLIP's argmax/EOT pooling. Keeping the original token IDs for
+    # pooling is important because only their embeddings were replaced.
+    eot_indices = token_ids.argmax(dim=-1)
+    x = x[torch.arange(len(x), device=x.device), eot_indices]
+    if model.text_projection is not None:
+        if isinstance(model.text_projection, nn.Linear):
+            x = model.text_projection(x)
+        else:
+            x = x @ model.text_projection
+    return x
+
+
 class SharedImageConditionedPrompt(nn.Module):
     """One prompt learner shared by photo and sketch inputs."""
 
@@ -162,12 +185,16 @@ class SharedImageConditionedPrompt(nn.Module):
         gate_init=0.1,
         seed=42,
         encode_chunk_size=256,
+        text_backend="openai",
     ):
         super().__init__()
         if encode_chunk_size < 1:
             raise ValueError("encode_chunk_size must be positive.")
         self.context_tokens = context_tokens
         self.encode_chunk_size = encode_chunk_size
+        if text_backend not in {"openai", "open_clip"}:
+            raise ValueError("text_backend must be 'openai' or 'open_clip'.")
+        self.text_backend = text_backend
         text_width = text_model.token_embedding.weight.shape[1]
         initial_context = self._initial_context(
             text_model,
@@ -259,9 +286,14 @@ class SharedImageConditionedPrompt(nn.Module):
     def forward(self, text_model, patch_features, categories, split="seen"):
         contexts, attention = self.projector(patch_features)
         tokens = self._tokens_for(categories, split).to(patch_features.device)
+        encode = (
+            encode_openai_soft_prompts
+            if self.text_backend == "openai"
+            else encode_openclip_soft_prompts
+        )
         features = torch.cat(
             [
-                encode_openai_soft_prompts(
+                encode(
                     text_model,
                     tokens[start : start + self.encode_chunk_size],
                     contexts[start : start + self.encode_chunk_size],
