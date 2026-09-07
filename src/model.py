@@ -258,8 +258,8 @@ class IndependentVisualPromptLearner(nn.Module):
         return self.ctx, list(self.compound_prompts)
 
 
-class SharedFeatureProjector(nn.Module):
-    """Shared train-time projection from CLIP student to teacher space."""
+class FeatureProjector(nn.Module):
+    """Train-time projection from CLIP student to teacher feature space."""
 
     def __init__(
         self,
@@ -311,7 +311,11 @@ class CustomCLIP(nn.Module):
                 "This experiment requires a 512-dimensional CLIP student; "
                 f"got {student_output_dim}."
             )
-        self.feature_projector = SharedFeatureProjector(
+        self.photo_feature_projector = FeatureProjector(
+            student_output_dim,
+            DFN5B_OUTPUT_DIM,
+        )
+        self.sketch_feature_projector = FeatureProjector(
             student_output_dim,
             DFN5B_OUTPUT_DIM,
         )
@@ -331,11 +335,19 @@ class CustomCLIP(nn.Module):
             f"n_ctx_visual={cfg.n_ctx_visual}, "
             f"prompt_depth={prompt_depth}"
         )
+        projector_params = sum(
+            parameter.numel()
+            for projector in (
+                self.photo_feature_projector,
+                self.sketch_feature_projector,
+            )
+            for parameter in projector.parameters()
+        )
         print(
-            "[Feature KD] shared photo/sketch projector "
+            "[Feature KD] separate photo/sketch projectors "
             f"{student_output_dim}->{DFN5B_OUTPUT_DIM}; "
             f"loss={cfg.feature_loss}, lambda={cfg.lambda_fd}, "
-            f"trainable_params={sum(p.numel() for p in self.feature_projector.parameters()):,}"
+            f"projector_params={projector_params:,}"
         )
 
     @staticmethod
@@ -843,8 +855,8 @@ class CustomCLIP(nn.Module):
             )
 
         return (
-            self.feature_projector(photo_features),
-            self.feature_projector(sketch_features),
+            self.photo_feature_projector(photo_features),
+            self.sketch_feature_projector(sketch_features),
             teacher_photo_base,
             teacher_sketch_base,
         )
@@ -861,6 +873,9 @@ class ZS_SBIR(pl.LightningModule):
             {
                 "feature_loss": args.feature_loss,
                 "lambda_fd": args.lambda_fd,
+                "projector_layout": "separate",
+                "projector_input_dim": STUDENT_OUTPUT_DIM,
+                "projector_output_dim": DFN5B_OUTPUT_DIM,
             }
         )
         clip_model = _load_clip_model(args.backbone)

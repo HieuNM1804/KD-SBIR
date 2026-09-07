@@ -300,7 +300,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--exp_name",
         type=str,
-        default="clip_kd_feature_distillation",
+        default="clip_kd_feature_distillation_dual_projector",
     )
 
     args = parser.parse_args()
