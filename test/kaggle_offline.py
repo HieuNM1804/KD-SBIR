@@ -1,4 +1,4 @@
-"""Restore the CLIP feature-distillation experiment on offline Kaggle."""
+"""Restore CLIP feature KD with separate photo/sketch projectors."""
 
 from pathlib import Path
 import glob
@@ -11,9 +11,9 @@ import sys
 
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
-EXPECTED_BRANCH = "experiment/clip-kd-feature-distillation"
-EXPECTED_COMMIT = "2c09fbe7c942069f8d5039d187974baaa28c19d2"
-EXPECTED_TASK = "clip_kd_feature_distillation"
+EXPECTED_BRANCH = "experiment/clip-kd-feature-distillation-dual-projector"
+EXPECTED_COMMIT = "4aab88d533d31a01d169e557ff0bdae66c3ad099"
+EXPECTED_TASK = "clip_kd_feature_distillation_dual_projector"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
 
@@ -78,7 +78,7 @@ for manifest_path in manifest_paths:
 
 if not matching_bundles:
     raise FileNotFoundError(
-        "Cannot find the required CLIP feature-distillation bundle.\n\n"
+        "Cannot find the required CLIP dual-projector bundle.\n\n"
         f"Expected branch: {EXPECTED_BRANCH}\n"
         f"Expected commit: {EXPECTED_COMMIT}\n"
         f"Expected task: {EXPECTED_TASK}\n"
@@ -239,14 +239,18 @@ subprocess.run(
         (
             "import torch, open_clip, pytorch_lightning; "
             "from src.losses import feature_distillation_loss; "
-            "from src.model import SharedFeatureProjector, ZS_SBIR; "
-            "projector = SharedFeatureProjector(); "
-            "assert projector(torch.randn(2, 512)).shape == (2, 1024); "
+            "from src.model import FeatureProjector, ZS_SBIR; "
+            "photo_projector = FeatureProjector(); "
+            "sketch_projector = FeatureProjector(); "
+            "assert photo_projector(torch.randn(2, 512)).shape == (2, 1024); "
+            "assert sketch_projector(torch.randn(2, 512)).shape == (2, 1024); "
+            "assert photo_projector.projection.weight.data_ptr() != "
+            "sketch_projector.projection.weight.data_ptr(); "
             "print('PyTorch:', torch.__version__); "
             "print('OpenCLIP:', getattr(open_clip, '__version__', 'unknown')); "
             "print('Lightning:', pytorch_lightning.__version__); "
             "print('CUDA available:', torch.cuda.is_available()); "
-            "print('Feature-distillation imports: OK')"
+            "print('Dual-projector feature-distillation imports: OK')"
         ),
     ],
     cwd=WORKING_PROJECT,
@@ -263,7 +267,7 @@ subprocess.run(
 
 print()
 print("=" * 70)
-print("OFFLINE CLIP-KD FEATURE-DISTILLATION SETUP COMPLETE")
+print("OFFLINE CLIP-KD DUAL-PROJECTOR SETUP COMPLETE")
 print("=" * 70)
 print("Project:", WORKING_PROJECT)
 print("Dataset:", SKETCHY_ROOT)

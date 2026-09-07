@@ -1,4 +1,4 @@
-"""Build the offline Kaggle bundle for CLIP feature distillation."""
+"""Build the Kaggle bundle for CLIP feature KD with dual projectors."""
 
 from pathlib import Path
 import hashlib
@@ -17,10 +17,10 @@ CLIP_CACHE = BUNDLE / "clip_cache"
 DFN_DIR = BUNDLE / "dfn5b_openclip"
 
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
-BRANCH = "experiment/clip-kd-feature-distillation"
+BRANCH = "experiment/clip-kd-feature-distillation-dual-projector"
 # Pin the source commit. The later bundle-script commit intentionally differs.
-COMMIT = "2c09fbe7c942069f8d5039d187974baaa28c19d2"
-TASK = "clip_kd_feature_distillation"
+COMMIT = "4aab88d533d31a01d169e557ff0bdae66c3ad099"
+TASK = "clip_kd_feature_distillation_dual_projector"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
 
@@ -245,7 +245,7 @@ bundle_size = sum(
 )
 print("[6/6] Bundle validated")
 print("=" * 70)
-print("ONLINE CLIP-KD FEATURE-DISTILLATION BUNDLE COMPLETE")
+print("ONLINE CLIP-KD DUAL-PROJECTOR BUNDLE COMPLETE")
 print("=" * 70)
 print("Bundle:", BUNDLE)
 print("Branch:", BRANCH)
