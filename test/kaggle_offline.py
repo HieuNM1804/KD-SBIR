@@ -12,7 +12,7 @@ import sys
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/clip-kd-masked-feature-distillation"
-EXPECTED_COMMIT = "4a42206bb41f81cc92e3eff9350d83765626c147"
+EXPECTED_COMMIT = "79a98632247de6b6434a850d75edbfd19482bab9"
 EXPECTED_TASK = "clip_kd_masked_feature_distillation"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
@@ -252,7 +252,7 @@ subprocess.run(
             "assert kept.shape == (2, 2, 64); "
             "assert mask.shape == restore.shape == (2, 8); "
             "loss = masked_feature_distillation_loss("
-            "torch.randn(2, 1024), torch.randn(2, 1024)); "
+            "torch.randn(2, 1024), torch.randn(2, 1024), 'cosine'); "
             "assert loss.ndim == 0; "
             "print('PyTorch:', torch.__version__); "
             "print('OpenCLIP:', getattr(open_clip, '__version__', 'unknown')); "

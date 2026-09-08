@@ -19,7 +19,7 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/clip-kd-masked-feature-distillation"
 # Pin the source commit. The later bundle-script commit intentionally differs.
-COMMIT = "4a42206bb41f81cc92e3eff9350d83765626c147"
+COMMIT = "79a98632247de6b6434a850d75edbfd19482bab9"
 TASK = "clip_kd_masked_feature_distillation"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
