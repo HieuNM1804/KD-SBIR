@@ -4,11 +4,21 @@ import torch
 from torch.nn import functional as F
 
 
+MFD_LOSS_CHOICES = ("mse", "cosine")
+
+
 def masked_feature_distillation_loss(
     projected_student,
     teacher,
+    loss_type="cosine",
 ):
-    """MSE-match a masked student's normalized feature to its full teacher."""
+    """Match normalized masked-student and full-teacher features."""
+    if loss_type not in MFD_LOSS_CHOICES:
+        raise ValueError(
+            f"Unsupported MFD loss {loss_type!r}; "
+            f"expected one of {MFD_LOSS_CHOICES}."
+        )
+
     student = F.normalize(projected_student.float(), dim=-1)
     teacher = F.normalize(
         teacher.detach().to(
@@ -23,7 +33,9 @@ def masked_feature_distillation_loss(
             f"got {tuple(student.shape)} and {tuple(teacher.shape)}."
         )
 
-    return F.mse_loss(student, teacher)
+    if loss_type == "mse":
+        return F.mse_loss(student, teacher)
+    return (1.0 - F.cosine_similarity(student, teacher, dim=-1)).mean()
 
 
 def loss_fn(args, features):
@@ -38,10 +50,12 @@ def loss_fn(args, features):
     photo_loss = masked_feature_distillation_loss(
         projected_photo,
         teacher_photo,
+        args.mfd_loss,
     )
     sketch_loss = masked_feature_distillation_loss(
         projected_sketch,
         teacher_sketch,
+        args.mfd_loss,
     )
     masked_feature_loss = 0.5 * (photo_loss + sketch_loss)
     total_loss = args.lambda_mfd * masked_feature_loss

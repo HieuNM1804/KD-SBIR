@@ -50,24 +50,44 @@ def make_args(**overrides):
         "teacher_pretrain_epochs": 0,
         "photo_mask_ratio": 0.75,
         "sketch_mask_ratio": 0.5,
+        "mfd_loss": "cosine",
         "lambda_mfd": 1.0,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
 
 
-def test_mfd_loss_is_zero_for_aligned_features():
+@pytest.mark.parametrize("loss_type", ["mse", "cosine"])
+def test_mfd_loss_is_zero_for_aligned_features(loss_type):
     features = torch.randn(4, 1024)
-    loss = masked_feature_distillation_loss(features, features * 7.0)
+    loss = masked_feature_distillation_loss(
+        features,
+        features * 7.0,
+        loss_type,
+    )
     assert loss.item() == pytest.approx(0.0, abs=1e-7)
 
 
-def test_mfd_loss_is_scale_invariant():
+@pytest.mark.parametrize("loss_type", ["mse", "cosine"])
+def test_mfd_loss_is_scale_invariant(loss_type):
     student = torch.randn(4, 1024)
     teacher = torch.randn(4, 1024)
-    reference = masked_feature_distillation_loss(student, teacher)
-    scaled = masked_feature_distillation_loss(student * 3.0, teacher * 9.0)
+    reference = masked_feature_distillation_loss(student, teacher, loss_type)
+    scaled = masked_feature_distillation_loss(
+        student * 3.0,
+        teacher * 9.0,
+        loss_type,
+    )
     assert scaled.item() == pytest.approx(reference.item(), abs=1e-7)
+
+
+def test_mfd_loss_rejects_unknown_method():
+    with pytest.raises(ValueError, match="Unsupported MFD loss"):
+        masked_feature_distillation_loss(
+            torch.randn(2, 8),
+            torch.randn(2, 8),
+            "both",
+        )
 
 
 def test_mae_random_masking_drops_patch_tokens_per_sample():
@@ -154,14 +174,15 @@ def test_photo_and_sketch_projectors_are_separate():
 def test_loss_averages_modalities_and_applies_mfd_weight(monkeypatch):
     calls = []
 
-    def fake_loss(student, teacher):
-        calls.append((student, teacher))
+    def fake_loss(student, teacher, loss_type):
+        calls.append((student, teacher, loss_type))
         return student.new_tensor(2.0 if len(calls) == 1 else 4.0)
 
     monkeypatch.setattr("src.losses.masked_feature_distillation_loss", fake_loss)
     features = tuple(torch.randn(2, 1024) for _ in range(4))
     total, values = loss_fn(make_args(lambda_mfd=2.0), features)
     assert len(calls) == 2
+    assert [call[2] for call in calls] == ["cosine", "cosine"]
     assert values["mfd_photo"].item() == 2.0
     assert values["mfd_sketch"].item() == 4.0
     assert values["mfd"].item() == 3.0
@@ -173,6 +194,7 @@ def test_cli_defaults_and_modality_specific_ratios():
     defaults = parser.parse_args([])
     assert defaults.photo_mask_ratio == 0.75
     assert defaults.sketch_mask_ratio == 0.75
+    assert defaults.mfd_loss == "cosine"
     assert defaults.lambda_mfd == 1.0
 
     custom = parser.parse_args(
@@ -181,12 +203,15 @@ def test_cli_defaults_and_modality_specific_ratios():
             "0.25",
             "--sketch_mask_ratio",
             "0.5",
+            "--mfd_loss",
+            "mse",
             "--lambda_mfd",
             "3",
         ]
     )
     assert custom.photo_mask_ratio == 0.25
     assert custom.sketch_mask_ratio == 0.5
+    assert custom.mfd_loss == "mse"
     assert custom.lambda_mfd == 3.0
 
 
@@ -263,7 +288,7 @@ def test_lightning_checkpoint_state_and_hyperparameters(monkeypatch):
     args = make_args(lambda_mfd=2.0, backbone="ViT-B/32")
     model = ZS_SBIR(args, classnames=("cat",))
 
-    assert model.hparams["mfd_loss"] == "mse"
+    assert model.hparams["mfd_loss"] == "cosine"
     assert model.hparams["lambda_mfd"] == 2.0
     assert model.hparams["photo_mask_ratio"] == 0.75
     assert model.hparams["sketch_mask_ratio"] == 0.5

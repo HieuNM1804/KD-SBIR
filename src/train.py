@@ -16,6 +16,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from src.dataset import TrainDataset, ValidDataset, WorkerInvariantSampler
 from src.data_config import UNSEEN_CLASSES
+from src.losses import MFD_LOSS_CHOICES
 from src.model import ZS_SBIR, default_teacher_cache_path
 
 
@@ -44,6 +45,13 @@ def seed_worker(_worker_id):
 def add_masked_feature_distillation_args(parser):
     """Register CLIP-KD MFD masking and loss configuration."""
     parser.add_argument(
+        "--mfd_loss",
+        type=str,
+        default="cosine",
+        choices=MFD_LOSS_CHOICES,
+        help="Normalized feature loss for both masked visual branches.",
+    )
+    parser.add_argument(
         "--photo_mask_ratio",
         type=float,
         default=0.75,
@@ -59,7 +67,7 @@ def add_masked_feature_distillation_args(parser):
         "--lambda_mfd",
         type=float,
         default=1.0,
-        help="Weight for the normalized masked feature MSE objective.",
+        help="Weight for the selected normalized masked-feature objective.",
     )
     return parser
 

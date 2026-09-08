@@ -9,8 +9,9 @@ for the photo and sketch visual branches.
   image on every training forward.
 - Alignment: separate trainable `Linear(512, 1024)` projectors for photo and
   sketch.
-- Objective: MSE between L2-normalized projected masked-student features and
-  detached full-image teacher features.
+- Objective: selectable cosine or MSE between L2-normalized projected
+  masked-student features and detached full-image teacher features. Cosine is
+  the default on this experimental branch.
 - Evaluation: unmasked images and raw 512D student embeddings. The MFD
   projectors are train-time only.
 
@@ -30,10 +31,15 @@ s_photo = photo_projector(student(mask(photo)))
 s_sketch = sketch_projector(student(mask(sketch)))
 
 L_MFD = lambda_mfd * 0.5 * (
-    MSE(normalize(s_photo), normalize(stopgrad(teacher(photo))))
-  + MSE(normalize(s_sketch), normalize(stopgrad(teacher(sketch))))
+    feature_loss(normalize(s_photo), normalize(stopgrad(teacher(photo))))
+  + feature_loss(normalize(s_sketch), normalize(stopgrad(teacher(sketch))))
 )
 ```
+
+Set `--mfd_loss cosine` for `mean(1 - cosine_similarity)` or
+`--mfd_loss mse` to reproduce the original normalized-MSE implementation.
+For 1024D unit features, normalized MSE equals `2 / 1024` times cosine loss,
+so the two weights must not be compared at the same numerical scale.
 
 The teacher cache contains full-image teacher targets and remains reusable; the
 mask ratios do not belong in its cache key.
@@ -67,12 +73,13 @@ python -m src.train \
     --teacher_triplet_margin 0.2 \
     --photo_mask_ratio 0.75 \
     --sketch_mask_ratio 0.75 \
+    --mfd_loss cosine \
     --lambda_mfd 1.0 \
     --lr 1e-2 \
     --momentum 0.95 \
     --weight_decay 5e-4 \
     --seed 42 \
-    --exp_name clip_kd_mfd_r075_sketchy2 \
+    --exp_name clip_kd_mfd_cosine_r075_sketchy2 \
     --progress
 ```
 

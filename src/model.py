@@ -347,7 +347,7 @@ class CustomCLIP(nn.Module):
             "[MFD] MAE patch masking; separate photo/sketch projectors "
             f"{student_output_dim}->{DFN5B_OUTPUT_DIM}; "
             f"mask_ratios=({cfg.photo_mask_ratio}, {cfg.sketch_mask_ratio}), "
-            f"loss=mse, lambda={cfg.lambda_mfd}, "
+            f"loss={cfg.mfd_loss}, lambda={cfg.lambda_mfd}, "
             f"projector_params={projector_params:,}"
         )
 
@@ -882,7 +882,7 @@ class ZS_SBIR(pl.LightningModule):
         self.args = args
         self.save_hyperparameters(
             {
-                "mfd_loss": "mse",
+                "mfd_loss": args.mfd_loss,
                 "lambda_mfd": args.lambda_mfd,
                 "photo_mask_ratio": args.photo_mask_ratio,
                 "sketch_mask_ratio": args.sketch_mask_ratio,
