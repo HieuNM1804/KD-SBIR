@@ -151,8 +151,8 @@ def default_teacher_cache_path(args, train_dataset):
     return str(Path(cache_dir) / f"{args.dataset}_{config_hash}.pt")
 
 
-def _feature_kd_active(args):
-    return args.lambda_fd > 0
+def _masked_feature_kd_active(args):
+    return args.lambda_mfd > 0
 
 
 def _persistent_teacher_cache_available(args):
@@ -202,7 +202,7 @@ def _load_teacher(args):
         )
         return None
 
-    if not _feature_kd_active(args) and args.teacher_pretrain_epochs == 0:
+    if not _masked_feature_kd_active(args) and args.teacher_pretrain_epochs == 0:
         return None
 
     print(f"[Teacher] Loading {DFN5B_MODEL} in FP16...")
@@ -258,8 +258,8 @@ class IndependentVisualPromptLearner(nn.Module):
         return self.ctx, list(self.compound_prompts)
 
 
-class FeatureProjector(nn.Module):
-    """Train-time projection from CLIP student to teacher feature space."""
+class MFDProjector(nn.Module):
+    """Train-time projection from masked student to teacher feature space."""
 
     def __init__(
         self,
@@ -311,11 +311,11 @@ class CustomCLIP(nn.Module):
                 "This experiment requires a 512-dimensional CLIP student; "
                 f"got {student_output_dim}."
             )
-        self.photo_feature_projector = FeatureProjector(
+        self.photo_mfd_projector = MFDProjector(
             student_output_dim,
             DFN5B_OUTPUT_DIM,
         )
-        self.sketch_feature_projector = FeatureProjector(
+        self.sketch_mfd_projector = MFDProjector(
             student_output_dim,
             DFN5B_OUTPUT_DIM,
         )
@@ -338,15 +338,16 @@ class CustomCLIP(nn.Module):
         projector_params = sum(
             parameter.numel()
             for projector in (
-                self.photo_feature_projector,
-                self.sketch_feature_projector,
+                self.photo_mfd_projector,
+                self.sketch_mfd_projector,
             )
             for parameter in projector.parameters()
         )
         print(
-            "[Feature KD] separate photo/sketch projectors "
+            "[MFD] MAE patch masking; separate photo/sketch projectors "
             f"{student_output_dim}->{DFN5B_OUTPUT_DIM}; "
-            f"loss={cfg.feature_loss}, lambda={cfg.lambda_fd}, "
+            f"mask_ratios=({cfg.photo_mask_ratio}, {cfg.sketch_mask_ratio}), "
+            f"loss=mse, lambda={cfg.lambda_mfd}, "
             f"projector_params={projector_params:,}"
         )
 
@@ -829,12 +830,13 @@ class CustomCLIP(nn.Module):
             return self.photo_visual_prompt()
         return self.sketch_visual_prompt()
 
-    def encode_student_image(self, image, modality):
+    def encode_student_image(self, image, modality, mask_ratio=0.0):
         visual_prompt, compound_prompts = self.get_visual_prompt(modality)
         features = self.clip_model.visual(
             image.type(self.dtype),
             visual_prompt,
             compound_prompts,
+            mask_ratio=mask_ratio,
         )
         return features / features.norm(dim=-1, keepdim=True)
 
@@ -846,8 +848,16 @@ class CustomCLIP(nn.Module):
             teacher_sketch_base,
             _label,
         ) = x
-        photo_features = self.encode_student_image(photo_tensor, "photo")
-        sketch_features = self.encode_student_image(sk_tensor, "sketch")
+        photo_features = self.encode_student_image(
+            photo_tensor,
+            "photo",
+            mask_ratio=self.cfg.photo_mask_ratio,
+        )
+        sketch_features = self.encode_student_image(
+            sk_tensor,
+            "sketch",
+            mask_ratio=self.cfg.sketch_mask_ratio,
+        )
         if not self.teacher_active:
             raise RuntimeError(
                 "Feature distillation requires an active teacher or a "
@@ -855,14 +865,15 @@ class CustomCLIP(nn.Module):
             )
 
         return (
-            self.photo_feature_projector(photo_features),
-            self.sketch_feature_projector(sketch_features),
+            self.photo_mfd_projector(photo_features),
+            self.sketch_mfd_projector(sketch_features),
             teacher_photo_base,
             teacher_sketch_base,
         )
 
     def extract_feature(self, image, modality):
-        return self.encode_student_image(image, modality)
+        # Retrieval always uses the complete image and raw 512D student space.
+        return self.encode_student_image(image, modality, mask_ratio=0.0)
 
 
 class ZS_SBIR(pl.LightningModule):
@@ -871,8 +882,10 @@ class ZS_SBIR(pl.LightningModule):
         self.args = args
         self.save_hyperparameters(
             {
-                "feature_loss": args.feature_loss,
-                "lambda_fd": args.lambda_fd,
+                "mfd_loss": "mse",
+                "lambda_mfd": args.lambda_mfd,
+                "photo_mask_ratio": args.photo_mask_ratio,
+                "sketch_mask_ratio": args.sketch_mask_ratio,
                 "projector_layout": "separate",
                 "projector_input_dim": STUDENT_OUTPUT_DIM,
                 "projector_output_dim": DFN5B_OUTPUT_DIM,
@@ -961,9 +974,9 @@ class ZS_SBIR(pl.LightningModule):
         loss, loss_dict = loss_fn(self.args, features)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         bar_names = {
-            "fd_photo": "FD_PHOTO",
-            "fd_sketch": "FD_SKETCH",
-            "fd": "FD",
+            "mfd_photo": "MFD_PHOTO",
+            "mfd_sketch": "MFD_SKETCH",
+            "mfd": "MFD",
         }
         for key, bar_name in bar_names.items():
             self.log(

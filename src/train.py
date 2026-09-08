@@ -16,7 +16,6 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from src.dataset import TrainDataset, ValidDataset, WorkerInvariantSampler
 from src.data_config import UNSEEN_CLASSES
-from src.losses import FEATURE_LOSS_CHOICES
 from src.model import ZS_SBIR, default_teacher_cache_path
 
 
@@ -42,20 +41,25 @@ def seed_worker(_worker_id):
     random.seed(worker_seed)
 
 
-def add_feature_distillation_args(parser):
-    """Register the mutually exclusive feature-distillation configuration."""
+def add_masked_feature_distillation_args(parser):
+    """Register CLIP-KD MFD masking and loss configuration."""
     parser.add_argument(
-        "--feature_loss",
-        type=str,
-        default="mse",
-        choices=FEATURE_LOSS_CHOICES,
-        help="Feature matching objective; each run uses exactly one choice.",
+        "--photo_mask_ratio",
+        type=float,
+        default=0.75,
+        help="Fraction of photo patch tokens removed from the student encoder.",
     )
     parser.add_argument(
-        "--lambda_fd",
+        "--sketch_mask_ratio",
+        type=float,
+        default=0.75,
+        help="Fraction of sketch patch tokens removed from the student encoder.",
+    )
+    parser.add_argument(
+        "--lambda_mfd",
         type=float,
         default=1.0,
-        help="Weight for the photo/sketch feature-distillation loss.",
+        help="Weight for the normalized masked feature MSE objective.",
     )
     return parser
 
@@ -296,11 +300,11 @@ if __name__ == "__main__":
         help="Weight for the teacher prompt retrieval loss.",
     )
     parser.add_argument("--teacher_triplet_margin", type=float, default=0.2)
-    add_feature_distillation_args(parser)
+    add_masked_feature_distillation_args(parser)
     parser.add_argument(
         "--exp_name",
         type=str,
-        default="clip_kd_feature_distillation_dual_projector",
+        default="clip_kd_masked_feature_distillation",
     )
 
     args = parser.parse_args()
@@ -336,8 +340,12 @@ if __name__ == "__main__":
         parser.error("--teacher_scheduler_step_size must be at least 1.")
     if args.teacher_scheduler_gamma <= 0:
         parser.error("--teacher_scheduler_gamma must be greater than 0.")
-    if args.lambda_fd <= 0:
-        parser.error("--lambda_fd must be greater than 0.")
+    for name in ("photo_mask_ratio", "sketch_mask_ratio"):
+        ratio = getattr(args, name)
+        if not 0.0 <= ratio < 1.0:
+            parser.error(f"--{name} must be in [0, 1).")
+    if args.lambda_mfd <= 0:
+        parser.error("--lambda_mfd must be greater than 0.")
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
 
     checkpoint_callback = ModelCheckpoint(

@@ -1,24 +1,14 @@
-"""Losses used by the CLIP feature-distillation SBIR experiment."""
+"""Losses used by the CLIP masked-feature-distillation experiment."""
 
 import torch
 from torch.nn import functional as F
 
 
-FEATURE_LOSS_CHOICES = ("mse", "cosine")
-
-
-def feature_distillation_loss(
+def masked_feature_distillation_loss(
     projected_student,
     teacher,
-    loss_type="mse",
 ):
-    """Match L2-normalized student and detached teacher image features."""
-    if loss_type not in FEATURE_LOSS_CHOICES:
-        raise ValueError(
-            f"Unsupported feature loss {loss_type!r}; "
-            f"expected one of {FEATURE_LOSS_CHOICES}."
-        )
-
+    """MSE-match a masked student's normalized feature to its full teacher."""
     student = F.normalize(projected_student.float(), dim=-1)
     teacher = F.normalize(
         teacher.detach().to(
@@ -33,13 +23,11 @@ def feature_distillation_loss(
             f"got {tuple(student.shape)} and {tuple(teacher.shape)}."
         )
 
-    if loss_type == "mse":
-        return F.mse_loss(student, teacher)
-    return (1.0 - F.cosine_similarity(student, teacher, dim=-1)).mean()
+    return F.mse_loss(student, teacher)
 
 
 def loss_fn(args, features):
-    """Compute exactly one feature-distillation objective for both modalities."""
+    """Compute MFD for masked photo and sketch student features."""
     (
         projected_photo,
         projected_sketch,
@@ -47,22 +35,20 @@ def loss_fn(args, features):
         teacher_sketch,
     ) = features
 
-    photo_loss = feature_distillation_loss(
+    photo_loss = masked_feature_distillation_loss(
         projected_photo,
         teacher_photo,
-        args.feature_loss,
     )
-    sketch_loss = feature_distillation_loss(
+    sketch_loss = masked_feature_distillation_loss(
         projected_sketch,
         teacher_sketch,
-        args.feature_loss,
     )
-    feature_loss = 0.5 * (photo_loss + sketch_loss)
-    total_loss = args.lambda_fd * feature_loss
+    masked_feature_loss = 0.5 * (photo_loss + sketch_loss)
+    total_loss = args.lambda_mfd * masked_feature_loss
     return total_loss, {
-        "fd_photo": photo_loss,
-        "fd_sketch": sketch_loss,
-        "fd": feature_loss,
+        "mfd_photo": photo_loss,
+        "mfd_sketch": sketch_loss,
+        "mfd": masked_feature_loss,
     }
 
 

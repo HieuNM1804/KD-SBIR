@@ -105,18 +105,69 @@ class VisionTransformer(nn.Module):
         self.ln_post = LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
+    @staticmethod
+    def random_masking(x: torch.Tensor, mask_ratio: float):
+        """Per-sample MAE patch masking by random shuffling.
+
+        Positional embeddings must already be present in ``x``. Masked patch
+        tokens are removed from the encoder sequence; the returned mask and
+        restore indices are retained for parity with the MAE algorithm even
+        though global CLIP feature distillation does not use a decoder.
+        """
+        if not 0.0 <= mask_ratio < 1.0:
+            raise ValueError(
+                f"mask_ratio must be in [0, 1), got {mask_ratio}."
+            )
+
+        batch_size, patch_count, width = x.shape
+        keep_count = int(patch_count * (1.0 - mask_ratio))
+        noise = torch.rand(batch_size, patch_count, device=x.device)
+        shuffle_indices = torch.argsort(noise, dim=1)
+        restore_indices = torch.argsort(shuffle_indices, dim=1)
+        keep_indices = shuffle_indices[:, :keep_count]
+        kept_patches = torch.gather(
+            x,
+            dim=1,
+            index=keep_indices.unsqueeze(-1).expand(-1, -1, width),
+        )
+
+        mask = torch.ones(
+            batch_size,
+            patch_count,
+            device=x.device,
+            dtype=x.dtype,
+        )
+        mask[:, :keep_count] = 0
+        mask = torch.gather(mask, dim=1, index=restore_indices)
+        return kept_patches, mask, restore_indices
+
     def forward(
         self,
         x: torch.Tensor,
         prompt: torch.Tensor = None,
         compound_prompts=None,
+        mask_ratio: float = 0.0,
     ):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
+
+        if mask_ratio:
+            # CLIP-KD MFD follows MAE: add positional information first, then
+            # physically drop a random subset of patch tokens. CLS is never
+            # included in the masking operation.
+            x = x + self.positional_embedding[1:].to(x.dtype)
+            x, _, _ = self.random_masking(x, mask_ratio)
+            class_token = (
+                self.class_embedding.to(x.dtype)
+                + self.positional_embedding[:1].to(x.dtype)
+            )
+        else:
+            class_token = self.class_embedding.to(x.dtype)
+
         x = torch.cat(
             [
-                self.class_embedding.to(x.dtype)
+                class_token
                 + torch.zeros(
                     x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device
                 ),
@@ -124,7 +175,8 @@ class VisionTransformer(nn.Module):
             ],
             dim=1,
         )  # shape = [*, grid ** 2 + 1, width]
-        x = x + self.positional_embedding.to(x.dtype)
+        if not mask_ratio:
+            x = x + self.positional_embedding.to(x.dtype)
 
         prompt_length = 0
         if prompt is not None:
