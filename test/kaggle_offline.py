@@ -1,4 +1,4 @@
-"""Restore CLIP feature KD with separate photo/sketch projectors."""
+"""Restore CLIP-KD gradient distillation on offline Kaggle."""
 
 from pathlib import Path
 import glob
@@ -11,9 +11,9 @@ import sys
 
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
-EXPECTED_BRANCH = "experiment/clip-kd-feature-distillation-dual-projector"
-EXPECTED_COMMIT = "4aab88d533d31a01d169e557ff0bdae66c3ad099"
-EXPECTED_TASK = "clip_kd_feature_distillation_dual_projector"
+EXPECTED_BRANCH = "experiment/clip-kd-gradient-distillation"
+EXPECTED_COMMIT = "dab7a5f75b62718dd264d01ced37ad29f54d3e27"
+EXPECTED_TASK = "clip_kd_gradient_distillation"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
 
@@ -78,7 +78,7 @@ for manifest_path in manifest_paths:
 
 if not matching_bundles:
     raise FileNotFoundError(
-        "Cannot find the required CLIP dual-projector bundle.\n\n"
+        "Cannot find the required CLIP gradient-distillation bundle.\n\n"
         f"Expected branch: {EXPECTED_BRANCH}\n"
         f"Expected commit: {EXPECTED_COMMIT}\n"
         f"Expected task: {EXPECTED_TASK}\n"
@@ -238,19 +238,25 @@ subprocess.run(
         "-c",
         (
             "import torch, open_clip, pytorch_lightning; "
-            "from src.losses import feature_distillation_loss; "
-            "from src.model import FeatureProjector, ZS_SBIR; "
-            "photo_projector = FeatureProjector(); "
-            "sketch_projector = FeatureProjector(); "
+            "from src.losses import gradient_distillation_loss; "
+            "from src.model import GDProjector, ZS_SBIR; "
+            "photo_projector = GDProjector(); "
+            "sketch_projector = GDProjector(); "
             "assert photo_projector(torch.randn(2, 512)).shape == (2, 1024); "
             "assert sketch_projector(torch.randn(2, 512)).shape == (2, 1024); "
             "assert photo_projector.projection.weight.data_ptr() != "
             "sketch_projector.projection.weight.data_ptr(); "
+            "labels = torch.tensor([0, 1]); "
+            "loss, terms = gradient_distillation_loss("
+            "torch.randn(2, 1024), torch.randn(2, 1024), "
+            "torch.randn(2, 1024), torch.randn(2, 1024), "
+            "labels, 0.07); "
+            "assert loss.ndim == 0 and len(terms) == 4; "
             "print('PyTorch:', torch.__version__); "
             "print('OpenCLIP:', getattr(open_clip, '__version__', 'unknown')); "
             "print('Lightning:', pytorch_lightning.__version__); "
             "print('CUDA available:', torch.cuda.is_available()); "
-            "print('Dual-projector feature-distillation imports: OK')"
+            "print('Bidirectional gradient-distillation imports: OK')"
         ),
     ],
     cwd=WORKING_PROJECT,
@@ -267,7 +273,7 @@ subprocess.run(
 
 print()
 print("=" * 70)
-print("OFFLINE CLIP-KD DUAL-PROJECTOR SETUP COMPLETE")
+print("OFFLINE CLIP-KD GRADIENT-DISTILLATION SETUP COMPLETE")
 print("=" * 70)
 print("Project:", WORKING_PROJECT)
 print("Dataset:", SKETCHY_ROOT)
@@ -277,4 +283,4 @@ print("Entry point:", manifest["entrypoint"])
 print("Student checkpoint:", student_target)
 print("Teacher checkpoint:", dfn_target)
 print()
-print("Run either the MSE or cosine src.train cell next.")
+print("Run the gradient-distillation src.train cell next.")
