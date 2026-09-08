@@ -1,4 +1,4 @@
-"""Restore CLIP feature KD with separate photo/sketch projectors."""
+"""Restore CLIP-KD masked feature distillation on offline Kaggle."""
 
 from pathlib import Path
 import glob
@@ -11,9 +11,9 @@ import sys
 
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
-EXPECTED_BRANCH = "experiment/clip-kd-feature-distillation-dual-projector"
-EXPECTED_COMMIT = "4aab88d533d31a01d169e557ff0bdae66c3ad099"
-EXPECTED_TASK = "clip_kd_feature_distillation_dual_projector"
+EXPECTED_BRANCH = "experiment/clip-kd-masked-feature-distillation"
+EXPECTED_COMMIT = "4a42206bb41f81cc92e3eff9350d83765626c147"
+EXPECTED_TASK = "clip_kd_masked_feature_distillation"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
 
@@ -78,7 +78,7 @@ for manifest_path in manifest_paths:
 
 if not matching_bundles:
     raise FileNotFoundError(
-        "Cannot find the required CLIP dual-projector bundle.\n\n"
+        "Cannot find the required CLIP masked feature-distillation bundle.\n\n"
         f"Expected branch: {EXPECTED_BRANCH}\n"
         f"Expected commit: {EXPECTED_COMMIT}\n"
         f"Expected task: {EXPECTED_TASK}\n"
@@ -238,19 +238,27 @@ subprocess.run(
         "-c",
         (
             "import torch, open_clip, pytorch_lightning; "
-            "from src.losses import feature_distillation_loss; "
-            "from src.model import FeatureProjector, ZS_SBIR; "
-            "photo_projector = FeatureProjector(); "
-            "sketch_projector = FeatureProjector(); "
+            "from clip.model import VisionTransformer; "
+            "from src.losses import masked_feature_distillation_loss; "
+            "from src.model import MFDProjector, ZS_SBIR; "
+            "photo_projector = MFDProjector(); "
+            "sketch_projector = MFDProjector(); "
             "assert photo_projector(torch.randn(2, 512)).shape == (2, 1024); "
             "assert sketch_projector(torch.randn(2, 512)).shape == (2, 1024); "
             "assert photo_projector.projection.weight.data_ptr() != "
             "sketch_projector.projection.weight.data_ptr(); "
+            "kept, mask, restore = VisionTransformer.random_masking("
+            "torch.randn(2, 8, 64), 0.75); "
+            "assert kept.shape == (2, 2, 64); "
+            "assert mask.shape == restore.shape == (2, 8); "
+            "loss = masked_feature_distillation_loss("
+            "torch.randn(2, 1024), torch.randn(2, 1024)); "
+            "assert loss.ndim == 0; "
             "print('PyTorch:', torch.__version__); "
             "print('OpenCLIP:', getattr(open_clip, '__version__', 'unknown')); "
             "print('Lightning:', pytorch_lightning.__version__); "
             "print('CUDA available:', torch.cuda.is_available()); "
-            "print('Dual-projector feature-distillation imports: OK')"
+            "print('MAE-style masked feature-distillation imports: OK')"
         ),
     ],
     cwd=WORKING_PROJECT,
@@ -267,7 +275,7 @@ subprocess.run(
 
 print()
 print("=" * 70)
-print("OFFLINE CLIP-KD DUAL-PROJECTOR SETUP COMPLETE")
+print("OFFLINE CLIP-KD MASKED FEATURE-DISTILLATION SETUP COMPLETE")
 print("=" * 70)
 print("Project:", WORKING_PROJECT)
 print("Dataset:", SKETCHY_ROOT)
@@ -277,4 +285,4 @@ print("Entry point:", manifest["entrypoint"])
 print("Student checkpoint:", student_target)
 print("Teacher checkpoint:", dfn_target)
 print()
-print("Run either the MSE or cosine src.train cell next.")
+print("Run the MFD src.train cell next.")
