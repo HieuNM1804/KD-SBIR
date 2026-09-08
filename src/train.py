@@ -16,7 +16,6 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from src.dataset import TrainDataset, ValidDataset, WorkerInvariantSampler
 from src.data_config import UNSEEN_CLASSES
-from src.losses import FEATURE_LOSS_CHOICES
 from src.model import ZS_SBIR, default_teacher_cache_path
 
 
@@ -42,20 +41,19 @@ def seed_worker(_worker_id):
     random.seed(worker_seed)
 
 
-def add_feature_distillation_args(parser):
-    """Register the mutually exclusive feature-distillation configuration."""
+def add_interactive_contrastive_args(parser):
+    """Register visual interactive-contrastive distillation settings."""
     parser.add_argument(
-        "--feature_loss",
-        type=str,
-        default="mse",
-        choices=FEATURE_LOSS_CHOICES,
-        help="Feature matching objective; each run uses exactly one choice.",
+        "--icl_temperature",
+        type=float,
+        default=0.07,
+        help="Initial temperature for the trainable cross-model logit scale.",
     )
     parser.add_argument(
-        "--lambda_fd",
+        "--lambda_icl",
         type=float,
         default=1.0,
-        help="Weight for the photo/sketch feature-distillation loss.",
+        help="Weight for bidirectional cross-domain visual ICL.",
     )
     return parser
 
@@ -296,11 +294,11 @@ if __name__ == "__main__":
         help="Weight for the teacher prompt retrieval loss.",
     )
     parser.add_argument("--teacher_triplet_margin", type=float, default=0.2)
-    add_feature_distillation_args(parser)
+    add_interactive_contrastive_args(parser)
     parser.add_argument(
         "--exp_name",
         type=str,
-        default="clip_kd_feature_distillation_dual_projector",
+        default="clip_kd_interactive_contrastive_visual",
     )
 
     args = parser.parse_args()
@@ -336,8 +334,10 @@ if __name__ == "__main__":
         parser.error("--teacher_scheduler_step_size must be at least 1.")
     if args.teacher_scheduler_gamma <= 0:
         parser.error("--teacher_scheduler_gamma must be greater than 0.")
-    if args.lambda_fd <= 0:
-        parser.error("--lambda_fd must be greater than 0.")
+    if args.icl_temperature <= 0:
+        parser.error("--icl_temperature must be greater than 0.")
+    if args.lambda_icl <= 0:
+        parser.error("--lambda_icl must be greater than 0.")
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
 
     checkpoint_callback = ModelCheckpoint(

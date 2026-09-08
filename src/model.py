@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 
@@ -151,8 +152,8 @@ def default_teacher_cache_path(args, train_dataset):
     return str(Path(cache_dir) / f"{args.dataset}_{config_hash}.pt")
 
 
-def _feature_kd_active(args):
-    return args.lambda_fd > 0
+def _icl_active(args):
+    return args.lambda_icl > 0
 
 
 def _persistent_teacher_cache_available(args):
@@ -202,7 +203,7 @@ def _load_teacher(args):
         )
         return None
 
-    if not _feature_kd_active(args) and args.teacher_pretrain_epochs == 0:
+    if not _icl_active(args) and args.teacher_pretrain_epochs == 0:
         return None
 
     print(f"[Teacher] Loading {DFN5B_MODEL} in FP16...")
@@ -258,7 +259,7 @@ class IndependentVisualPromptLearner(nn.Module):
         return self.ctx, list(self.compound_prompts)
 
 
-class FeatureProjector(nn.Module):
+class ICLProjector(nn.Module):
     """Train-time projection from CLIP student to teacher feature space."""
 
     def __init__(
@@ -311,13 +312,16 @@ class CustomCLIP(nn.Module):
                 "This experiment requires a 512-dimensional CLIP student; "
                 f"got {student_output_dim}."
             )
-        self.photo_feature_projector = FeatureProjector(
+        self.photo_icl_projector = ICLProjector(
             student_output_dim,
             DFN5B_OUTPUT_DIM,
         )
-        self.sketch_feature_projector = FeatureProjector(
+        self.sketch_icl_projector = ICLProjector(
             student_output_dim,
             DFN5B_OUTPUT_DIM,
+        )
+        self.icl_logit_scale = nn.Parameter(
+            torch.tensor(math.log(1.0 / cfg.icl_temperature))
         )
 
         # The pretrained teacher is reloaded when needed and must not be saved
@@ -338,15 +342,17 @@ class CustomCLIP(nn.Module):
         projector_params = sum(
             parameter.numel()
             for projector in (
-                self.photo_feature_projector,
-                self.sketch_feature_projector,
+                self.photo_icl_projector,
+                self.sketch_icl_projector,
             )
             for parameter in projector.parameters()
         )
         print(
-            "[Feature KD] separate photo/sketch projectors "
+            "[Visual ICL] student sketch->teacher photo and student "
+            "photo->teacher sketch; separate projectors "
             f"{student_output_dim}->{DFN5B_OUTPUT_DIM}; "
-            f"loss={cfg.feature_loss}, lambda={cfg.lambda_fd}, "
+            f"temperature_init={cfg.icl_temperature}, "
+            f"lambda={cfg.lambda_icl}, "
             f"projector_params={projector_params:,}"
         )
 
@@ -844,21 +850,24 @@ class CustomCLIP(nn.Module):
             sk_tensor,
             teacher_photo_base,
             teacher_sketch_base,
-            _label,
+            labels,
         ) = x
         photo_features = self.encode_student_image(photo_tensor, "photo")
         sketch_features = self.encode_student_image(sk_tensor, "sketch")
         if not self.teacher_active:
             raise RuntimeError(
-                "Feature distillation requires an active teacher or a "
+                "Interactive contrastive distillation requires an active "
+                "teacher or a "
                 "compatible persistent teacher cache."
             )
 
         return (
-            self.photo_feature_projector(photo_features),
-            self.sketch_feature_projector(sketch_features),
+            self.photo_icl_projector(photo_features),
+            self.sketch_icl_projector(sketch_features),
             teacher_photo_base,
             teacher_sketch_base,
+            labels,
+            self.icl_logit_scale.exp().clamp(max=100.0),
         )
 
     def extract_feature(self, image, modality):
@@ -871,8 +880,13 @@ class ZS_SBIR(pl.LightningModule):
         self.args = args
         self.save_hyperparameters(
             {
-                "feature_loss": args.feature_loss,
-                "lambda_fd": args.lambda_fd,
+                "lambda_icl": args.lambda_icl,
+                "icl_temperature": args.icl_temperature,
+                "icl_directions": (
+                    "student_sketch_to_teacher_photo",
+                    "student_photo_to_teacher_sketch",
+                ),
+                "positive_policy": "same_class_multi_positive",
                 "projector_layout": "separate",
                 "projector_input_dim": STUDENT_OUTPUT_DIM,
                 "projector_output_dim": DFN5B_OUTPUT_DIM,
@@ -961,9 +975,9 @@ class ZS_SBIR(pl.LightningModule):
         loss, loss_dict = loss_fn(self.args, features)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         bar_names = {
-            "fd_photo": "FD_PHOTO",
-            "fd_sketch": "FD_SKETCH",
-            "fd": "FD",
+            "icl_sketch_to_photo": "ICL_SK2PH",
+            "icl_photo_to_sketch": "ICL_PH2SK",
+            "icl": "ICL",
         }
         for key, bar_name in bar_names.items():
             self.log(
