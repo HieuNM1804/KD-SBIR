@@ -1,4 +1,4 @@
-"""Restore CLIP feature KD with separate photo/sketch projectors."""
+"""Restore cross-domain visual ICL on offline Kaggle."""
 
 from pathlib import Path
 import glob
@@ -11,9 +11,9 @@ import sys
 
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
-EXPECTED_BRANCH = "experiment/clip-kd-feature-distillation-dual-projector"
-EXPECTED_COMMIT = "4aab88d533d31a01d169e557ff0bdae66c3ad099"
-EXPECTED_TASK = "clip_kd_feature_distillation_dual_projector"
+EXPECTED_BRANCH = "experiment/clip-kd-interactive-contrastive"
+EXPECTED_COMMIT = "d056369f0b64f863678b707d5964391d9e9f7a20"
+EXPECTED_TASK = "clip_kd_interactive_contrastive"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
 
@@ -78,7 +78,7 @@ for manifest_path in manifest_paths:
 
 if not matching_bundles:
     raise FileNotFoundError(
-        "Cannot find the required CLIP dual-projector bundle.\n\n"
+        "Cannot find the required CLIP visual-ICL bundle.\n\n"
         f"Expected branch: {EXPECTED_BRANCH}\n"
         f"Expected commit: {EXPECTED_COMMIT}\n"
         f"Expected task: {EXPECTED_TASK}\n"
@@ -238,10 +238,10 @@ subprocess.run(
         "-c",
         (
             "import torch, open_clip, pytorch_lightning; "
-            "from src.losses import feature_distillation_loss; "
-            "from src.model import FeatureProjector, ZS_SBIR; "
-            "photo_projector = FeatureProjector(); "
-            "sketch_projector = FeatureProjector(); "
+            "from src.losses import multi_positive_contrastive_loss; "
+            "from src.model import ICLProjector, ZS_SBIR; "
+            "photo_projector = ICLProjector(); "
+            "sketch_projector = ICLProjector(); "
             "assert photo_projector(torch.randn(2, 512)).shape == (2, 1024); "
             "assert sketch_projector(torch.randn(2, 512)).shape == (2, 1024); "
             "assert photo_projector.projection.weight.data_ptr() != "
@@ -250,7 +250,11 @@ subprocess.run(
             "print('OpenCLIP:', getattr(open_clip, '__version__', 'unknown')); "
             "print('Lightning:', pytorch_lightning.__version__); "
             "print('CUDA available:', torch.cuda.is_available()); "
-            "print('Dual-projector feature-distillation imports: OK')"
+            "loss = multi_positive_contrastive_loss("
+            "torch.randn(2, 1024), torch.randn(2, 1024), "
+            "torch.tensor([0, 1]), torch.tensor([0, 1]), 1.0); "
+            "assert loss.ndim == 0; "
+            "print('Cross-domain visual ICL imports: OK')"
         ),
     ],
     cwd=WORKING_PROJECT,
@@ -267,7 +271,7 @@ subprocess.run(
 
 print()
 print("=" * 70)
-print("OFFLINE CLIP-KD DUAL-PROJECTOR SETUP COMPLETE")
+print("OFFLINE CLIP-KD CROSS-DOMAIN VISUAL ICL SETUP COMPLETE")
 print("=" * 70)
 print("Project:", WORKING_PROJECT)
 print("Dataset:", SKETCHY_ROOT)
@@ -277,4 +281,4 @@ print("Entry point:", manifest["entrypoint"])
 print("Student checkpoint:", student_target)
 print("Teacher checkpoint:", dfn_target)
 print()
-print("Run either the MSE or cosine src.train cell next.")
+print("Run the cross-domain visual ICL src.train cell next.")
