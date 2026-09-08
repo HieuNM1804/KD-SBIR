@@ -16,7 +16,6 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from src.dataset import TrainDataset, ValidDataset, WorkerInvariantSampler
 from src.data_config import UNSEEN_CLASSES
-from src.losses import FEATURE_LOSS_CHOICES
 from src.model import ZS_SBIR, default_teacher_cache_path
 
 
@@ -42,20 +41,31 @@ def seed_worker(_worker_id):
     random.seed(worker_seed)
 
 
-def add_feature_distillation_args(parser):
-    """Register the mutually exclusive feature-distillation configuration."""
+def add_gradient_distillation_args(parser):
+    """Register the SBIR task and embedding-gradient objectives."""
     parser.add_argument(
-        "--feature_loss",
-        type=str,
-        default="mse",
-        choices=FEATURE_LOSS_CHOICES,
-        help="Feature matching objective; each run uses exactly one choice.",
+        "--task_temperature",
+        type=float,
+        default=0.07,
+        help="Temperature for bidirectional student sketch/photo contrastive CE.",
     )
     parser.add_argument(
-        "--lambda_fd",
+        "--gd_temperature",
+        type=float,
+        default=0.07,
+        help="Shared temperature used to form teacher/student gradient targets.",
+    )
+    parser.add_argument(
+        "--lambda_task",
         type=float,
         default=1.0,
-        help="Weight for the photo/sketch feature-distillation loss.",
+        help="Weight for the raw-512D student SBIR contrastive objective.",
+    )
+    parser.add_argument(
+        "--lambda_gd",
+        type=float,
+        default=1.0,
+        help="Weight for bidirectional sketch/photo gradient distillation.",
     )
     return parser
 
@@ -296,11 +306,11 @@ if __name__ == "__main__":
         help="Weight for the teacher prompt retrieval loss.",
     )
     parser.add_argument("--teacher_triplet_margin", type=float, default=0.2)
-    add_feature_distillation_args(parser)
+    add_gradient_distillation_args(parser)
     parser.add_argument(
         "--exp_name",
         type=str,
-        default="clip_kd_feature_distillation_dual_projector",
+        default="clip_kd_gradient_distillation",
     )
 
     args = parser.parse_args()
@@ -336,8 +346,14 @@ if __name__ == "__main__":
         parser.error("--teacher_scheduler_step_size must be at least 1.")
     if args.teacher_scheduler_gamma <= 0:
         parser.error("--teacher_scheduler_gamma must be greater than 0.")
-    if args.lambda_fd <= 0:
-        parser.error("--lambda_fd must be greater than 0.")
+    if args.task_temperature <= 0:
+        parser.error("--task_temperature must be greater than 0.")
+    if args.gd_temperature <= 0:
+        parser.error("--gd_temperature must be greater than 0.")
+    if args.lambda_task < 0:
+        parser.error("--lambda_task must be non-negative.")
+    if args.lambda_gd <= 0:
+        parser.error("--lambda_gd must be greater than 0.")
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
 
     checkpoint_callback = ModelCheckpoint(

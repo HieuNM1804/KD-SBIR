@@ -151,8 +151,8 @@ def default_teacher_cache_path(args, train_dataset):
     return str(Path(cache_dir) / f"{args.dataset}_{config_hash}.pt")
 
 
-def _feature_kd_active(args):
-    return args.lambda_fd > 0
+def _gradient_kd_active(args):
+    return args.lambda_gd > 0
 
 
 def _persistent_teacher_cache_available(args):
@@ -202,7 +202,7 @@ def _load_teacher(args):
         )
         return None
 
-    if not _feature_kd_active(args) and args.teacher_pretrain_epochs == 0:
+    if not _gradient_kd_active(args) and args.teacher_pretrain_epochs == 0:
         return None
 
     print(f"[Teacher] Loading {DFN5B_MODEL} in FP16...")
@@ -258,8 +258,8 @@ class IndependentVisualPromptLearner(nn.Module):
         return self.ctx, list(self.compound_prompts)
 
 
-class FeatureProjector(nn.Module):
-    """Train-time projection from CLIP student to teacher feature space."""
+class GDProjector(nn.Module):
+    """Train-time projection used to compare teacher/student gradients."""
 
     def __init__(
         self,
@@ -311,11 +311,11 @@ class CustomCLIP(nn.Module):
                 "This experiment requires a 512-dimensional CLIP student; "
                 f"got {student_output_dim}."
             )
-        self.photo_feature_projector = FeatureProjector(
+        self.photo_gd_projector = GDProjector(
             student_output_dim,
             DFN5B_OUTPUT_DIM,
         )
-        self.sketch_feature_projector = FeatureProjector(
+        self.sketch_gd_projector = GDProjector(
             student_output_dim,
             DFN5B_OUTPUT_DIM,
         )
@@ -338,15 +338,17 @@ class CustomCLIP(nn.Module):
         projector_params = sum(
             parameter.numel()
             for projector in (
-                self.photo_feature_projector,
-                self.sketch_feature_projector,
+                self.photo_gd_projector,
+                self.sketch_gd_projector,
             )
             for parameter in projector.parameters()
         )
         print(
-            "[Feature KD] separate photo/sketch projectors "
+            "[Gradient KD] separate photo/sketch projectors "
             f"{student_output_dim}->{DFN5B_OUTPUT_DIM}; "
-            f"loss={cfg.feature_loss}, lambda={cfg.lambda_fd}, "
+            f"task_temperature={cfg.task_temperature}, "
+            f"gd_temperature={cfg.gd_temperature}, "
+            f"lambda_task={cfg.lambda_task}, lambda_gd={cfg.lambda_gd}, "
             f"projector_params={projector_params:,}"
         )
 
@@ -844,21 +846,24 @@ class CustomCLIP(nn.Module):
             sk_tensor,
             teacher_photo_base,
             teacher_sketch_base,
-            _label,
+            labels,
         ) = x
         photo_features = self.encode_student_image(photo_tensor, "photo")
         sketch_features = self.encode_student_image(sk_tensor, "sketch")
         if not self.teacher_active:
             raise RuntimeError(
-                "Feature distillation requires an active teacher or a "
+                "Gradient distillation requires an active teacher or a "
                 "compatible persistent teacher cache."
             )
 
         return (
-            self.photo_feature_projector(photo_features),
-            self.sketch_feature_projector(sketch_features),
+            photo_features,
+            sketch_features,
+            self.photo_gd_projector(photo_features),
+            self.sketch_gd_projector(sketch_features),
             teacher_photo_base,
             teacher_sketch_base,
+            labels,
         )
 
     def extract_feature(self, image, modality):
@@ -871,8 +876,12 @@ class ZS_SBIR(pl.LightningModule):
         self.args = args
         self.save_hyperparameters(
             {
-                "feature_loss": args.feature_loss,
-                "lambda_fd": args.lambda_fd,
+                "lambda_task": args.lambda_task,
+                "lambda_gd": args.lambda_gd,
+                "task_temperature": args.task_temperature,
+                "gd_temperature": args.gd_temperature,
+                "gd_directions": "sketch_photo_bidirectional_four_roles",
+                "positive_policy": "same_class_uniform_multi_positive",
                 "projector_layout": "separate",
                 "projector_input_dim": STUDENT_OUTPUT_DIM,
                 "projector_output_dim": DFN5B_OUTPUT_DIM,
@@ -961,9 +970,12 @@ class ZS_SBIR(pl.LightningModule):
         loss, loss_dict = loss_fn(self.args, features)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         bar_names = {
-            "fd_photo": "FD_PHOTO",
-            "fd_sketch": "FD_SKETCH",
-            "fd": "FD",
+            "task": "TASK",
+            "gd": "GD",
+            "gd_sketch_anchor": "GD_SK_A",
+            "gd_photo_key": "GD_PH_K",
+            "gd_photo_anchor": "GD_PH_A",
+            "gd_sketch_key": "GD_SK_K",
         }
         for key, bar_name in bar_names.items():
             self.log(
