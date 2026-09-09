@@ -59,6 +59,27 @@ def encode_openclip_soft_prompt(model, token_ids, contexts):
     return x
 
 
+def deterministic_adaptive_average_tokens(features, output_tokens):
+    """Adaptive-average token sequences with deterministic GEMM backward."""
+    if features.ndim != 3:
+        raise ValueError("Features must have shape [B, N, D].")
+    patch_count = features.shape[1]
+    if not 1 <= output_tokens <= patch_count:
+        raise ValueError("output_tokens must be in [1, patch_count].")
+
+    # These are the same start/end bins used by adaptive average pooling.
+    # Expressing the pooling as a fixed linear map avoids CUDA's
+    # adaptive_avg_pool2d backward kernel, which has no deterministic mode.
+    pooling = features.new_zeros(output_tokens, patch_count)
+    for output_index in range(output_tokens):
+        start = output_index * patch_count // output_tokens
+        end = (
+            (output_index + 1) * patch_count + output_tokens - 1
+        ) // output_tokens
+        pooling[output_index, start:end] = 1.0 / (end - start)
+    return F.linear(features.transpose(1, 2), pooling).transpose(1, 2)
+
+
 class PatchToTextContexts(nn.Module):
     """Project all image patches into a fixed number of soft text tokens."""
 
@@ -109,10 +130,10 @@ class PatchToTextContexts(nn.Module):
         projected = self.patch_projection(
             self.patch_norm(patch_features.float())
         )
-        pooled = F.adaptive_avg_pool1d(
-            projected.transpose(1, 2),
+        pooled = deterministic_adaptive_average_tokens(
+            projected,
             self.context_tokens,
-        ).transpose(1, 2)
+        )
         residual = self.context_norm(pooled)
         return base_context.unsqueeze(0) + self.gate * residual
 

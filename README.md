@@ -22,9 +22,10 @@ C(x) = C_base + g * LN(Pool_M(W * LN(P(x))))
 ```
 
 `W` is a trainable visual-to-text projection, `Pool_M` adaptively reduces all
-patches to exactly M tokens, and `g` is a trainable gate. `C_base`, `W`, and
-`g` are shared between photo and sketch; the class suffix remains
-modality-specific:
+patches to exactly M tokens, and `g` is a trainable gate. The adaptive average
+is implemented as a fixed pooling matrix followed by GEMM, so its CUDA backward
+remains compatible with deterministic training. `C_base`, `W`, and `g` are
+shared between photo and sketch; the class suffix remains modality-specific:
 
 - `[C(x)] a photo of a {class}.`
 - `[C(x)] a sketch of a {class}.`

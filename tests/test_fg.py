@@ -23,6 +23,7 @@ from src.losses_fg import (
 from src.image_text_prompts import (
     ImageConditionedTextPromptLearner,
     PatchToTextContexts,
+    deterministic_adaptive_average_tokens,
 )
 from src.model_fg import (
     FineGrainedCustomCLIP,
@@ -191,6 +192,37 @@ class FineGrainedCacheTests(unittest.TestCase):
 
 
 class FineGrainedLossAndMetricTests(unittest.TestCase):
+    def test_deterministic_patch_pool_matches_adaptive_average(self):
+        generator = torch.Generator().manual_seed(42)
+        for patch_count, context_count in ((49, 8), (256, 12), (16, 16)):
+            features = torch.randn(
+                2,
+                patch_count,
+                7,
+                generator=generator,
+            )
+            expected = torch.nn.functional.adaptive_avg_pool1d(
+                features.transpose(1, 2),
+                context_count,
+            ).transpose(1, 2)
+            actual = deterministic_adaptive_average_tokens(
+                features,
+                context_count,
+            )
+            torch.testing.assert_close(actual, expected)
+
+    def test_patch_pool_backward_allows_deterministic_algorithms(self):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        features = torch.randn(2, 49, 8, device=device, requires_grad=True)
+        previous = torch.are_deterministic_algorithms_enabled()
+        try:
+            torch.use_deterministic_algorithms(True)
+            pooled = deterministic_adaptive_average_tokens(features, 8)
+            pooled.square().mean().backward()
+        finally:
+            torch.use_deterministic_algorithms(previous)
+        self.assertIsNotNone(features.grad)
+
     def test_visual_encoder_returns_only_real_spatial_patch_tokens(self):
         visual = VisionTransformer(
             input_resolution=8,
