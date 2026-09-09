@@ -162,11 +162,17 @@ def build_parser():
         action="store_false",
         dest="text_prompt_gradient_checkpointing",
     )
-    parser.add_argument("--lambda_text_cls", type=float, default=1.0)
-    parser.add_argument("--lambda_teacher_text_cls", type=float, default=1.0)
-    parser.add_argument("--text_cls_temperature", type=float, default=0.07)
+    parser.add_argument("--lambda_student_retrieval", type=float, default=1.0)
+    parser.add_argument("--student_instance_temperature", type=float, default=0.07)
+    parser.add_argument("--lambda_prompt_infonce", type=float, default=1.0)
+    parser.add_argument("--prompt_infonce_temperature", type=float, default=0.07)
     parser.add_argument(
-        "--teacher_text_cls_temperature",
+        "--lambda_teacher_prompt_infonce",
+        type=float,
+        default=1.0,
+    )
+    parser.add_argument(
+        "--teacher_prompt_infonce_temperature",
         type=float,
         default=0.07,
     )
@@ -231,7 +237,7 @@ def build_parser():
     parser.add_argument("--sketch_text_kd_temperature", type=float, default=None)
     parser.add_argument(
         "--exp_name",
-        default="fine_grained_image_conditioned_text_prompts",
+        default="fine_grained_image_conditioned_text_infonce",
     )
     return parser
 
@@ -282,8 +288,11 @@ def validate_args(parser, args):
         "--text_prompt_gate_init": args.text_prompt_gate_init,
         "--text_prompt_lr": args.text_prompt_lr,
         "--teacher_text_prompt_lr": args.teacher_text_prompt_lr,
-        "--text_cls_temperature": args.text_cls_temperature,
-        "--teacher_text_cls_temperature": args.teacher_text_cls_temperature,
+        "--student_instance_temperature": args.student_instance_temperature,
+        "--prompt_infonce_temperature": args.prompt_infonce_temperature,
+        "--teacher_prompt_infonce_temperature": (
+            args.teacher_prompt_infonce_temperature
+        ),
         "--kd_temperature": args.kd_temperature,
         "--image_text_kd_temperature": args.image_text_kd_temperature,
         "--photo_text_kd_temperature": args.photo_text_kd_temperature,
@@ -302,8 +311,11 @@ def validate_args(parser, args):
             args.teacher_text_prompt_weight_decay
         ),
         "--lambda_teacher_retrieval": args.lambda_teacher_retrieval,
-        "--lambda_text_cls": args.lambda_text_cls,
-        "--lambda_teacher_text_cls": args.lambda_teacher_text_cls,
+        "--lambda_student_retrieval": args.lambda_student_retrieval,
+        "--lambda_prompt_infonce": args.lambda_prompt_infonce,
+        "--lambda_teacher_prompt_infonce": (
+            args.lambda_teacher_prompt_infonce
+        ),
         "--lambda_domain": args.lambda_domain,
         "--lambda_modality": args.lambda_modality,
     }
@@ -321,9 +333,16 @@ def validate_args(parser, args):
     if (
         args.lambda_domain == 0
         and args.lambda_modality == 0
-        and args.lambda_text_cls == 0
+        and args.lambda_student_retrieval == 0
+        and args.lambda_prompt_infonce == 0
     ):
         parser.error("At least one student loss must be active.")
+    if (
+        args.teacher_pretrain_epochs > 0
+        and args.lambda_teacher_retrieval == 0
+        and args.lambda_teacher_prompt_infonce == 0
+    ):
+        parser.error("At least one teacher pretraining loss must be active.")
 
 
 def main():

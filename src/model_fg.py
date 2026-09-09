@@ -13,8 +13,8 @@ from clip import clip
 from src.dataset_fg import FineGrainedFullGalleryBatchSampler
 from src.losses_fg import (
     fine_grained_distillation_loss,
+    fine_grained_prompt_infonce_loss,
     fine_grained_teacher_infonce_loss,
-    image_conditioned_text_classification_loss,
 )
 from src.image_text_prompts import ImageConditionedTextPromptLearner
 from src.model import (
@@ -27,7 +27,7 @@ from src.model import (
 )
 
 
-FG_CACHE_FORMAT_VERSION = 6
+FG_CACHE_FORMAT_VERSION = 7
 
 
 def better_acc1_acc5(acc1, acc5, best_acc1, best_acc5):
@@ -149,9 +149,11 @@ def _fg_teacher_config(args):
         {
             "task": "fine_grained_exact_instance",
             "teacher_negative_scope": "full_100_photo_category_gallery",
-            "teacher_objective": "exact_instance_infonce",
+            "teacher_objective": (
+                "visual_and_cross_modal_prompt_exact_instance_infonce"
+            ),
             "teacher_auxiliary_objective": (
-                "photo_and_sketch_image_conditioned_text_classification"
+                "sketch_image_to_photo_text_and_sketch_text_to_photo_image"
             ),
             "scheduler_monitor": "best_unseen_acc1_then_acc5",
             "teacher_instance_temperature": (
@@ -164,10 +166,12 @@ def _fg_teacher_config(args):
             "teacher_text_prompt_weight_decay": (
                 args.teacher_text_prompt_weight_decay
             ),
-            "teacher_text_cls_temperature": (
-                args.teacher_text_cls_temperature
+            "teacher_prompt_infonce_temperature": (
+                args.teacher_prompt_infonce_temperature
             ),
-            "lambda_teacher_text_cls": args.lambda_teacher_text_cls,
+            "lambda_teacher_prompt_infonce": (
+                args.lambda_teacher_prompt_infonce
+            ),
             "checkpoint_selection": "best_unseen_acc1_then_acc5",
         }
     )
@@ -297,8 +301,8 @@ class FineGrainedCustomCLIP(CustomCLIP):
             "sketch",
         )
 
-        # The fixed class banks remain useful as all-class negatives and for
-        # the baseline modality KD objective.
+        # Fixed class text banks are retained only for the baseline modality
+        # KD objective. Exact-instance prompt InfoNCE uses conditioned text.
         student_photo_text = F.normalize(
             self.get_student_text_features("photo"),
             dim=-1,
@@ -330,8 +334,6 @@ class FineGrainedCustomCLIP(CustomCLIP):
             teacher_photo_text,
             student_photo_prompt_text,
             student_sketch_prompt_text,
-            photo_categories,
-            categories,
         )
 
     def _teacher_cache_metadata(self, train_dataset):
@@ -373,9 +375,6 @@ class FineGrainedCustomCLIP(CustomCLIP):
         teacher_dtype = teacher_parameter.dtype
         self.teacher_prompts.requires_grad_(True)
         self.teacher_text_prompt_learner.requires_grad_(True)
-        teacher_sketch_class_text, teacher_photo_class_text = (
-            self.get_teacher_text_features()
-        )
         sampler = FineGrainedFullGalleryBatchSampler(
             train_dataset,
             batch_size=cfg.teacher_pretrain_batch_size,
@@ -446,8 +445,8 @@ class FineGrainedCustomCLIP(CustomCLIP):
 
         for epoch in range(cfg.teacher_pretrain_epochs):
             retrieval_total = 0.0
-            photo_cls_total = 0.0
-            sketch_cls_total = 0.0
+            sketch_to_photo_text_total = 0.0
+            sketch_text_to_photo_total = 0.0
             steps = 0
             self.teacher_text_prompt_learner.train()
             batches = tqdm(
@@ -510,50 +509,48 @@ class FineGrainedCustomCLIP(CustomCLIP):
                                 "sketch",
                             )
                         )
-                        photo_cls = (
-                            image_conditioned_text_classification_loss(
-                                photo_features,
-                                photo_prompt_text,
-                                teacher_photo_class_text,
-                                photo_categories,
-                                cfg.teacher_text_cls_temperature,
-                            )
-                        )
-                        sketch_cls = (
-                            image_conditioned_text_classification_loss(
+                        prompt_infonce, prompt_parts = (
+                            fine_grained_prompt_infonce_loss(
                                 sketch_features,
+                                photo_features,
                                 sketch_prompt_text,
-                                teacher_sketch_class_text,
-                                categories,
-                                cfg.teacher_text_cls_temperature,
+                                photo_prompt_text,
+                                targets,
+                                cfg.teacher_prompt_infonce_temperature,
                             )
                         )
-                        text_cls = 0.5 * (photo_cls + sketch_cls)
                         loss = (
                             cfg.lambda_teacher_retrieval * retrieval
-                            + cfg.lambda_teacher_text_cls * text_cls
+                            + cfg.lambda_teacher_prompt_infonce
+                            * prompt_infonce
                         )
                     optimizer.zero_grad(set_to_none=True)
                     scaler.scale(loss).backward()
                     scaler.step(optimizer)
                     scaler.update()
                     retrieval_total += retrieval.detach().item()
-                    photo_cls_total += photo_cls.detach().item()
-                    sketch_cls_total += sketch_cls.detach().item()
+                    sketch_to_photo_text_total += prompt_parts[
+                        "sketch_to_photo_text"
+                    ].detach().item()
+                    sketch_text_to_photo_total += prompt_parts[
+                        "sketch_text_to_photo"
+                    ].detach().item()
                     steps += 1
                     if show_progress:
                         batches.set_postfix(
-                            T_NCE=f"{retrieval.item():.3f}",
-                            T_CLS=f"{text_cls.item():.3f}",
+                            T_VIS=f"{retrieval.item():.3f}",
+                            T_PROMPT=f"{prompt_infonce.item():.3f}",
                         )
 
             if steps == 0:
                 raise RuntimeError("Teacher pretraining produced no batches.")
             print(
                 f"[Teacher Pretrain] epoch={epoch + 1}, "
-                f"instance_nce={retrieval_total / steps:.6f}, "
-                f"photo_text_cls={photo_cls_total / steps:.6f}, "
-                f"sketch_text_cls={sketch_cls_total / steps:.6f}"
+                f"visual_instance_nce={retrieval_total / steps:.6f}, "
+                "sketch_to_photo_text_nce="
+                f"{sketch_to_photo_text_total / steps:.6f}, "
+                "sketch_text_to_photo_nce="
+                f"{sketch_text_to_photo_total / steps:.6f}"
             )
             train_acc1, train_acc5 = self._validate_teacher_train(
                 train_dataset,
@@ -897,7 +894,14 @@ class FineGrainedZS_SBIR(pl.LightningModule):
         }
 
     def training_step(self, batch, batch_idx):
-        photo, sketch, teacher_photo, teacher_sketch, categories, _ = batch
+        (
+            photo,
+            sketch,
+            teacher_photo,
+            teacher_sketch,
+            categories,
+            targets,
+        ) = batch
         features = self.model(
             (photo, sketch, teacher_photo, teacher_sketch, categories)
         )
@@ -905,28 +909,26 @@ class FineGrainedZS_SBIR(pl.LightningModule):
             self.args,
             features[:9],
         )
-        (
-            student_photo_prompt_text,
-            student_sketch_prompt_text,
-            photo_categories,
-            sketch_categories,
-        ) = features[9:]
-        photo_cls = image_conditioned_text_classification_loss(
-            features[0],
-            student_photo_prompt_text,
-            features[6],
-            photo_categories,
-            self.args.text_cls_temperature,
-        )
-        sketch_cls = image_conditioned_text_classification_loss(
+        student_photo_prompt_text, student_sketch_prompt_text = features[9:]
+        visual_infonce = fine_grained_teacher_infonce_loss(
             features[1],
-            student_sketch_prompt_text,
-            features[5],
-            sketch_categories,
-            self.args.text_cls_temperature,
+            features[0],
+            targets,
+            self.args.student_instance_temperature,
         )
-        text_cls = 0.5 * (photo_cls + sketch_cls)
-        loss = loss + self.args.lambda_text_cls * text_cls
+        prompt_infonce, prompt_parts = fine_grained_prompt_infonce_loss(
+            features[1],
+            features[0],
+            student_sketch_prompt_text,
+            student_photo_prompt_text,
+            targets,
+            self.args.prompt_infonce_temperature,
+        )
+        loss = (
+            loss
+            + self.args.lambda_student_retrieval * visual_infonce
+            + self.args.lambda_prompt_infonce * prompt_infonce
+        )
         self.log("train_loss", loss, on_step=False, on_epoch=True)
         self.log(
             "DOMAIN",
@@ -943,21 +945,28 @@ class FineGrainedZS_SBIR(pl.LightningModule):
             prog_bar=True,
         )
         self.log(
-            "TEXT_CLS",
-            text_cls,
+            "VIS_NCE",
+            visual_infonce,
             on_step=True,
             on_epoch=False,
             prog_bar=True,
         )
         self.log(
-            "TEXT_CLS_PHOTO",
-            photo_cls,
+            "PROMPT_NCE",
+            prompt_infonce,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=True,
+        )
+        self.log(
+            "SKETCH_TO_PHOTO_TEXT_NCE",
+            prompt_parts["sketch_to_photo_text"],
             on_step=False,
             on_epoch=True,
         )
         self.log(
-            "TEXT_CLS_SKETCH",
-            sketch_cls,
+            "SKETCH_TEXT_TO_PHOTO_NCE",
+            prompt_parts["sketch_text_to_photo"],
             on_step=False,
             on_epoch=True,
         )

@@ -21,9 +21,9 @@ from src.dataset_fg import (
     photo_id_from_sketch,
 )
 from src.losses_fg import (
+    fine_grained_prompt_infonce_loss,
     fine_grained_teacher_infonce_loss,
     full_gallery_relational_kd_loss,
-    image_conditioned_text_classification_loss,
 )
 from src.image_text_prompts import (
     ImageConditionedTextPromptLearner,
@@ -151,8 +151,8 @@ class FineGrainedCacheTests(unittest.TestCase):
                 teacher_text_prompt_seed=50042,
                 teacher_text_prompt_lr=1e-3,
                 teacher_text_prompt_weight_decay=1e-4,
-                teacher_text_cls_temperature=0.07,
-                lambda_teacher_text_cls=1.0,
+                teacher_prompt_infonce_temperature=0.07,
+                lambda_teacher_prompt_infonce=1.0,
                 teacher_scheduler_patience=3,
                 teacher_scheduler_gamma=0.1,
                 seed=42,
@@ -182,6 +182,18 @@ class FineGrainedCacheTests(unittest.TestCase):
             self.assertNotEqual(
                 original,
                 default_teacher_cache_path(teacher_text_change, dataset),
+            )
+            teacher_prompt_loss_change = copy(args)
+            teacher_prompt_loss_change.lambda_teacher_prompt_infonce = 0.5
+            self.assertNotEqual(
+                original,
+                default_teacher_cache_path(teacher_prompt_loss_change, dataset),
+            )
+            student_prompt_loss_change = copy(args)
+            student_prompt_loss_change.lambda_prompt_infonce = 0.5
+            self.assertEqual(
+                original,
+                default_teacher_cache_path(student_prompt_loss_change, dataset),
             )
             student_text_count_change = copy(args)
             student_text_count_change.student_n_ctx_text = 4
@@ -220,6 +232,10 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             seed=42,
             lambda_domain=0.0,
             lambda_modality=0.0,
+            lambda_student_retrieval=1.0,
+            lambda_prompt_infonce=1.0,
+            student_instance_temperature=0.07,
+            prompt_infonce_temperature=0.07,
             kd_temperature=0.07,
             photo_text_kd_temperature=0.1,
             sketch_text_kd_temperature=0.1,
@@ -244,26 +260,28 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         photo = torch.randn(100, 3, 8, 8, device=device, dtype=dtype)
         sketch = torch.randn(3, 3, 8, 8, device=device, dtype=dtype)
         categories = torch.ones(3, dtype=torch.long, device=device)
-        features = model(
-            (photo, sketch, torch.empty(0), torch.empty(0), categories)
+        targets = torch.tensor([0, 1, 2], device=device)
+        wrapper = FineGrainedZS_SBIR.__new__(FineGrainedZS_SBIR)
+        torch.nn.Module.__init__(wrapper)
+        wrapper.args = cfg
+        wrapper.model = model
+        logged = {}
+        wrapper.log = lambda key, value, **kwargs: logged.update({key: value})
+        loss = wrapper.training_step(
+            (
+                photo,
+                sketch,
+                torch.empty(0),
+                torch.empty(0),
+                categories,
+                targets,
+            ),
+            0,
         )
-        self.assertEqual(features[0].shape, (100, 16))
-        self.assertEqual(features[1].shape, (3, 16))
-        self.assertEqual(features[9].shape, (100, 16))
-        self.assertEqual(features[10].shape, (3, 16))
-        photo_cls = image_conditioned_text_classification_loss(
-            features[0],
-            features[9],
-            features[6],
-            features[11],
-        )
-        sketch_cls = image_conditioned_text_classification_loss(
-            features[1],
-            features[10],
-            features[5],
-            features[12],
-        )
-        (0.5 * (photo_cls + sketch_cls)).backward()
+        self.assertTrue(torch.isfinite(loss))
+        self.assertIn("VIS_NCE", logged)
+        self.assertIn("PROMPT_NCE", logged)
+        loss.backward()
         visual_grad = sum(
             parameter.grad.abs().sum().item()
             for learner in (
@@ -328,7 +346,6 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         sketch = torch.randn(3, 3, 8, 8, device=device, dtype=dtype)
         photo_labels = torch.ones(100, dtype=torch.long, device=device)
         sketch_labels = torch.ones(3, dtype=torch.long, device=device)
-        fixed_text = torch.randn(5, 4, device=device)
 
         previous = torch.are_deterministic_algorithms_enabled()
         try:
@@ -367,19 +384,14 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
                     photo_features,
                     torch.tensor([0, 1, 2], device=device),
                 )
-                photo_cls = image_conditioned_text_classification_loss(
-                    photo_features,
-                    photo_text,
-                    fixed_text,
-                    photo_labels,
-                )
-                sketch_cls = image_conditioned_text_classification_loss(
+                prompt_infonce, _ = fine_grained_prompt_infonce_loss(
                     sketch_features,
+                    photo_features,
                     sketch_text,
-                    fixed_text,
-                    sketch_labels,
+                    photo_text,
+                    torch.tensor([0, 1, 2], device=device),
                 )
-                loss = retrieval + 0.5 * (photo_cls + sketch_cls)
+                loss = retrieval + prompt_infonce
             loss.backward()
         finally:
             torch.use_deterministic_algorithms(previous)
@@ -551,39 +563,52 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         self.assertGreater(patches.grad.abs().sum().item(), 0.0)
         self.assertGreater(learner.base_context.grad.abs().sum().item(), 0.0)
 
-    def test_image_conditioned_text_classification_uses_all_class_negatives(self):
-        class_text = torch.eye(4)
-        labels = torch.tensor([1, 3])
-        images = class_text[labels].clone().requires_grad_(True)
-        conditioned = class_text[labels].clone().requires_grad_(True)
-        loss = image_conditioned_text_classification_loss(
-            images,
-            conditioned,
-            class_text,
-            labels,
+    def test_prompt_infonce_uses_exact_photo_targets_in_both_directions(self):
+        photo_images = torch.eye(100)
+        photo_text = photo_images.clone()
+        targets = torch.tensor([7, 31, 99])
+        sketch_images = photo_images[targets]
+        sketch_text = photo_text[targets]
+        loss, parts = fine_grained_prompt_infonce_loss(
+            sketch_images,
+            photo_images,
+            sketch_text,
+            photo_text,
+            targets,
             temperature=0.07,
         )
         self.assertLess(loss.item(), 1e-3)
-        loss.backward()
-        self.assertIsNotNone(images.grad)
-        self.assertIsNotNone(conditioned.grad)
+        self.assertLess(parts["sketch_to_photo_text"].item(), 1e-3)
+        self.assertLess(parts["sketch_text_to_photo"].item(), 1e-3)
 
-    def test_image_conditioned_text_classification_is_autocast_safe(self):
-        images = torch.randn(3, 16, requires_grad=True)
-        conditioned = torch.randn(3, 16, requires_grad=True)
-        class_text = torch.randn(5, 16)
+    def test_prompt_infonce_is_autocast_safe_and_backpropagates(self):
+        sketch_images = torch.randn(3, 16, requires_grad=True)
+        photo_images = torch.randn(100, 16, requires_grad=True)
+        sketch_text = torch.randn(3, 16, requires_grad=True)
+        photo_text = torch.randn(100, 16, requires_grad=True)
         with torch.autocast("cpu", dtype=torch.bfloat16):
-            loss = image_conditioned_text_classification_loss(
-                images,
-                conditioned,
-                class_text,
+            loss, parts = fine_grained_prompt_infonce_loss(
+                sketch_images,
+                photo_images,
+                sketch_text,
+                photo_text,
                 torch.tensor([0, 2, 4]),
                 temperature=0.07,
             )
         self.assertEqual(loss.dtype, torch.float32)
+        self.assertEqual(
+            parts["sketch_to_photo_text"].dtype,
+            torch.float32,
+        )
         loss.backward()
-        self.assertIsNotNone(images.grad)
-        self.assertIsNotNone(conditioned.grad)
+        for features in (
+            sketch_images,
+            photo_images,
+            sketch_text,
+            photo_text,
+        ):
+            self.assertIsNotNone(features.grad)
+            self.assertGreater(features.grad.abs().sum().item(), 0.0)
 
     def test_acc1_primary_acc5_tie_break(self):
         self.assertTrue(better_acc1_acc5(0.2, 0.4, 0.1, 0.9))
@@ -760,6 +785,32 @@ class PlateauSchedulerTests(unittest.TestCase):
 
 
 class FineGrainedCliTests(unittest.TestCase):
+    def test_exact_instance_infonce_arguments_are_independent(self):
+        args = build_parser().parse_args(
+            [
+                "--root",
+                "dataset",
+                "--lambda_student_retrieval",
+                "0.5",
+                "--lambda_prompt_infonce",
+                "0.25",
+                "--lambda_teacher_prompt_infonce",
+                "0.75",
+                "--student_instance_temperature",
+                "0.08",
+                "--prompt_infonce_temperature",
+                "0.09",
+                "--teacher_prompt_infonce_temperature",
+                "0.1",
+            ]
+        )
+        self.assertEqual(args.lambda_student_retrieval, 0.5)
+        self.assertEqual(args.lambda_prompt_infonce, 0.25)
+        self.assertEqual(args.lambda_teacher_prompt_infonce, 0.75)
+        self.assertEqual(args.student_instance_temperature, 0.08)
+        self.assertEqual(args.prompt_infonce_temperature, 0.09)
+        self.assertEqual(args.teacher_prompt_infonce_temperature, 0.1)
+
     def test_student_and_teacher_text_prompt_counts_are_independent(self):
         args = build_parser().parse_args(
             [

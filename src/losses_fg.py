@@ -20,53 +20,69 @@ def fine_grained_teacher_infonce_loss(
         raise RuntimeError("Fine-grained training expects a 100-photo gallery.")
     if targets.shape[0] != sketch_features.shape[0]:
         raise RuntimeError("Every sketch query needs one exact photo target.")
-    logits = sketch_features @ photo_features.t() / temperature
+    logits = (sketch_features @ photo_features.t()).float() / temperature
     return F.cross_entropy(logits, targets)
 
 
-def image_conditioned_text_classification_loss(
-    image_features,
-    conditioned_target_text,
-    fixed_class_text,
-    class_labels,
+def fine_grained_prompt_infonce_loss(
+    sketch_image_features,
+    photo_image_features,
+    sketch_prompt_text_features,
+    photo_prompt_text_features,
+    target_photo_indices,
     temperature=0.07,
 ):
-    """Classify images using a patch-conditioned true-class text prompt.
+    """Exact-instance image/text InfoNCE over the 100-photo gallery.
 
-    The fixed text bank supplies negatives for every seen class. Each image's
-    target column is replaced by its image-conditioned text score, which keeps
-    category-pure fine-grained batches compatible with all-class CE.
+    The two cross-domain directions are sketch image -> photo-conditioned text
+    and sketch-conditioned text -> photo image. Both use the paired photo index
+    as target, so the objective preserves instance discrimination within a
+    category rather than collapsing all photos into one class prototype.
     """
     if temperature <= 0:
-        raise ValueError("Classification temperature must be greater than zero.")
-    images = F.normalize(image_features.float(), dim=-1)
-    targets = F.normalize(conditioned_target_text.float(), dim=-1)
-    class_text = F.normalize(
-        fixed_class_text.detach().to(images.device, dtype=torch.float32),
-        dim=-1,
-    )
-    labels = class_labels.long().to(images.device).reshape(-1)
+        raise ValueError("Prompt InfoNCE temperature must be greater than zero.")
 
-    if images.ndim != 2 or targets.shape != images.shape:
-        raise ValueError("Image and conditioned text features must match in 2D.")
-    if class_text.ndim != 2 or class_text.shape[1] != images.shape[1]:
-        raise ValueError("The fixed class text bank has an incompatible width.")
-    if len(labels) != len(images):
-        raise ValueError("Every image needs one class label.")
-    if labels.numel() and (
-        labels.min().item() < 0 or labels.max().item() >= len(class_text)
+    sketch_images = F.normalize(sketch_image_features.float(), dim=-1)
+    photo_images = F.normalize(photo_image_features.float(), dim=-1)
+    sketch_text = F.normalize(sketch_prompt_text_features.float(), dim=-1)
+    photo_text = F.normalize(photo_prompt_text_features.float(), dim=-1)
+    targets = target_photo_indices.to(sketch_images.device).long().reshape(-1)
+
+    if photo_images.ndim != 2 or photo_images.shape[0] != 100:
+        raise RuntimeError("Prompt InfoNCE requires a 100-photo image gallery.")
+    if photo_text.shape != photo_images.shape:
+        raise ValueError("Photo image/text gallery features must match.")
+    if sketch_images.ndim != 2 or sketch_text.shape != sketch_images.shape:
+        raise ValueError("Sketch image/text query features must match.")
+    if sketch_images.shape[1] != photo_images.shape[1]:
+        raise ValueError("Sketch and photo features have incompatible widths.")
+    if len(targets) != len(sketch_images):
+        raise ValueError("Every sketch query needs one exact photo target.")
+    if targets.numel() and (
+        targets.min().item() < 0 or targets.max().item() >= len(photo_images)
     ):
-        raise ValueError("A class label is outside the fixed text bank.")
+        raise ValueError("A target lies outside the 100-photo gallery.")
 
-    # CUDA autocast may produce FP16 matmul logits while the elementwise
-    # conditioned score remains FP32. scatter requires an exact dtype match,
-    # and cross-entropy is also more stable when these logits stay in FP32.
-    logits = (images @ class_text.t()).float() / temperature
-    conditioned_scores = (
-        (images * targets).sum(dim=-1).float() / temperature
+    # Keep logits in FP32 under CUDA autocast for stable cross-entropy.
+    sketch_to_photo_text_logits = (
+        sketch_images @ photo_text.t()
+    ).float() / temperature
+    sketch_text_to_photo_logits = (
+        sketch_text @ photo_images.t()
+    ).float() / temperature
+    sketch_to_photo_text = F.cross_entropy(
+        sketch_to_photo_text_logits,
+        targets,
     )
-    logits = logits.scatter(1, labels[:, None], conditioned_scores[:, None])
-    return F.cross_entropy(logits, labels)
+    sketch_text_to_photo = F.cross_entropy(
+        sketch_text_to_photo_logits,
+        targets,
+    )
+    loss = 0.5 * (sketch_to_photo_text + sketch_text_to_photo)
+    return loss, {
+        "sketch_to_photo_text": sketch_to_photo_text,
+        "sketch_text_to_photo": sketch_text_to_photo,
+    }
 
 
 def full_gallery_relational_kd_loss(
