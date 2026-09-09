@@ -68,7 +68,7 @@ Run `src.train_fg`, not the category-level `src.train` entry point:
 %cd /kaggle/working/KD-SBIR
 
 !python -m src.train_fg \
-  --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
+  --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy-fg \
   --dataset sketchy_2 \
   --epochs 7 \
   --workers 8 \
@@ -111,3 +111,22 @@ Changing `--n_ctx_text` or any teacher text-prompt setting produces a different
 automatic teacher-cache key. Old caches from the baseline are intentionally
 incompatible. Use `--rebuild_teacher_cache` only when replacing an existing
 cache at the same explicit path.
+
+## Offline Kaggle bundle
+
+Two notebook scripts are included:
+
+- `test/kaggle_online.py`: run once with Internet enabled to download the
+  pinned source, Python wheels, ViT-B/32 checkpoint, and DFN5B checkpoint into
+  `/kaggle/working/offline_bundle`. Save that notebook version with output and
+  expose its output as an input dataset.
+- `test/kaggle_offline.py`: attach the saved bundle and the `sketchy-fg`
+  dataset to an Internet-disabled GPU notebook, then run this script. It checks
+  the manifest, commit, checkpoint sizes and SHA256 values, restores both model
+  caches, copies the repository to `/kaggle/working/KD-SBIR`, and runs import,
+  projection, loss, and CLI smoke tests.
+
+The bundle intentionally pins source commit
+`325fda4495dc554be11bbe6794e9a52bde7b2f9e`. The later commit containing the
+bundle scripts is not used as training source, preventing the bundle metadata
+from changing itself.
