@@ -322,7 +322,20 @@ if __name__ == "__main__":
         default="teacher_visual_student_visual_only",
     )
 
+    parser.add_argument(
+        "--student_rsc_prob", type=float, default=0.5,
+        help="Probability of challenging each photo embedding during student training; 0 disables RSC.",
+    )
+    parser.add_argument(
+        "--student_rsc_drop", type=float, default=0.1,
+        help="Maximum fraction of photo embedding coordinates removed by KD-gradient RSC.",
+    )
     args = parser.parse_args()
+    from src.photo_rsc import validate_rsc
+    try:
+        validate_rsc(args.student_rsc_prob, args.student_rsc_drop)
+    except ValueError as error:
+        parser.error(str(error))
     if args.teacher_prompt_seed is None:
         args.teacher_prompt_seed = args.seed
     if args.photo_text_kd_temperature is None:

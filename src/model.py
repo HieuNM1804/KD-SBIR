@@ -27,6 +27,7 @@ from src.losses import (
     loss_fn,
 )
 from src.teacher_prompts import build_teacher_prompt_controller
+from src.photo_rsc import photo_rsc_features
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -984,7 +985,9 @@ class ZS_SBIR(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         features = self(batch)
+        features, rsc_mask = photo_rsc_features(self.args, features, training=self.training)
         loss, loss_dict = loss_fn(self.args, features)
+        self.log('rsc_drop_fraction', (~rsc_mask).float().mean(), on_step=False, on_epoch=True)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         bar_names = {
             "domain_kd": "DOMAIN",
