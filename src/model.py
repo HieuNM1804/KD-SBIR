@@ -440,12 +440,25 @@ class CustomCLIP(nn.Module):
             "skipped DFN5B encoding and teacher pretraining."
         )
 
-    def _encode_teacher_image(self, images, modality):
+    def _encode_teacher_image(
+        self,
+        images,
+        modality,
+        return_patch_tokens=False,
+    ):
         if self.teacher_prompts is None:
+            if return_patch_tokens:
+                raise RuntimeError(
+                    "Teacher patch tokens require active teacher visual prompts."
+                )
             return self._teacher.encode_image(images)
 
         def encode(current_images):
-            return self.teacher_prompts(current_images, modality)
+            return self.teacher_prompts(
+                current_images,
+                modality,
+                return_patch_tokens=return_patch_tokens,
+            )
 
         if (
             self.cfg.teacher_prompt_gradient_checkpointing

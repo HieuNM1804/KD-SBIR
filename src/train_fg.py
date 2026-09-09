@@ -111,6 +111,56 @@ def build_parser():
     parser.add_argument("--max_size", type=int, default=224)
     parser.add_argument("--n_ctx_visual", type=int, default=3)
     parser.add_argument("--prompt_depth", type=int, default=12)
+    parser.add_argument(
+        "--n_ctx_text",
+        "--text_prompt_tokens",
+        dest="n_ctx_text",
+        type=int,
+        default=8,
+        help=(
+            "Number of image-conditioned soft text tokens used by both "
+            "student and teacher."
+        ),
+    )
+    parser.add_argument("--text_prompt_gate_init", type=float, default=0.1)
+    parser.add_argument("--text_prompt_seed", type=int, default=None)
+    parser.add_argument("--teacher_text_prompt_seed", type=int, default=None)
+    parser.add_argument("--text_prompt_encode_chunk_size", type=int, default=64)
+    parser.add_argument(
+        "--teacher_text_prompt_encode_chunk_size",
+        type=int,
+        default=32,
+    )
+    parser.add_argument("--text_prompt_lr", type=float, default=1e-3)
+    parser.add_argument("--text_prompt_weight_decay", type=float, default=1e-4)
+    parser.add_argument(
+        "--teacher_text_prompt_lr",
+        type=float,
+        default=1e-3,
+    )
+    parser.add_argument(
+        "--teacher_text_prompt_weight_decay",
+        type=float,
+        default=1e-4,
+    )
+    parser.add_argument(
+        "--text_prompt_gradient_checkpointing",
+        action="store_true",
+        default=True,
+    )
+    parser.add_argument(
+        "--no_text_prompt_gradient_checkpointing",
+        action="store_false",
+        dest="text_prompt_gradient_checkpointing",
+    )
+    parser.add_argument("--lambda_text_cls", type=float, default=1.0)
+    parser.add_argument("--lambda_teacher_text_cls", type=float, default=1.0)
+    parser.add_argument("--text_cls_temperature", type=float, default=0.07)
+    parser.add_argument(
+        "--teacher_text_cls_temperature",
+        type=float,
+        default=0.07,
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--lr", type=float, default=1e-2)
     parser.add_argument("--momentum", type=float, default=0.9)
@@ -170,13 +220,20 @@ def build_parser():
     parser.add_argument("--image_text_kd_temperature", type=float, default=0.1)
     parser.add_argument("--photo_text_kd_temperature", type=float, default=None)
     parser.add_argument("--sketch_text_kd_temperature", type=float, default=None)
-    parser.add_argument("--exp_name", default="fine_grained_distillation")
+    parser.add_argument(
+        "--exp_name",
+        default="fine_grained_image_conditioned_text_prompts",
+    )
     return parser
 
 
 def validate_args(parser, args):
     if args.teacher_prompt_seed is None:
         args.teacher_prompt_seed = args.seed
+    if args.text_prompt_seed is None:
+        args.text_prompt_seed = args.seed + 40_000
+    if args.teacher_text_prompt_seed is None:
+        args.teacher_text_prompt_seed = args.seed + 50_000
     if args.photo_text_kd_temperature is None:
         args.photo_text_kd_temperature = args.image_text_kd_temperature
     if args.sketch_text_kd_temperature is None:
@@ -186,6 +243,14 @@ def validate_args(parser, args):
         parser.error("--n_ctx_visual must be at least 1.")
     if args.prompt_depth < 1:
         parser.error("--prompt_depth must be at least 1.")
+    if not 1 <= args.n_ctx_text <= 32:
+        parser.error("--n_ctx_text must be in [1, 32].")
+    if args.text_prompt_encode_chunk_size < 1:
+        parser.error("--text_prompt_encode_chunk_size must be positive.")
+    if args.teacher_text_prompt_encode_chunk_size < 1:
+        parser.error(
+            "--teacher_text_prompt_encode_chunk_size must be positive."
+        )
     if args.batch_size < 1 or args.test_batch_size < 1:
         parser.error("Batch sizes must be positive.")
     if args.teacher_pretrain_batch_size < 1:
@@ -203,6 +268,11 @@ def validate_args(parser, args):
         "--teacher_scheduler_gamma": args.teacher_scheduler_gamma,
         "--scheduler_gamma": args.scheduler_gamma,
         "--teacher_instance_temperature": args.teacher_instance_temperature,
+        "--text_prompt_gate_init": args.text_prompt_gate_init,
+        "--text_prompt_lr": args.text_prompt_lr,
+        "--teacher_text_prompt_lr": args.teacher_text_prompt_lr,
+        "--text_cls_temperature": args.text_cls_temperature,
+        "--teacher_text_cls_temperature": args.teacher_text_cls_temperature,
         "--kd_temperature": args.kd_temperature,
         "--image_text_kd_temperature": args.image_text_kd_temperature,
         "--photo_text_kd_temperature": args.photo_text_kd_temperature,
@@ -216,7 +286,13 @@ def validate_args(parser, args):
         "--weight_decay": args.weight_decay,
         "--teacher_momentum": args.teacher_momentum,
         "--teacher_weight_decay": args.teacher_weight_decay,
+        "--text_prompt_weight_decay": args.text_prompt_weight_decay,
+        "--teacher_text_prompt_weight_decay": (
+            args.teacher_text_prompt_weight_decay
+        ),
         "--lambda_teacher_retrieval": args.lambda_teacher_retrieval,
+        "--lambda_text_cls": args.lambda_text_cls,
+        "--lambda_teacher_text_cls": args.lambda_teacher_text_cls,
         "--lambda_domain": args.lambda_domain,
         "--lambda_modality": args.lambda_modality,
     }
@@ -231,8 +307,12 @@ def validate_args(parser, args):
         parser.error("--teacher_scheduler_gamma must be less than 1.")
     if args.scheduler_gamma >= 1:
         parser.error("--scheduler_gamma must be less than 1.")
-    if args.lambda_domain == 0 and args.lambda_modality == 0:
-        parser.error("At least one student distillation loss must be active.")
+    if (
+        args.lambda_domain == 0
+        and args.lambda_modality == 0
+        and args.lambda_text_cls == 0
+    ):
+        parser.error("At least one student loss must be active.")
 
 
 def main():

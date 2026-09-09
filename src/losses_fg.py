@@ -24,6 +24,46 @@ def fine_grained_teacher_infonce_loss(
     return F.cross_entropy(logits, targets)
 
 
+def image_conditioned_text_classification_loss(
+    image_features,
+    conditioned_target_text,
+    fixed_class_text,
+    class_labels,
+    temperature=0.07,
+):
+    """Classify images using a patch-conditioned true-class text prompt.
+
+    The fixed text bank supplies negatives for every seen class. Each image's
+    target column is replaced by its image-conditioned text score, which keeps
+    category-pure fine-grained batches compatible with all-class CE.
+    """
+    if temperature <= 0:
+        raise ValueError("Classification temperature must be greater than zero.")
+    images = F.normalize(image_features.float(), dim=-1)
+    targets = F.normalize(conditioned_target_text.float(), dim=-1)
+    class_text = F.normalize(
+        fixed_class_text.detach().to(images.device, dtype=torch.float32),
+        dim=-1,
+    )
+    labels = class_labels.long().to(images.device).reshape(-1)
+
+    if images.ndim != 2 or targets.shape != images.shape:
+        raise ValueError("Image and conditioned text features must match in 2D.")
+    if class_text.ndim != 2 or class_text.shape[1] != images.shape[1]:
+        raise ValueError("The fixed class text bank has an incompatible width.")
+    if len(labels) != len(images):
+        raise ValueError("Every image needs one class label.")
+    if labels.numel() and (
+        labels.min().item() < 0 or labels.max().item() >= len(class_text)
+    ):
+        raise ValueError("A class label is outside the fixed text bank.")
+
+    logits = images @ class_text.t() / temperature
+    conditioned_scores = (images * targets).sum(dim=-1) / temperature
+    logits = logits.scatter(1, labels[:, None], conditioned_scores[:, None])
+    return F.cross_entropy(logits, labels)
+
+
 def full_gallery_relational_kd_loss(
     student_sketch,
     student_photo,

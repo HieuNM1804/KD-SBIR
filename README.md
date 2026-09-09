@@ -1,62 +1,113 @@
-# KD-SBIR: Teacher Visual Prompts, Student Visual-Only Prompts
+# Fine-grained SBIR with image-conditioned text prompts
 
-This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from
-`experiment/teacher-visual-prompt-tuning`. The teacher has separate photo and
-sketch deep visual prompts, learns only from retrieval triplet loss, and is
-validated on the unseen retrieval split after each pretraining epoch.
+This experiment is based directly on
+`experiment/fine-grained-teacher-train-metrics`. It preserves exact-instance
+fine-grained training, the 100-photo category gallery, teacher/student visual
+prompts, Domain KD, Modality KD, and Acc@1/Acc@5 model selection.
 
-The student CLIP backbone is fully frozen. Its only trainable parameters are
-independent photo and sketch deep visual prompts. The student text encoder has
-no learnable prompt tokens and remains fully frozen. Image-text distillation
-uses fixed CLIP features from these modality-specific templates:
+The new branch adds a text prompt learner to both the frozen CLIP ViT-B/32
+student and the frozen DFN5B ViT-H/14 teacher. The number of soft text tokens
+is supplied at run time with `--n_ctx_text` (or the equivalent
+`--text_prompt_tokens`).
 
-- `a photo of a {class}.`
-- `a sketch of a {class}.`
+## Image-to-text prompt path
 
-The student objectives are sketch-photo relational KD, photo-text KD, and
-sketch-text KD. Setting an objective weight to zero disables that objective.
+For each photo or sketch, only the real final-layer spatial patch tokens are
+used; CLS and visual prompt tokens are excluded. If the patch tensor is
+`P(x) in R^(N x Dv)`, the M text context tokens are
 
-```bash
-!python -m src.train \
-    --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
-    --dataset sketchy_1 \
-    --epochs 7 \
-    --workers 8 \
-    --batch_size 64 \
-    --test_batch_size 1024 \
-    --n_ctx_visual 3 \
-    --prompt_depth 12 \
-    --lambda_domain 1.0 \
-    --lambda_modality 1.0 \
-    --photo_text_kd_temperature 0.2 \
-    --sketch_text_kd_temperature 0.02 \
-    --lr 1e-3 \
-    --momentum 0.94 \
-    --weight_decay 1e-3 \
-    --teacher_pretrain_epochs 4 \
-    --teacher_pretrain_batch_size 64 \
-    --teacher_n_ctx_visual 3 \
-    --teacher_prompt_depth 12 \
-    --teacher_prompt_std 0.02 \
-    --teacher_prompt_lr 3e-5 \
-    --teacher_prompt_seed 42 \
-    --teacher_momentum 0.9 \
-    --teacher_weight_decay 1e-3 \
-    --lambda_teacher_retrieval 1.5 \
-    --teacher_triplet_margin 0.2 \
-    --seed 42 \
-    --exp_name teacher_visual_student_visual_only \
-    --progress
+```text
+C(x) = C_base + g * LN(Pool_M(W * LN(P(x))))
 ```
 
-Teacher caches are named from the dataset and complete teacher configuration.
-Changing only student prompts, losses, or optimizer settings reuses a compatible
-teacher cache. Use `--rebuild_teacher_cache` only when intentionally replacing
-that cache.
+`W` is a trainable visual-to-text projection, `Pool_M` adaptively reduces all
+patches to exactly M tokens, and `g` is a trainable gate. `C_base`, `W`, and
+`g` are shared between photo and sketch; the class suffix remains
+modality-specific:
 
-Teacher prompt pretraining keeps the epoch with the highest unseen P@K, restores
-that prompt state, and materializes the distillation cache from it. Student
-checkpoints are also ranked by unseen P@K instead of mAP. Ties keep the earlier
-teacher epoch. Neither state cloning nor checkpoint serialization consumes RNG.
-Because unseen labels determine both selections, this setting has test-set
-model-selection leakage and is not a strict inductive ZS-SBIR protocol.
+- `[C(x)] a photo of a {class}.`
+- `[C(x)] a sketch of a {class}.`
+
+Thus every text prompt is conditioned on the current image while keeping one
+common patch-to-text mapping across both domains.
+
+## Objectives
+
+The fine-grained sampler creates a category-pure batch, so its batch alone has
+no category negatives. Classification therefore uses the fixed text prototype
+bank of every seen class as negatives. For each image, the true-class column is
+replaced by the score from its image-conditioned text prompt before applying
+cross-entropy.
+
+Teacher pretraining uses
+
+```text
+L_teacher = lambda_teacher_retrieval * L_exact_instance_InfoNCE
+          + lambda_teacher_text_cls * (L_photo_text_CE + L_sketch_text_CE) / 2
+```
+
+Student training uses
+
+```text
+L_student = lambda_domain * L_domain_KD
+          + lambda_modality * L_modality_KD
+          + lambda_text_cls * (L_photo_text_CE + L_sketch_text_CE) / 2
+```
+
+The CLIP/DFN backbones stay frozen. Teacher visual prompts and teacher text
+prompts are optimized jointly during teacher pretraining. Student visual
+prompts and student text prompts are optimized jointly during student
+training, with separate learning rates. Retrieval inference is unchanged and
+uses the student visual features only.
+
+## Kaggle command
+
+Run `src.train_fg`, not the category-level `src.train` entry point:
+
+```python
+%cd /kaggle/working/KD-SBIR
+
+!python -m src.train_fg \
+  --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
+  --dataset sketchy_2 \
+  --epochs 7 \
+  --workers 8 \
+  --batch_size 64 \
+  --test_batch_size 1024 \
+  --n_ctx_visual 3 \
+  --prompt_depth 12 \
+  --n_ctx_text 8 \
+  --text_prompt_gate_init 0.1 \
+  --text_prompt_lr 1e-3 \
+  --text_prompt_weight_decay 1e-4 \
+  --text_cls_temperature 0.07 \
+  --lambda_text_cls 1.0 \
+  --teacher_pretrain_epochs 2 \
+  --teacher_pretrain_batch_size 64 \
+  --teacher_n_ctx_visual 10 \
+  --teacher_prompt_depth 12 \
+  --teacher_prompt_std 0.02 \
+  --teacher_prompt_lr 3e-2 \
+  --teacher_text_prompt_lr 1e-3 \
+  --teacher_text_prompt_weight_decay 1e-4 \
+  --teacher_text_cls_temperature 0.07 \
+  --lambda_teacher_retrieval 1.5 \
+  --lambda_teacher_text_cls 1.0 \
+  --teacher_momentum 0.9 \
+  --teacher_weight_decay 1e-3 \
+  --lambda_domain 3.0 \
+  --kd_temperature 0.07 \
+  --lambda_modality 1.0 \
+  --image_text_kd_temperature 0.1 \
+  --lr 1e-2 \
+  --momentum 0.9 \
+  --weight_decay 1e-3 \
+  --seed 42 \
+  --exp_name fg_image_conditioned_text_m8 \
+  --progress
+```
+
+Changing `--n_ctx_text` or any teacher text-prompt setting produces a different
+automatic teacher-cache key. Old caches from the baseline are intentionally
+incompatible. Use `--rebuild_teacher_cache` only when replacing an existing
+cache at the same explicit path.

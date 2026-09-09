@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import torch
 
+from clip import clip
+from clip.model import CLIP, VisionTransformer
 from src.data_config import UNSEEN_CLASSES
 from src.dataset_fg import (
     FineGrainedFullGalleryBatchSampler,
@@ -16,6 +18,11 @@ from src.dataset_fg import (
 from src.losses_fg import (
     fine_grained_teacher_infonce_loss,
     full_gallery_relational_kd_loss,
+    image_conditioned_text_classification_loss,
+)
+from src.image_text_prompts import (
+    ImageConditionedTextPromptLearner,
+    PatchToTextContexts,
 )
 from src.model_fg import (
     FineGrainedCustomCLIP,
@@ -26,6 +33,7 @@ from src.model_fg import (
     fine_grained_train_metric_ids,
 )
 from src.model import _reduce_on_plateau_patience
+from src.train_fg import build_parser
 
 
 class FineGrainedDataTests(unittest.TestCase):
@@ -130,6 +138,13 @@ class FineGrainedCacheTests(unittest.TestCase):
                 lambda_teacher_retrieval=1.5,
                 teacher_triplet_margin=0.2,
                 teacher_instance_temperature=0.07,
+                n_ctx_text=8,
+                text_prompt_gate_init=0.1,
+                teacher_text_prompt_seed=50042,
+                teacher_text_prompt_lr=1e-3,
+                teacher_text_prompt_weight_decay=1e-4,
+                teacher_text_cls_temperature=0.07,
+                lambda_teacher_text_cls=1.0,
                 teacher_scheduler_patience=3,
                 teacher_scheduler_gamma=0.1,
                 seed=42,
@@ -154,9 +169,105 @@ class FineGrainedCacheTests(unittest.TestCase):
                 original,
                 default_teacher_cache_path(scheduler_change, dataset),
             )
+            teacher_text_change = copy(args)
+            teacher_text_change.teacher_text_prompt_lr = 2e-3
+            self.assertNotEqual(
+                original,
+                default_teacher_cache_path(teacher_text_change, dataset),
+            )
 
 
 class FineGrainedLossAndMetricTests(unittest.TestCase):
+    def test_visual_encoder_returns_only_real_spatial_patch_tokens(self):
+        visual = VisionTransformer(
+            input_resolution=8,
+            patch_size=4,
+            width=64,
+            layers=2,
+            heads=1,
+            output_dim=16,
+        )
+        pooled, patches = visual(
+            torch.randn(2, 3, 8, 8),
+            prompt=torch.randn(2, 64),
+            compound_prompts=[torch.randn(2, 64)],
+            return_patch_tokens=True,
+        )
+        self.assertEqual(pooled.shape, (2, 16))
+        self.assertEqual(patches.shape, (2, 4, 64))
+
+    def test_patch_projection_creates_requested_image_conditioned_contexts(self):
+        module = PatchToTextContexts(
+            visual_width=8,
+            text_width=6,
+            context_tokens=3,
+            seed=42,
+        )
+        patches = torch.randn(2, 12, 8, requires_grad=True)
+        base = torch.randn(3, 6, requires_grad=True)
+        contexts = module(patches, base)
+        self.assertEqual(contexts.shape, (2, 3, 6))
+        self.assertFalse(torch.equal(contexts[0], contexts[1]))
+        contexts.square().mean().backward()
+        self.assertIsNotNone(patches.grad)
+        self.assertIsNotNone(base.grad)
+        self.assertIsNotNone(module.patch_projection.weight.grad)
+
+    def test_openai_text_prompt_learner_backpropagates_to_image_patches(self):
+        text_model = CLIP(
+            embed_dim=16,
+            image_resolution=8,
+            vision_layers=1,
+            vision_width=64,
+            vision_patch_size=4,
+            context_length=77,
+            vocab_size=49408,
+            transformer_width=32,
+            transformer_heads=1,
+            transformer_layers=1,
+        ).eval().requires_grad_(False)
+        learner = ImageConditionedTextPromptLearner(
+            text_model=text_model,
+            tokenizer=clip.tokenize,
+            classnames=("cat", "dog"),
+            visual_width=64,
+            context_tokens=3,
+            seed=42,
+            text_backend="openai",
+            gradient_checkpointing=True,
+        )
+        patches = torch.randn(2, 4, 64, requires_grad=True)
+        features, contexts = learner(
+            text_model,
+            patches,
+            torch.tensor([0, 1]),
+            "sketch",
+        )
+        self.assertEqual(features.shape, (2, 16))
+        self.assertEqual(contexts.shape, (2, 3, 32))
+        features[:, 0].sum().backward()
+        self.assertIsNotNone(patches.grad)
+        self.assertIsNotNone(learner.base_context.grad)
+        self.assertGreater(patches.grad.abs().sum().item(), 0.0)
+        self.assertGreater(learner.base_context.grad.abs().sum().item(), 0.0)
+
+    def test_image_conditioned_text_classification_uses_all_class_negatives(self):
+        class_text = torch.eye(4)
+        labels = torch.tensor([1, 3])
+        images = class_text[labels].clone().requires_grad_(True)
+        conditioned = class_text[labels].clone().requires_grad_(True)
+        loss = image_conditioned_text_classification_loss(
+            images,
+            conditioned,
+            class_text,
+            labels,
+            temperature=0.07,
+        )
+        self.assertLess(loss.item(), 1e-3)
+        loss.backward()
+        self.assertIsNotNone(images.grad)
+        self.assertIsNotNone(conditioned.grad)
+
     def test_acc1_primary_acc5_tie_break(self):
         self.assertTrue(better_acc1_acc5(0.2, 0.4, 0.1, 0.9))
         self.assertTrue(better_acc1_acc5(0.2, 0.5, 0.2, 0.4))
@@ -305,20 +416,38 @@ class PlateauSchedulerTests(unittest.TestCase):
     def test_fg_student_scheduler_monitors_validation_selection(self):
         model = FineGrainedZS_SBIR.__new__(FineGrainedZS_SBIR)
         torch.nn.Module.__init__(model)
-        model.model = torch.nn.Linear(2, 2)
+        model.model = torch.nn.Module()
+        model.model.visual_prompts = torch.nn.Linear(2, 2)
+        model.model.student_text_prompt_learner = torch.nn.Linear(2, 2)
         model.args = SimpleNamespace(
             lr=1e-2,
             momentum=0.9,
             weight_decay=1e-3,
+            text_prompt_lr=2e-3,
+            text_prompt_weight_decay=1e-4,
             scheduler_gamma=0.1,
             scheduler_patience=3,
         )
         config = model.configure_optimizers()
+        groups = config["optimizer"].param_groups
+        self.assertEqual(
+            [group["name"] for group in groups],
+            ["visual_prompts", "image_conditioned_text_prompts"],
+        )
+        self.assertEqual([group["lr"] for group in groups], [1e-2, 2e-3])
         self.assertEqual(config["lr_scheduler"]["monitor"], "fg_selection")
         self.assertIsInstance(
             config["lr_scheduler"]["scheduler"],
             torch.optim.lr_scheduler.ReduceLROnPlateau,
         )
+
+
+class FineGrainedCliTests(unittest.TestCase):
+    def test_text_prompt_token_alias_sets_shared_count(self):
+        args = build_parser().parse_args(
+            ["--root", "dataset", "--text_prompt_tokens", "5"]
+        )
+        self.assertEqual(args.n_ctx_text, 5)
 
 
 if __name__ == "__main__":
