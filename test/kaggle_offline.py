@@ -1,4 +1,4 @@
-"""Restore image-conditioned fine-grained text prompts on offline Kaggle."""
+"""Restore exact-instance fine-grained text-prompt InfoNCE on Kaggle."""
 
 from pathlib import Path
 import glob
@@ -11,9 +11,9 @@ import sys
 
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
-EXPECTED_BRANCH = "experiment/fine-grained-image-conditioned-text-prompts"
-EXPECTED_COMMIT = "8b4dddcaf8d0c854e43ffaded6149f19ab005f3c"
-EXPECTED_TASK = "fine_grained_image_conditioned_text_prompts"
+EXPECTED_BRANCH = "experiment/fine-grained-image-conditioned-text-infonce"
+EXPECTED_COMMIT = "a244c06fd8d6fb79e34af35b29c8e529b9dfffa6"
+EXPECTED_TASK = "fine_grained_image_conditioned_text_infonce"
 EXPECTED_ENTRYPOINT = "src.train_fg"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy-fg"
 
@@ -79,7 +79,7 @@ for manifest_path in manifest_paths:
 
 if not matching_bundles:
     raise FileNotFoundError(
-        "Cannot find the required FG image-conditioned text bundle.\n\n"
+        "Cannot find the required FG exact-instance prompt bundle.\n\n"
         f"Expected branch: {EXPECTED_BRANCH}\n"
         f"Expected commit: {EXPECTED_COMMIT}\n"
         f"Expected task: {EXPECTED_TASK}\n"
@@ -251,7 +251,10 @@ import open_clip
 import pytorch_lightning
 
 from src.image_text_prompts import PatchToTextContexts
-from src.losses_fg import image_conditioned_text_classification_loss
+from src.losses_fg import (
+    fine_grained_prompt_infonce_loss,
+    fine_grained_teacher_infonce_loss,
+)
 from src.model_fg import FineGrainedCustomCLIP, FineGrainedZS_SBIR
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -264,27 +267,47 @@ assert contexts.shape == (2, 8, 32)
 contexts.square().mean().backward()
 assert patches.grad is not None
 
-images = torch.randn(2, 16, device=device, requires_grad=True)
-target_text = torch.randn(2, 16, device=device, requires_grad=True)
-class_text = torch.randn(4, 16, device=device)
+sketch_images = torch.randn(3, 16, device=device, requires_grad=True)
+photo_images = torch.randn(100, 16, device=device, requires_grad=True)
+sketch_text = torch.randn(3, 16, device=device, requires_grad=True)
+photo_text = torch.randn(100, 16, device=device, requires_grad=True)
+targets = torch.tensor([0, 1, 2], device=device)
 autocast_dtype = torch.float16 if device.type == "cuda" else torch.bfloat16
 with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-    loss = image_conditioned_text_classification_loss(
-        images,
-        target_text,
-        class_text,
-        torch.tensor([0, 1], device=device),
+    visual_loss = fine_grained_teacher_infonce_loss(
+        sketch_images,
+        photo_images,
+        targets,
         0.07,
     )
-assert loss.ndim == 0 and loss.dtype == torch.float32
+    prompt_loss, prompt_parts = fine_grained_prompt_infonce_loss(
+        sketch_images,
+        photo_images,
+        sketch_text,
+        photo_text,
+        targets,
+        0.07,
+    )
+    loss = visual_loss + prompt_loss
+assert visual_loss.ndim == prompt_loss.ndim == loss.ndim == 0
+assert visual_loss.dtype == prompt_loss.dtype == loss.dtype == torch.float32
+assert set(prompt_parts) == {
+    "sketch_to_photo_text",
+    "sketch_text_to_photo",
+}
+assert torch.isfinite(loss)
 loss.backward()
+for features in (sketch_images, photo_images, sketch_text, photo_text):
+    assert features.grad is not None
+    assert torch.isfinite(features.grad).all()
+    assert features.grad.abs().sum() > 0
 
 print("PyTorch:", torch.__version__)
 print("OpenCLIP:", getattr(open_clip, "__version__", "unknown"))
 print("Lightning:", pytorch_lightning.__version__)
 print("CUDA available:", torch.cuda.is_available())
 print("Deterministic patch-pooling backward: OK")
-print("Autocast text-classification backward: OK")
+print("Exact-instance visual/prompt InfoNCE backward: OK")
 """
 subprocess.run(
     [sys.executable, "-c", smoke_test],
@@ -302,7 +325,7 @@ subprocess.run(
 
 print()
 print("=" * 70)
-print("OFFLINE FG IMAGE-CONDITIONED TEXT-PROMPT SETUP COMPLETE")
+print("OFFLINE FG EXACT-INSTANCE TEXT-PROMPT INFONCE SETUP COMPLETE")
 print("=" * 70)
 print("Project:", WORKING_PROJECT)
 print("Dataset:", SKETCHY_ROOT)

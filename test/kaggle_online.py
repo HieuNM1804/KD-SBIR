@@ -1,4 +1,4 @@
-"""Build the offline Kaggle bundle for image-conditioned FG text prompts."""
+"""Build the offline Kaggle bundle for exact-instance FG prompt InfoNCE."""
 
 from pathlib import Path
 import hashlib
@@ -17,10 +17,10 @@ CLIP_CACHE = BUNDLE / "clip_cache"
 DFN_DIR = BUNDLE / "dfn5b_openclip"
 
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
-BRANCH = "experiment/fine-grained-image-conditioned-text-prompts"
+BRANCH = "experiment/fine-grained-image-conditioned-text-infonce"
 # Pin the source commit. The later bundle-script commit intentionally differs.
-COMMIT = "8b4dddcaf8d0c854e43ffaded6149f19ab005f3c"
-TASK = "fine_grained_image_conditioned_text_prompts"
+COMMIT = "a244c06fd8d6fb79e34af35b29c8e529b9dfffa6"
+TASK = "fine_grained_image_conditioned_text_infonce"
 ENTRYPOINT = "src.train_fg"
 DATASET = "b20dccn616nguynhutun/sketchy-fg"
 
@@ -251,7 +251,7 @@ bundle_size = sum(
 )
 print("[6/6] Bundle validated")
 print("=" * 70)
-print("ONLINE FG IMAGE-CONDITIONED TEXT-PROMPT BUNDLE COMPLETE")
+print("ONLINE FG EXACT-INSTANCE TEXT-PROMPT INFONCE BUNDLE COMPLETE")
 print("=" * 70)
 print("Bundle:", BUNDLE)
 print("Branch:", BRANCH)
