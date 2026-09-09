@@ -138,7 +138,8 @@ class FineGrainedCacheTests(unittest.TestCase):
                 lambda_teacher_retrieval=1.5,
                 teacher_triplet_margin=0.2,
                 teacher_instance_temperature=0.07,
-                n_ctx_text=8,
+                student_n_ctx_text=8,
+                teacher_n_ctx_text=12,
                 text_prompt_gate_init=0.1,
                 teacher_text_prompt_seed=50042,
                 teacher_text_prompt_lr=1e-3,
@@ -174,6 +175,18 @@ class FineGrainedCacheTests(unittest.TestCase):
             self.assertNotEqual(
                 original,
                 default_teacher_cache_path(teacher_text_change, dataset),
+            )
+            student_text_count_change = copy(args)
+            student_text_count_change.student_n_ctx_text = 4
+            self.assertEqual(
+                original,
+                default_teacher_cache_path(student_text_count_change, dataset),
+            )
+            teacher_text_count_change = copy(args)
+            teacher_text_count_change.teacher_n_ctx_text = 4
+            self.assertNotEqual(
+                original,
+                default_teacher_cache_path(teacher_text_count_change, dataset),
             )
 
 
@@ -264,6 +277,23 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             temperature=0.07,
         )
         self.assertLess(loss.item(), 1e-3)
+        loss.backward()
+        self.assertIsNotNone(images.grad)
+        self.assertIsNotNone(conditioned.grad)
+
+    def test_image_conditioned_text_classification_is_autocast_safe(self):
+        images = torch.randn(3, 16, requires_grad=True)
+        conditioned = torch.randn(3, 16, requires_grad=True)
+        class_text = torch.randn(5, 16)
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            loss = image_conditioned_text_classification_loss(
+                images,
+                conditioned,
+                class_text,
+                torch.tensor([0, 2, 4]),
+                temperature=0.07,
+            )
+        self.assertEqual(loss.dtype, torch.float32)
         loss.backward()
         self.assertIsNotNone(images.grad)
         self.assertIsNotNone(conditioned.grad)
@@ -443,11 +473,26 @@ class PlateauSchedulerTests(unittest.TestCase):
 
 
 class FineGrainedCliTests(unittest.TestCase):
-    def test_text_prompt_token_alias_sets_shared_count(self):
+    def test_student_and_teacher_text_prompt_counts_are_independent(self):
+        args = build_parser().parse_args(
+            [
+                "--root",
+                "dataset",
+                "--student_n_ctx_text",
+                "5",
+                "--teacher_n_ctx_text",
+                "11",
+            ]
+        )
+        self.assertEqual(args.student_n_ctx_text, 5)
+        self.assertEqual(args.teacher_n_ctx_text, 11)
+
+    def test_legacy_text_prompt_alias_only_sets_student_count(self):
         args = build_parser().parse_args(
             ["--root", "dataset", "--text_prompt_tokens", "5"]
         )
-        self.assertEqual(args.n_ctx_text, 5)
+        self.assertEqual(args.student_n_ctx_text, 5)
+        self.assertEqual(args.teacher_n_ctx_text, 8)
 
 
 if __name__ == "__main__":

@@ -58,8 +58,13 @@ def image_conditioned_text_classification_loss(
     ):
         raise ValueError("A class label is outside the fixed text bank.")
 
-    logits = images @ class_text.t() / temperature
-    conditioned_scores = (images * targets).sum(dim=-1) / temperature
+    # CUDA autocast may produce FP16 matmul logits while the elementwise
+    # conditioned score remains FP32. scatter requires an exact dtype match,
+    # and cross-entropy is also more stable when these logits stay in FP32.
+    logits = (images @ class_text.t()).float() / temperature
+    conditioned_scores = (
+        (images * targets).sum(dim=-1).float() / temperature
+    )
     logits = logits.scatter(1, labels[:, None], conditioned_scores[:, None])
     return F.cross_entropy(logits, labels)
 

@@ -6,15 +6,16 @@ fine-grained training, the 100-photo category gallery, teacher/student visual
 prompts, Domain KD, Modality KD, and Acc@1/Acc@5 model selection.
 
 The new branch adds a text prompt learner to both the frozen CLIP ViT-B/32
-student and the frozen DFN5B ViT-H/14 teacher. The number of soft text tokens
-is supplied at run time with `--n_ctx_text` (or the equivalent
-`--text_prompt_tokens`).
+student and the frozen DFN5B ViT-H/14 teacher. Their soft-token counts are
+controlled independently by `--student_n_ctx_text` and
+`--teacher_n_ctx_text`. The legacy `--n_ctx_text` and `--text_prompt_tokens`
+aliases set only the student count.
 
 ## Image-to-text prompt path
 
 For each photo or sketch, only the real final-layer spatial patch tokens are
 used; CLS and visual prompt tokens are excluded. If the patch tensor is
-`P(x) in R^(N x Dv)`, the M text context tokens are
+`P(x) in R^(N x Dv)`, each model's requested number of text context tokens is
 
 ```text
 C(x) = C_base + g * LN(Pool_M(W * LN(P(x))))
@@ -76,7 +77,8 @@ Run `src.train_fg`, not the category-level `src.train` entry point:
   --test_batch_size 1024 \
   --n_ctx_visual 3 \
   --prompt_depth 12 \
-  --n_ctx_text 8 \
+  --student_n_ctx_text 8 \
+  --teacher_n_ctx_text 12 \
   --text_prompt_gate_init 0.1 \
   --text_prompt_lr 1e-3 \
   --text_prompt_weight_decay 1e-4 \
@@ -107,10 +109,12 @@ Run `src.train_fg`, not the category-level `src.train` entry point:
   --progress
 ```
 
-Changing `--n_ctx_text` or any teacher text-prompt setting produces a different
-automatic teacher-cache key. Old caches from the baseline are intentionally
-incompatible. Use `--rebuild_teacher_cache` only when replacing an existing
-cache at the same explicit path.
+Changing `--teacher_n_ctx_text` or another teacher text-prompt setting produces
+a different automatic teacher-cache key. Changing only
+`--student_n_ctx_text` reuses the same compatible teacher cache. Old caches
+from the baseline are intentionally incompatible. Use
+`--rebuild_teacher_cache` only when replacing an existing cache at the same
+explicit path.
 
 ## Offline Kaggle bundle
 

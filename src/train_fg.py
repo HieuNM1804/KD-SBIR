@@ -112,15 +112,24 @@ def build_parser():
     parser.add_argument("--n_ctx_visual", type=int, default=3)
     parser.add_argument("--prompt_depth", type=int, default=12)
     parser.add_argument(
+        "--student_n_ctx_text",
         "--n_ctx_text",
         "--text_prompt_tokens",
-        dest="n_ctx_text",
+        dest="student_n_ctx_text",
         type=int,
         default=8,
         help=(
-            "Number of image-conditioned soft text tokens used by both "
-            "student and teacher."
+            "Number of image-conditioned soft text tokens used by the "
+            "student. --n_ctx_text is retained as a compatibility alias."
         ),
+    )
+    parser.add_argument(
+        "--teacher_n_ctx_text",
+        "--teacher_text_prompt_tokens",
+        dest="teacher_n_ctx_text",
+        type=int,
+        default=8,
+        help="Number of image-conditioned soft text tokens used by the teacher.",
     )
     parser.add_argument("--text_prompt_gate_init", type=float, default=0.1)
     parser.add_argument("--text_prompt_seed", type=int, default=None)
@@ -243,8 +252,10 @@ def validate_args(parser, args):
         parser.error("--n_ctx_visual must be at least 1.")
     if args.prompt_depth < 1:
         parser.error("--prompt_depth must be at least 1.")
-    if not 1 <= args.n_ctx_text <= 32:
-        parser.error("--n_ctx_text must be in [1, 32].")
+    if not 1 <= args.student_n_ctx_text <= 32:
+        parser.error("--student_n_ctx_text must be in [1, 32].")
+    if not 1 <= args.teacher_n_ctx_text <= 32:
+        parser.error("--teacher_n_ctx_text must be in [1, 32].")
     if args.text_prompt_encode_chunk_size < 1:
         parser.error("--text_prompt_encode_chunk_size must be positive.")
     if args.teacher_text_prompt_encode_chunk_size < 1:

@@ -157,7 +157,7 @@ def _fg_teacher_config(args):
             "teacher_instance_temperature": (
                 args.teacher_instance_temperature
             ),
-            "n_ctx_text": args.n_ctx_text,
+            "teacher_n_ctx_text": args.teacher_n_ctx_text,
             "text_prompt_gate_init": args.text_prompt_gate_init,
             "teacher_text_prompt_seed": args.teacher_text_prompt_seed,
             "teacher_text_prompt_lr": args.teacher_text_prompt_lr,
@@ -204,7 +204,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
             tokenizer=clip.tokenize,
             classnames=self.classnames,
             visual_width=student_visual_width,
-            context_tokens=cfg.n_ctx_text,
+            context_tokens=cfg.student_n_ctx_text,
             seed=cfg.text_prompt_seed,
             text_backend="openai",
             gate_init=cfg.text_prompt_gate_init,
@@ -221,7 +221,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
                     tokenizer=teacher.text_tokenizer,
                     classnames=self.classnames,
                     visual_width=teacher_visual_width,
-                    context_tokens=cfg.n_ctx_text,
+                    context_tokens=cfg.teacher_n_ctx_text,
                     seed=cfg.teacher_text_prompt_seed,
                     text_backend="open_clip",
                     gate_init=cfg.text_prompt_gate_init,
@@ -233,8 +233,10 @@ class FineGrainedCustomCLIP(CustomCLIP):
             )
 
         print(
-            "[Image-Conditioned Text] shared token count for teacher/student; "
-            f"n_ctx_text={cfg.n_ctx_text}; patch_projection=True; "
+            "[Image-Conditioned Text] independent teacher/student counts; "
+            f"student_n_ctx_text={cfg.student_n_ctx_text}; "
+            f"teacher_n_ctx_text={cfg.teacher_n_ctx_text}; "
+            "patch_projection=True; "
             "modalities=photo+sketch; student_params="
             f"{self.student_text_prompt_learner.trainable_parameter_count():,}; "
             f"teacher_params={self._teacher_text_prompt_parameter_count():,}"
