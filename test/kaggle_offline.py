@@ -12,7 +12,7 @@ import sys
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/fine-grained-image-conditioned-text-prompts"
-EXPECTED_COMMIT = "1c3d331bc080bdcba000c411aef3f3d6595ec913"
+EXPECTED_COMMIT = "8b4dddcaf8d0c854e43ffaded6149f19ab005f3c"
 EXPECTED_TASK = "fine_grained_image_conditioned_text_prompts"
 EXPECTED_ENTRYPOINT = "src.train_fg"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy-fg"
@@ -240,31 +240,54 @@ for directory in (SKETCHY_ROOT / "sketch", SKETCHY_ROOT / "photo"):
         raise FileNotFoundError(f"Missing dataset directory: {directory}")
 
 # Import and numerical smoke test without loading the multi-gigabyte teacher.
+# Run backward on the GPU here so deterministic/autocast errors fail before the
+# expensive teacher cache pass starts.
+smoke_test = """
+import os
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
+import torch
+import open_clip
+import pytorch_lightning
+
+from src.image_text_prompts import PatchToTextContexts
+from src.losses_fg import image_conditioned_text_classification_loss
+from src.model_fg import FineGrainedCustomCLIP, FineGrainedZS_SBIR
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.use_deterministic_algorithms(True)
+projector = PatchToTextContexts(64, 32, 8, 42).to(device)
+patches = torch.randn(2, 49, 64, device=device, requires_grad=True)
+base_context = torch.randn(8, 32, device=device, requires_grad=True)
+contexts = projector(patches, base_context)
+assert contexts.shape == (2, 8, 32)
+contexts.square().mean().backward()
+assert patches.grad is not None
+
+images = torch.randn(2, 16, device=device, requires_grad=True)
+target_text = torch.randn(2, 16, device=device, requires_grad=True)
+class_text = torch.randn(4, 16, device=device)
+autocast_dtype = torch.float16 if device.type == "cuda" else torch.bfloat16
+with torch.autocast(device_type=device.type, dtype=autocast_dtype):
+    loss = image_conditioned_text_classification_loss(
+        images,
+        target_text,
+        class_text,
+        torch.tensor([0, 1], device=device),
+        0.07,
+    )
+assert loss.ndim == 0 and loss.dtype == torch.float32
+loss.backward()
+
+print("PyTorch:", torch.__version__)
+print("OpenCLIP:", getattr(open_clip, "__version__", "unknown"))
+print("Lightning:", pytorch_lightning.__version__)
+print("CUDA available:", torch.cuda.is_available())
+print("Deterministic patch-pooling backward: OK")
+print("Autocast text-classification backward: OK")
+"""
 subprocess.run(
-    [
-        sys.executable,
-        "-c",
-        (
-            "import torch, open_clip, pytorch_lightning; "
-            "from src.image_text_prompts import PatchToTextContexts; "
-            "from src.losses_fg import "
-            "image_conditioned_text_classification_loss; "
-            "from src.model_fg import FineGrainedCustomCLIP, FineGrainedZS_SBIR; "
-            "projector = PatchToTextContexts(64, 32, 8, 42); "
-            "contexts = projector(torch.randn(2, 49, 64), "
-            "torch.randn(8, 32)); "
-            "assert contexts.shape == (2, 8, 32); "
-            "loss = image_conditioned_text_classification_loss("
-            "torch.randn(2, 16), torch.randn(2, 16), "
-            "torch.randn(4, 16), torch.tensor([0, 1]), 0.07); "
-            "assert loss.ndim == 0; "
-            "print('PyTorch:', torch.__version__); "
-            "print('OpenCLIP:', getattr(open_clip, '__version__', 'unknown')); "
-            "print('Lightning:', pytorch_lightning.__version__); "
-            "print('CUDA available:', torch.cuda.is_available()); "
-            "print('FG image-conditioned text-prompt imports: OK')"
-        ),
-    ],
+    [sys.executable, "-c", smoke_test],
     cwd=WORKING_PROJECT,
     check=True,
     env=os.environ.copy(),

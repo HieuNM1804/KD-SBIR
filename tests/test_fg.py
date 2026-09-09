@@ -6,9 +6,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+from open_clip.model import (
+    CLIP as OpenCLIP,
+    CLIPTextCfg,
+    CLIPVisionCfg,
+)
 
 from clip import clip
-from clip.model import CLIP, VisionTransformer
+from clip.model import CLIP, VisionTransformer, convert_weights
 from src.data_config import UNSEEN_CLASSES
 from src.dataset_fg import (
     FineGrainedFullGalleryBatchSampler,
@@ -34,6 +39,7 @@ from src.model_fg import (
     fine_grained_train_metric_ids,
 )
 from src.model import _reduce_on_plateau_patience
+from src.teacher_prompts import build_teacher_prompt_controller
 from src.train_fg import build_parser
 
 
@@ -192,6 +198,205 @@ class FineGrainedCacheTests(unittest.TestCase):
 
 
 class FineGrainedLossAndMetricTests(unittest.TestCase):
+    def test_complete_student_image_conditioned_text_step_backpropagates(self):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        clip_model = CLIP(
+            embed_dim=16,
+            image_resolution=8,
+            vision_layers=1,
+            vision_width=64,
+            vision_patch_size=4,
+            context_length=77,
+            vocab_size=49408,
+            transformer_width=32,
+            transformer_heads=1,
+            transformer_layers=1,
+        ).eval()
+        if device.type == "cuda":
+            convert_weights(clip_model)
+        cfg = SimpleNamespace(
+            prompt_depth=1,
+            n_ctx_visual=2,
+            seed=42,
+            lambda_domain=0.0,
+            lambda_modality=0.0,
+            kd_temperature=0.07,
+            photo_text_kd_temperature=0.1,
+            sketch_text_kd_temperature=0.1,
+            teacher_cache_path="",
+            rebuild_teacher_cache=False,
+            teacher_pretrain_epochs=0,
+            student_n_ctx_text=2,
+            teacher_n_ctx_text=3,
+            text_prompt_seed=40042,
+            teacher_text_prompt_seed=50042,
+            text_prompt_gate_init=0.1,
+            text_prompt_encode_chunk_size=128,
+            teacher_text_prompt_encode_chunk_size=32,
+            text_prompt_gradient_checkpointing=True,
+        )
+        model = FineGrainedCustomCLIP(
+            cfg,
+            clip_model,
+            ("a", "b", "c", "d", "e"),
+        ).to(device)
+        dtype = torch.float16 if device.type == "cuda" else torch.float32
+        photo = torch.randn(100, 3, 8, 8, device=device, dtype=dtype)
+        sketch = torch.randn(3, 3, 8, 8, device=device, dtype=dtype)
+        categories = torch.ones(3, dtype=torch.long, device=device)
+        features = model(
+            (photo, sketch, torch.empty(0), torch.empty(0), categories)
+        )
+        self.assertEqual(features[0].shape, (100, 16))
+        self.assertEqual(features[1].shape, (3, 16))
+        self.assertEqual(features[9].shape, (100, 16))
+        self.assertEqual(features[10].shape, (3, 16))
+        photo_cls = image_conditioned_text_classification_loss(
+            features[0],
+            features[9],
+            features[6],
+            features[11],
+        )
+        sketch_cls = image_conditioned_text_classification_loss(
+            features[1],
+            features[10],
+            features[5],
+            features[12],
+        )
+        (0.5 * (photo_cls + sketch_cls)).backward()
+        visual_grad = sum(
+            parameter.grad.abs().sum().item()
+            for learner in (
+                model.photo_visual_prompt,
+                model.sketch_visual_prompt,
+            )
+            for parameter in learner.parameters()
+            if parameter.grad is not None
+        )
+        text_grad = sum(
+            parameter.grad.abs().sum().item()
+            for parameter in model.student_text_prompt_learner.parameters()
+            if parameter.grad is not None
+        )
+        self.assertGreater(visual_grad, 0.0)
+        self.assertGreater(text_grad, 0.0)
+
+    def test_complete_teacher_prompt_step_is_deterministic_and_autocast_safe(self):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        teacher = OpenCLIP(
+            embed_dim=4,
+            vision_cfg=CLIPVisionCfg(
+                layers=1,
+                width=64,
+                head_width=64,
+                patch_size=4,
+                image_size=8,
+            ),
+            text_cfg=CLIPTextCfg(
+                context_length=6,
+                vocab_size=128,
+                width=8,
+                heads=1,
+                layers=1,
+            ),
+        ).eval().requires_grad_(False).to(device)
+        if device.type == "cuda":
+            teacher = teacher.half()
+
+        def tokenizer(prompts):
+            tokens = torch.tensor([1, 2, 2, 3, 4, 99])
+            return tokens.unsqueeze(0).expand(len(prompts), -1).clone()
+
+        visual_prompts = build_teacher_prompt_controller(
+            teacher,
+            n_ctx=2,
+            depth=1,
+            seed=42,
+        ).to(device)
+        text_prompts = ImageConditionedTextPromptLearner(
+            text_model=teacher,
+            tokenizer=tokenizer,
+            classnames=("a", "b", "c", "d", "e"),
+            visual_width=64,
+            context_tokens=2,
+            seed=43,
+            text_backend="open_clip",
+            gradient_checkpointing=True,
+        ).to(device)
+        dtype = torch.float16 if device.type == "cuda" else torch.float32
+        photo = torch.randn(100, 3, 8, 8, device=device, dtype=dtype)
+        sketch = torch.randn(3, 3, 8, 8, device=device, dtype=dtype)
+        photo_labels = torch.ones(100, dtype=torch.long, device=device)
+        sketch_labels = torch.ones(3, dtype=torch.long, device=device)
+        fixed_text = torch.randn(5, 4, device=device)
+
+        previous = torch.are_deterministic_algorithms_enabled()
+        try:
+            torch.use_deterministic_algorithms(True)
+            autocast_dtype = (
+                torch.float16 if device.type == "cuda" else torch.bfloat16
+            )
+            with torch.autocast(
+                device_type=device.type,
+                dtype=autocast_dtype,
+            ):
+                photo_features, photo_patches = visual_prompts(
+                    photo,
+                    "photo",
+                    return_patch_tokens=True,
+                )
+                sketch_features, sketch_patches = visual_prompts(
+                    sketch,
+                    "sketch",
+                    return_patch_tokens=True,
+                )
+                photo_text, _ = text_prompts(
+                    teacher,
+                    photo_patches,
+                    photo_labels,
+                    "photo",
+                )
+                sketch_text, _ = text_prompts(
+                    teacher,
+                    sketch_patches,
+                    sketch_labels,
+                    "sketch",
+                )
+                retrieval = fine_grained_teacher_infonce_loss(
+                    sketch_features,
+                    photo_features,
+                    torch.tensor([0, 1, 2], device=device),
+                )
+                photo_cls = image_conditioned_text_classification_loss(
+                    photo_features,
+                    photo_text,
+                    fixed_text,
+                    photo_labels,
+                )
+                sketch_cls = image_conditioned_text_classification_loss(
+                    sketch_features,
+                    sketch_text,
+                    fixed_text,
+                    sketch_labels,
+                )
+                loss = retrieval + 0.5 * (photo_cls + sketch_cls)
+            loss.backward()
+        finally:
+            torch.use_deterministic_algorithms(previous)
+
+        visual_grad = sum(
+            parameter.grad.abs().sum().item()
+            for parameter in visual_prompts.parameters()
+            if parameter.grad is not None
+        )
+        text_grad = sum(
+            parameter.grad.abs().sum().item()
+            for parameter in text_prompts.parameters()
+            if parameter.grad is not None
+        )
+        self.assertGreater(visual_grad, 0.0)
+        self.assertGreater(text_grad, 0.0)
+
     def test_deterministic_patch_pool_matches_adaptive_average(self):
         generator = torch.Generator().manual_seed(42)
         for patch_count, context_count in ((49, 8), (256, 12), (16, 16)):
@@ -293,6 +498,56 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         features[:, 0].sum().backward()
         self.assertIsNotNone(patches.grad)
         self.assertIsNotNone(learner.base_context.grad)
+        self.assertGreater(patches.grad.abs().sum().item(), 0.0)
+        self.assertGreater(learner.base_context.grad.abs().sum().item(), 0.0)
+
+    def test_openclip_text_prompt_learner_backpropagates_to_image_patches(self):
+        class FakeTransformer(torch.nn.Module):
+            @staticmethod
+            def get_cast_dtype():
+                return torch.float32
+
+            def forward(self, features, attn_mask=None):
+                del attn_mask
+                return features + features.mean(dim=1, keepdim=True)
+
+        class FakeOpenCLIPText(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.token_embedding = torch.nn.Embedding(128, 8)
+                self.positional_embedding = torch.nn.Parameter(
+                    torch.zeros(6, 8)
+                )
+                self.transformer = FakeTransformer()
+                self.ln_final = torch.nn.LayerNorm(8)
+                self.text_projection = torch.nn.Parameter(torch.randn(8, 4))
+                self.attn_mask = None
+
+        def fake_tokenizer(prompts):
+            tokens = torch.tensor([1, 2, 2, 3, 4, 99])
+            return tokens.unsqueeze(0).expand(len(prompts), -1).clone()
+
+        text_model = FakeOpenCLIPText().eval().requires_grad_(False)
+        learner = ImageConditionedTextPromptLearner(
+            text_model=text_model,
+            tokenizer=fake_tokenizer,
+            classnames=("cat", "dog"),
+            visual_width=6,
+            context_tokens=2,
+            seed=42,
+            text_backend="open_clip",
+            gradient_checkpointing=True,
+        )
+        patches = torch.randn(2, 4, 6, requires_grad=True)
+        features, contexts = learner(
+            text_model,
+            patches,
+            torch.tensor([0, 1]),
+            "photo",
+        )
+        self.assertEqual(features.shape, (2, 4))
+        self.assertEqual(contexts.shape, (2, 2, 8))
+        features[:, 0].sum().backward()
         self.assertGreater(patches.grad.abs().sum().item(), 0.0)
         self.assertGreater(learner.base_context.grad.abs().sum().item(), 0.0)
 
