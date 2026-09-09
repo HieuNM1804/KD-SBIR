@@ -19,7 +19,7 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/fine-grained-image-conditioned-text-prompts"
 # Pin the source commit. The later bundle-script commit intentionally differs.
-COMMIT = "325fda4495dc554be11bbe6794e9a52bde7b2f9e"
+COMMIT = "1c3d331bc080bdcba000c411aef3f3d6595ec913"
 TASK = "fine_grained_image_conditioned_text_prompts"
 ENTRYPOINT = "src.train_fg"
 DATASET = "b20dccn616nguynhutun/sketchy-fg"

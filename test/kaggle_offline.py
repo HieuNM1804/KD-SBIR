@@ -12,7 +12,7 @@ import sys
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/fine-grained-image-conditioned-text-prompts"
-EXPECTED_COMMIT = "325fda4495dc554be11bbe6794e9a52bde7b2f9e"
+EXPECTED_COMMIT = "1c3d331bc080bdcba000c411aef3f3d6595ec913"
 EXPECTED_TASK = "fine_grained_image_conditioned_text_prompts"
 EXPECTED_ENTRYPOINT = "src.train_fg"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy-fg"
