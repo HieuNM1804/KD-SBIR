@@ -12,11 +12,18 @@ from tqdm.auto import tqdm
 from clip import clip
 from src.dataset_fg import FineGrainedFullGalleryBatchSampler
 from src.losses_fg import (
+    fine_grained_bidirectional_infonce_loss,
+    fine_grained_bidirectional_prompt_infonce_loss,
     fine_grained_distillation_loss,
+    fine_grained_hard_negative_margin_loss,
+    fine_grained_pair_retrieval_accuracy,
     fine_grained_prompt_infonce_loss,
     fine_grained_prompt_retrieval_accuracy,
     fine_grained_teacher_infonce_loss,
+    fine_grained_text_pair_infonce_loss,
     image_conditioned_text_anchor_loss,
+    part_attention_diversity_loss,
+    part_attention_normalized_entropy,
     teacher_semantic_refinement_loss,
     teacher_visual_refinement_control_loss,
 )
@@ -33,7 +40,7 @@ from src.model import (
 )
 
 
-FG_CACHE_FORMAT_VERSION = 9
+FG_CACHE_FORMAT_VERSION = 10
 
 
 def better_acc1_acc5(acc1, acc5, best_acc1, best_acc5):
@@ -156,7 +163,7 @@ def _fg_teacher_config(args):
             "task": "fine_grained_exact_instance",
             "teacher_negative_scope": "full_100_photo_category_gallery",
             "teacher_objective": (
-                "matched_control_staged_visual_text_semantic_visual_refinement"
+                "part_query_matched_control_teacher_refinement"
             ),
             "teacher_auxiliary_objective": (
                 "sketch_image_to_photo_text_and_sketch_text_to_photo_image"
@@ -166,6 +173,10 @@ def _fg_teacher_config(args):
                 args.teacher_instance_temperature
             ),
             "teacher_n_ctx_text": args.teacher_n_ctx_text,
+            "teacher_text_context_generator": (
+                args.teacher_text_context_generator
+            ),
+            "part_attention_temperature": args.part_attention_temperature,
             "text_prompt_gate_init": args.text_prompt_gate_init,
             "teacher_text_prompt_seed": args.teacher_text_prompt_seed,
             "teacher_text_prompt_lr": args.teacher_text_prompt_lr,
@@ -177,6 +188,21 @@ def _fg_teacher_config(args):
             ),
             "lambda_teacher_prompt_infonce": (
                 args.lambda_teacher_prompt_infonce
+            ),
+            "lambda_teacher_text_pair_infonce": (
+                args.lambda_teacher_text_pair_infonce
+            ),
+            "lambda_teacher_part_diversity": (
+                args.lambda_teacher_part_diversity
+            ),
+            "teacher_reverse_infonce_weight": (
+                args.teacher_reverse_infonce_weight
+            ),
+            "lambda_teacher_hard_negative": (
+                args.lambda_teacher_hard_negative
+            ),
+            "teacher_hard_negative_margin": (
+                args.teacher_hard_negative_margin
             ),
             "teacher_text_pretrain_epochs": args.teacher_text_pretrain_epochs,
             "teacher_semantic_refine_epochs": (
@@ -192,8 +218,8 @@ def _fg_teacher_config(args):
             "lambda_teacher_visual_keep": args.lambda_teacher_visual_keep,
             "lambda_teacher_text_anchor": args.lambda_teacher_text_anchor,
             "teacher_training_schedule": (
-                "visual_bootstrap_then_text_bootstrap_then_matched_control_"
-                "and_semantic_visual_refine"
+                "shared_residual_visual_bootstrap_then_part_query_text_"
+                "bootstrap_then_matched_control_and_semantic_visual_refine"
             ),
             "matched_phase_c_control": True,
             "checkpoint_selection": (
@@ -240,6 +266,8 @@ class FineGrainedCustomCLIP(CustomCLIP):
             gate_init=cfg.text_prompt_gate_init,
             encode_chunk_size=cfg.text_prompt_encode_chunk_size,
             gradient_checkpointing=cfg.text_prompt_gradient_checkpointing,
+            context_generator=cfg.student_text_context_generator,
+            part_attention_temperature=cfg.part_attention_temperature,
         )
 
         self.teacher_text_prompt_learner = None
@@ -259,6 +287,10 @@ class FineGrainedCustomCLIP(CustomCLIP):
                     gradient_checkpointing=(
                         cfg.text_prompt_gradient_checkpointing
                     ),
+                    context_generator=cfg.teacher_text_context_generator,
+                    part_attention_temperature=(
+                        cfg.part_attention_temperature
+                    ),
                 ).to(teacher.visual.conv1.weight.device)
             )
 
@@ -267,6 +299,8 @@ class FineGrainedCustomCLIP(CustomCLIP):
             f"student_n_ctx_text={cfg.student_n_ctx_text}; "
             f"teacher_n_ctx_text={cfg.teacher_n_ctx_text}; "
             "patch_projection=True; "
+            f"student_context={cfg.student_text_context_generator}; "
+            f"teacher_context={cfg.teacher_text_context_generator}; "
             "modalities=photo+sketch; student_params="
             f"{self.student_text_prompt_learner.trainable_parameter_count():,}; "
             f"teacher_params={self._teacher_text_prompt_parameter_count():,}"
@@ -507,6 +541,8 @@ class FineGrainedCustomCLIP(CustomCLIP):
         )
         for epoch in range(cfg.teacher_pretrain_epochs):
             retrieval_total = 0.0
+            reverse_total = 0.0
+            hard_negative_total = 0.0
             steps = 0
             batches = tqdm(
                 loader,
@@ -527,18 +563,34 @@ class FineGrainedCustomCLIP(CustomCLIP):
                     sketch_features = self._encode_teacher_image(
                         sketch, "sketch"
                     )
-                    retrieval = fine_grained_teacher_infonce_loss(
+                    retrieval, retrieval_parts = (
+                        fine_grained_bidirectional_infonce_loss(
+                            sketch_features,
+                            photo_features,
+                            targets,
+                            cfg.teacher_instance_temperature,
+                            cfg.teacher_reverse_infonce_weight,
+                        )
+                    )
+                    hard_negative = fine_grained_hard_negative_margin_loss(
                         sketch_features,
                         photo_features,
                         targets,
-                        cfg.teacher_instance_temperature,
+                        cfg.teacher_hard_negative_margin,
                     )
-                    loss = cfg.lambda_teacher_retrieval * retrieval
+                    loss = (
+                        cfg.lambda_teacher_retrieval * retrieval
+                        + cfg.lambda_teacher_hard_negative * hard_negative
+                    )
                 visual_optimizer.zero_grad(set_to_none=True)
                 scaler.scale(loss).backward()
                 scaler.step(visual_optimizer)
                 scaler.update()
                 retrieval_total += retrieval.detach().item()
+                reverse_total += retrieval_parts[
+                    "photo_to_sketch"
+                ].detach().item()
+                hard_negative_total += hard_negative.detach().item()
                 steps += 1
                 if show_progress:
                     batches.set_postfix(T_VIS=f"{retrieval.item():.3f}")
@@ -546,7 +598,9 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 raise RuntimeError("Teacher visual bootstrap produced no batches.")
             print(
                 f"[Teacher Phase A] epoch={epoch + 1}, "
-                f"visual_instance_nce={retrieval_total / steps:.6f}"
+                f"bidirectional_visual_nce={retrieval_total / steps:.6f}, "
+                f"photo_to_sketch_nce={reverse_total / steps:.6f}, "
+                f"hard_negative={hard_negative_total / steps:.6f}"
             )
             metric_epoch = epoch + 1
             acc1, acc5 = evaluate_visual("visual_bootstrap", metric_epoch)
@@ -588,16 +642,24 @@ class FineGrainedCustomCLIP(CustomCLIP):
         teacher_sketch_anchors, teacher_photo_anchors = (
             self.get_teacher_text_features()
         )
-        best_text_loss = float("inf")
+        best_text_acc1 = -float("inf")
+        best_text_acc5 = -float("inf")
+        best_text_epoch = 0
         best_text_prompt_state = clone_state(self.teacher_text_prompt_learner)
+        uses_part_query = cfg.teacher_text_context_generator == "part_query"
         for epoch in range(cfg.teacher_text_pretrain_epochs):
             prompt_total = 0.0
+            text_pair_total = 0.0
+            diversity_total = 0.0
+            attention_entropy_total = 0.0
             anchor_total = 0.0
             metric_totals = {
                 "sketch_to_photo_text_acc1": 0.0,
                 "sketch_to_photo_text_acc5": 0.0,
                 "sketch_text_to_photo_acc1": 0.0,
                 "sketch_text_to_photo_acc5": 0.0,
+                "sketch_text_to_photo_text_acc1": 0.0,
+                "sketch_text_to_photo_text_acc5": 0.0,
             }
             query_count = 0
             steps = 0
@@ -628,25 +690,55 @@ class FineGrainedCustomCLIP(CustomCLIP):
                     dtype=torch.float16,
                     enabled=teacher_device.type == "cuda",
                 ):
-                    photo_prompt_text, _ = self.teacher_text_prompt_learner(
+                    photo_outputs = self.teacher_text_prompt_learner(
                         self._teacher,
                         photo_patches.detach(),
                         photo_categories,
                         "photo",
+                        return_attention=uses_part_query,
                     )
-                    sketch_prompt_text, _ = self.teacher_text_prompt_learner(
+                    sketch_outputs = self.teacher_text_prompt_learner(
                         self._teacher,
                         sketch_patches.detach(),
                         categories,
                         "sketch",
+                        return_attention=uses_part_query,
                     )
-                    prompt_infonce, _ = fine_grained_prompt_infonce_loss(
-                        sketch_features.detach(),
-                        photo_features.detach(),
-                        sketch_prompt_text,
-                        photo_prompt_text,
-                        targets,
-                        cfg.teacher_prompt_infonce_temperature,
+                    photo_prompt_text = photo_outputs[0]
+                    sketch_prompt_text = sketch_outputs[0]
+                    prompt_infonce, _ = (
+                        fine_grained_bidirectional_prompt_infonce_loss(
+                            sketch_features.detach(),
+                            photo_features.detach(),
+                            sketch_prompt_text,
+                            photo_prompt_text,
+                            targets,
+                            cfg.teacher_prompt_infonce_temperature,
+                            cfg.teacher_reverse_infonce_weight,
+                        )
+                    )
+                    text_pair_infonce, _ = (
+                        fine_grained_text_pair_infonce_loss(
+                            sketch_prompt_text,
+                            photo_prompt_text,
+                            targets,
+                            cfg.teacher_prompt_infonce_temperature,
+                            cfg.teacher_reverse_infonce_weight,
+                        )
+                    )
+                    diversity = (
+                        part_attention_diversity_loss(
+                            sketch_outputs[2], photo_outputs[2]
+                        )
+                        if uses_part_query
+                        else prompt_infonce.detach().new_zeros(())
+                    )
+                    attention_entropy = (
+                        part_attention_normalized_entropy(
+                            sketch_outputs[2], photo_outputs[2]
+                        )
+                        if uses_part_query
+                        else prompt_infonce.detach().new_zeros(())
                     )
                     anchor = image_conditioned_text_anchor_loss(
                         sketch_prompt_text,
@@ -656,6 +748,9 @@ class FineGrainedCustomCLIP(CustomCLIP):
                     )
                     loss = (
                         cfg.lambda_teacher_prompt_infonce * prompt_infonce
+                        + cfg.lambda_teacher_text_pair_infonce
+                        * text_pair_infonce
+                        + cfg.lambda_teacher_part_diversity * diversity
                         + cfg.lambda_teacher_text_anchor * anchor
                     )
                 prompt_metrics = fine_grained_prompt_retrieval_accuracy(
@@ -665,11 +760,29 @@ class FineGrainedCustomCLIP(CustomCLIP):
                     photo_prompt_text,
                     targets,
                 )
+                text_pair_metrics = fine_grained_pair_retrieval_accuracy(
+                    sketch_prompt_text,
+                    photo_prompt_text,
+                    targets,
+                )
+                prompt_metrics.update(
+                    {
+                        "sketch_text_to_photo_text_acc1": (
+                            text_pair_metrics["acc1"]
+                        ),
+                        "sketch_text_to_photo_text_acc5": (
+                            text_pair_metrics["acc5"]
+                        ),
+                    }
+                )
                 text_optimizer.zero_grad(set_to_none=True)
                 scaler.scale(loss).backward()
                 scaler.step(text_optimizer)
                 scaler.update()
                 prompt_total += prompt_infonce.detach().item()
+                text_pair_total += text_pair_infonce.detach().item()
+                diversity_total += diversity.detach().item()
+                attention_entropy_total += attention_entropy.detach().item()
                 anchor_total += anchor.detach().item()
                 current_queries = len(targets)
                 for name, value in prompt_metrics.items():
@@ -679,14 +792,20 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 if show_progress:
                     batches.set_postfix(
                         T_PROMPT=f"{prompt_infonce.item():.3f}",
+                        T_TEXT=f"{text_pair_infonce.item():.3f}",
                         T_ANCHOR=f"{anchor.item():.3f}",
                     )
             if steps == 0:
                 raise RuntimeError("Teacher text bootstrap produced no batches.")
             average_prompt = prompt_total / steps
+            average_text_pair = text_pair_total / steps
+            average_diversity = diversity_total / steps
+            average_attention_entropy = attention_entropy_total / steps
             average_anchor = anchor_total / steps
             average_total = (
                 cfg.lambda_teacher_prompt_infonce * average_prompt
+                + cfg.lambda_teacher_text_pair_infonce * average_text_pair
+                + cfg.lambda_teacher_part_diversity * average_diversity
                 + cfg.lambda_teacher_text_anchor * average_anchor
             )
             average_metrics = {
@@ -697,6 +816,9 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 {
                     "epoch": epoch + 1,
                     "prompt_infonce": average_prompt,
+                    "text_pair_infonce": average_text_pair,
+                    "part_diversity": average_diversity,
+                    "part_attention_entropy": average_attention_entropy,
                     "anchor": average_anchor,
                     "total": average_total,
                     **average_metrics,
@@ -705,6 +827,9 @@ class FineGrainedCustomCLIP(CustomCLIP):
             print(
                 f"[Teacher Phase B] epoch={epoch + 1}, "
                 f"prompt_infonce={average_prompt:.6f}, "
+                f"text_pair_infonce={average_text_pair:.6f}, "
+                f"part_diversity={average_diversity:.6f}, "
+                f"part_entropy={average_attention_entropy:.6f}, "
                 f"semantic_anchor={average_anchor:.6f}, "
                 "image_to_text_Acc@1="
                 f"{average_metrics['sketch_to_photo_text_acc1']:.4f}, "
@@ -713,10 +838,37 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 "text_to_image_Acc@1="
                 f"{average_metrics['sketch_text_to_photo_acc1']:.4f}, "
                 "text_to_image_Acc@5="
-                f"{average_metrics['sketch_text_to_photo_acc5']:.4f}"
+                f"{average_metrics['sketch_text_to_photo_acc5']:.4f}, "
+                "text_to_text_Acc@1="
+                f"{average_metrics['sketch_text_to_photo_text_acc1']:.4f}, "
+                "text_to_text_Acc@5="
+                f"{average_metrics['sketch_text_to_photo_text_acc5']:.4f}"
             )
-            if average_total < best_text_loss:
-                best_text_loss = average_total
+            selection_acc1 = sum(
+                average_metrics[name]
+                for name in (
+                    "sketch_to_photo_text_acc1",
+                    "sketch_text_to_photo_acc1",
+                    "sketch_text_to_photo_text_acc1",
+                )
+            ) / 3.0
+            selection_acc5 = sum(
+                average_metrics[name]
+                for name in (
+                    "sketch_to_photo_text_acc5",
+                    "sketch_text_to_photo_acc5",
+                    "sketch_text_to_photo_text_acc5",
+                )
+            ) / 3.0
+            if better_acc1_acc5(
+                selection_acc1,
+                selection_acc5,
+                best_text_acc1,
+                best_text_acc5,
+            ):
+                best_text_acc1 = selection_acc1
+                best_text_acc5 = selection_acc5
+                best_text_epoch = epoch + 1
                 best_text_prompt_state = clone_state(
                     self.teacher_text_prompt_learner
                 )
@@ -724,6 +876,12 @@ class FineGrainedCustomCLIP(CustomCLIP):
         self.teacher_text_prompt_learner.load_state_dict(
             best_text_prompt_state, strict=True
         )
+        if cfg.teacher_text_pretrain_epochs > 0:
+            print(
+                "[Teacher Phase B Best] "
+                f"epoch={best_text_epoch}, mean_Acc@1={best_text_acc1:.4f}, "
+                f"mean_Acc@5={best_text_acc5:.4f}"
+            )
         self.teacher_text_prompt_learner.eval().requires_grad_(False)
 
         # Both Phase-C tracks start from the exact same Phase-A checkpoint and
@@ -737,6 +895,8 @@ class FineGrainedCustomCLIP(CustomCLIP):
             depth=cfg.teacher_prompt_depth,
             std=cfg.teacher_prompt_std,
             seed=cfg.teacher_prompt_seed,
+            coupling=cfg.teacher_visual_prompt_coupling,
+            residual_scale=cfg.teacher_prompt_residual_scale,
         ).to(teacher_device)
         semantic_source.load_state_dict(visual_source_state, strict=True)
         semantic_source.eval().requires_grad_(False)
@@ -791,7 +951,11 @@ class FineGrainedCustomCLIP(CustomCLIP):
                     if use_semantic
                     else 0.0
                 )
-                totals = {"retrieval": 0.0, "keep": 0.0}
+                totals = {
+                    "retrieval": 0.0,
+                    "keep": 0.0,
+                    "hard_negative": 0.0,
+                }
                 if use_semantic:
                     totals["semantic"] = 0.0
                 steps = 0
@@ -862,6 +1026,9 @@ class FineGrainedCustomCLIP(CustomCLIP):
                                 cfg.lambda_teacher_retrieval,
                                 semantic_weight,
                                 cfg.lambda_teacher_visual_keep,
+                                cfg.teacher_reverse_infonce_weight,
+                                cfg.lambda_teacher_hard_negative,
+                                cfg.teacher_hard_negative_margin,
                             )
                         else:
                             loss, parts = (
@@ -874,6 +1041,9 @@ class FineGrainedCustomCLIP(CustomCLIP):
                                     cfg.teacher_instance_temperature,
                                     cfg.lambda_teacher_retrieval,
                                     cfg.lambda_teacher_visual_keep,
+                                    cfg.teacher_reverse_infonce_weight,
+                                    cfg.lambda_teacher_hard_negative,
+                                    cfg.teacher_hard_negative_margin,
                                 )
                             )
                     optimizer.zero_grad(set_to_none=True)
@@ -887,6 +1057,9 @@ class FineGrainedCustomCLIP(CustomCLIP):
                         postfix = {
                             "T_VIS": f"{parts['retrieval'].item():.3f}",
                             "T_KEEP": f"{parts['keep'].item():.3f}",
+                            "T_HARD": (
+                                f"{parts['hard_negative'].item():.3f}"
+                            ),
                         }
                         if use_semantic:
                             postfix["T_SEM"] = (
@@ -902,6 +1075,8 @@ class FineGrainedCustomCLIP(CustomCLIP):
                     f"visual_instance_nce="
                     f"{totals['retrieval'] / steps:.6f}, "
                     f"visual_keep={totals['keep'] / steps:.6f}"
+                    f", hard_negative="
+                    f"{totals['hard_negative'] / steps:.6f}"
                 )
                 if use_semantic:
                     message += (
@@ -1288,6 +1463,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 ),
             },
             {
+                "visual_train": payload["teacher_train_metric_history"],
                 "visual": payload["teacher_unseen_metric_history"],
                 "text": payload["teacher_text_metric_history"],
             },

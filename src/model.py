@@ -101,6 +101,12 @@ def _teacher_training_config(args):
         "teacher_prompt_depth": args.teacher_prompt_depth,
         "teacher_prompt_std": args.teacher_prompt_std,
         "teacher_prompt_seed": args.teacher_prompt_seed,
+        "teacher_visual_prompt_coupling": getattr(
+            args, "teacher_visual_prompt_coupling", "independent"
+        ),
+        "teacher_prompt_residual_scale": getattr(
+            args, "teacher_prompt_residual_scale", 0.1
+        ),
         "teacher_prompt_gradient_checkpointing": (
             args.teacher_prompt_gradient_checkpointing
         ),
@@ -191,11 +197,18 @@ def _build_teacher_prompts(args, teacher):
         depth=args.teacher_prompt_depth,
         std=args.teacher_prompt_std,
         seed=args.teacher_prompt_seed,
+        coupling=getattr(
+            args, "teacher_visual_prompt_coupling", "independent"
+        ),
+        residual_scale=getattr(
+            args, "teacher_prompt_residual_scale", 0.1
+        ),
     )
     print(
         "[Teacher Prompt] initialized for teacher pretraining "
         f"(n_ctx_visual={args.teacher_n_ctx_visual}, "
         f"depth={controller.depth}, std={args.teacher_prompt_std}, "
+        f"coupling={controller.coupling}, "
         f"trainable_params={controller.trainable_parameter_count():,})"
     )
     return controller

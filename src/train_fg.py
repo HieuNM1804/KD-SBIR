@@ -99,7 +99,7 @@ def get_loaders(args):
 def build_parser():
     parser = argparse.ArgumentParser(
         description=(
-            "Staged teacher semantic refinement for exact-instance "
+            "Part-query semantic teacher refinement for exact-instance "
             "fine-grained ZS-SBIR distillation."
         )
     )
@@ -135,6 +135,21 @@ def build_parser():
         help="Number of image-conditioned soft text tokens used by the teacher.",
     )
     parser.add_argument("--text_prompt_gate_init", type=float, default=0.1)
+    parser.add_argument(
+        "--student_text_context_generator",
+        choices=["adaptive_average", "part_query"],
+        default="part_query",
+    )
+    parser.add_argument(
+        "--teacher_text_context_generator",
+        choices=["adaptive_average", "part_query"],
+        default="part_query",
+    )
+    parser.add_argument(
+        "--part_attention_temperature",
+        type=float,
+        default=0.07,
+    )
     parser.add_argument("--text_prompt_seed", type=int, default=None)
     parser.add_argument("--teacher_text_prompt_seed", type=int, default=None)
     parser.add_argument("--text_prompt_encode_chunk_size", type=int, default=64)
@@ -188,6 +203,21 @@ def build_parser():
         "--lambda_teacher_prompt_infonce",
         type=float,
         default=1.0,
+    )
+    parser.add_argument(
+        "--lambda_teacher_text_pair_infonce",
+        type=float,
+        default=0.5,
+        help=(
+            "Exact-instance sketch-text/photo-text alignment for learning "
+            "domain-stable part semantics."
+        ),
+    )
+    parser.add_argument(
+        "--lambda_teacher_part_diversity",
+        type=float,
+        default=0.02,
+        help="Prevent all learned part queries from selecting the same patch.",
     )
     parser.add_argument(
         "--teacher_prompt_infonce_temperature",
@@ -245,6 +275,21 @@ def build_parser():
     parser.add_argument("--teacher_prompt_lr", type=float, default=3e-2)
     parser.add_argument("--teacher_prompt_seed", type=int, default=None)
     parser.add_argument(
+        "--teacher_visual_prompt_coupling",
+        choices=["independent", "shared_residual"],
+        default="shared_residual",
+        help=(
+            "Couple teacher photo/sketch prompts through a shared prompt and "
+            "small modality residuals."
+        ),
+    )
+    parser.add_argument(
+        "--teacher_prompt_residual_scale",
+        type=float,
+        default=0.1,
+        help="Scale of photo/sketch residuals around each shared prompt.",
+    )
+    parser.add_argument(
         "--teacher_prompt_gradient_checkpointing",
         action="store_true",
         default=True,
@@ -279,6 +324,26 @@ def build_parser():
         help="Temperature for teacher exact-instance InfoNCE over 100 photos.",
     )
     parser.add_argument(
+        "--teacher_reverse_infonce_weight",
+        type=float,
+        default=1.0,
+        help=(
+            "Weight of multi-positive photo-to-sketch terms in teacher "
+            "visual and semantic InfoNCE."
+        ),
+    )
+    parser.add_argument(
+        "--lambda_teacher_hard_negative",
+        type=float,
+        default=0.5,
+        help="Weight for the hardest wrong photo in each 100-photo gallery.",
+    )
+    parser.add_argument(
+        "--teacher_hard_negative_margin",
+        type=float,
+        default=0.1,
+    )
+    parser.add_argument(
         "--teacher_triplet_margin",
         type=float,
         default=0.2,
@@ -293,7 +358,7 @@ def build_parser():
     parser.add_argument("--sketch_text_kd_temperature", type=float, default=None)
     parser.add_argument(
         "--exp_name",
-        default="fine_grained_teacher_semantic_refinement",
+        default="fine_grained_teacher_part_query",
     )
     return parser
 
@@ -340,6 +405,14 @@ def validate_args(parser, args):
         parser.error("Teacher prompt pretraining requires visual prompts.")
     if args.teacher_prompt_depth == 0 or args.teacher_prompt_depth < -1:
         parser.error("--teacher_prompt_depth must be -1 or greater than 0.")
+    if (
+        args.teacher_text_context_generator != "part_query"
+        and args.lambda_teacher_part_diversity > 0
+    ):
+        parser.error(
+            "--lambda_teacher_part_diversity requires "
+            "--teacher_text_context_generator part_query."
+        )
     positive_values = {
         "--lr": args.lr,
         "--teacher_prompt_lr": args.teacher_prompt_lr,
@@ -347,7 +420,9 @@ def validate_args(parser, args):
         "--teacher_scheduler_gamma": args.teacher_scheduler_gamma,
         "--scheduler_gamma": args.scheduler_gamma,
         "--teacher_instance_temperature": args.teacher_instance_temperature,
+        "--teacher_hard_negative_margin": args.teacher_hard_negative_margin,
         "--text_prompt_gate_init": args.text_prompt_gate_init,
+        "--part_attention_temperature": args.part_attention_temperature,
         "--text_prompt_lr": args.text_prompt_lr,
         "--teacher_text_prompt_lr": args.teacher_text_prompt_lr,
         "--teacher_semantic_refine_lr": args.teacher_semantic_refine_lr,
@@ -369,6 +444,7 @@ def validate_args(parser, args):
         "--weight_decay": args.weight_decay,
         "--teacher_momentum": args.teacher_momentum,
         "--teacher_weight_decay": args.teacher_weight_decay,
+        "--teacher_prompt_residual_scale": args.teacher_prompt_residual_scale,
         "--text_prompt_weight_decay": args.text_prompt_weight_decay,
         "--teacher_text_prompt_weight_decay": (
             args.teacher_text_prompt_weight_decay
@@ -378,6 +454,18 @@ def validate_args(parser, args):
         "--lambda_prompt_infonce": args.lambda_prompt_infonce,
         "--lambda_teacher_prompt_infonce": (
             args.lambda_teacher_prompt_infonce
+        ),
+        "--lambda_teacher_text_pair_infonce": (
+            args.lambda_teacher_text_pair_infonce
+        ),
+        "--lambda_teacher_part_diversity": (
+            args.lambda_teacher_part_diversity
+        ),
+        "--teacher_reverse_infonce_weight": (
+            args.teacher_reverse_infonce_weight
+        ),
+        "--lambda_teacher_hard_negative": (
+            args.lambda_teacher_hard_negative
         ),
         "--lambda_teacher_text_anchor": args.lambda_teacher_text_anchor,
         "--lambda_teacher_semantic_refine": (
@@ -421,6 +509,7 @@ def validate_args(parser, args):
     if (
         args.teacher_text_pretrain_epochs > 0
         and args.lambda_teacher_prompt_infonce == 0
+        and args.lambda_teacher_text_pair_infonce == 0
         and args.lambda_teacher_text_anchor == 0
     ):
         parser.error("At least one teacher text-bootstrap loss must be active.")

@@ -1,105 +1,108 @@
-# Staged teacher semantic refinement for fine-grained SBIR
+# Part-query semantic teacher for fine-grained SBIR
 
-This experiment is based directly on
-`experiment/fine-grained-teacher-train-metrics`. It preserves exact-instance
-fine-grained training, the 100-photo category gallery, teacher/student visual
-prompts, Domain KD, Modality KD, and Acc@1/Acc@5 model selection.
+This experiment develops the teacher before distilling a student. It starts
+from `experiment/fine-grained-teacher-semantic-refinement` and keeps the exact
+Sketchy-FG sketch-photo pairing, each category's complete 100-photo gallery,
+unseen-category Acc@1/Acc@5 selection, persistent teacher cache, and the
+matched Phase-C control.
 
-This branch fixes the unstable joint teacher optimization observed when visual
-and randomly initialized text prompts were updated together. Teacher training
-is now staged so text semantics must first become a stable target and can then
-refine the visual representation used for retrieval. Every contrastive target
-is the exact paired photo among the category's 100-photo gallery.
+The preceding seed-42 experiment improved unseen teacher retrieval from
+`0.3677/0.6459` to `0.3751/0.6581`, but its seen-train Acc@1 was only `0.4107`.
+Its dynamic text branch also topped out near the visual branch (`0.3831`
+image-to-text Acc@1), because fixed spatial average pooling mostly learned a
+copy of the teacher's global visual representation. This branch targets both
+the weak visual teacher and the missing instance-level text information.
 
-## Image-to-text prompt path
+## Phase A: stronger cross-modal visual teacher
 
-For each photo or sketch, only the real final-layer spatial patch tokens are
-used; CLS and visual prompt tokens are excluded. If the patch tensor is
-`P(x) in R^(N x Dv)`, each model's requested number of text context tokens is
+The frozen DFN5B backbone now uses deep prompts parameterized as
 
 ```text
-C(x) = C_base + g * LN(Pool_M(W * LN(P(x))))
+V_photo[l]  = V_shared[l] + alpha * Delta[l]
+V_sketch[l] = V_shared[l] - alpha * Delta[l]
 ```
 
-`W` is a trainable visual-to-text projection, `Pool_M` adaptively reduces all
-patches to exactly M tokens, and `g` is a trainable gate. The adaptive average
-is implemented as a fixed pooling matrix followed by GEMM, so its CUDA backward
-remains compatible with deterministic training. `C_base`, `W`, and `g` are
-shared between photo and sketch; the class suffix remains modality-specific:
+`alpha` is `--teacher_prompt_residual_scale`. The midpoint is shared across
+photo and sketch, while one antisymmetric residual retains modality-specific
+capacity. It has exactly the same parameter count as the previous two fully
+independent prompt banks.
+
+Phase A optimizes:
+
+```text
+L_A = lambda_retrieval * L_bidirectional_visual_InfoNCE
+    + lambda_hard * L_hardest_same_category_negative
+```
+
+Sketch-to-photo uses all 100 photos as candidates. Photo-to-sketch is a
+multi-positive reverse InfoNCE: when several sketches depict the same photo,
+all of them are positives instead of false negatives. The margin term focuses
+directly on the wrong photo currently outranking the exact pair.
+
+## Phase B: learned semantic-part queries
+
+Fixed adaptive spatial bins are replaced by `M` learned part queries, where
+`M = --teacher_n_ctx_text`. For final-layer spatial patches `P(x)`:
+
+```text
+K = normalize(W_k * LN(P(x)))
+V = W_v * LN(P(x))
+A = softmax(scale * normalize(Q) * K^T)
+C(x) = C_base + gate * LN(A * V)
+```
+
+Each query can follow a semantic part across sketch/photo spatial
+misalignment. CLS and visual prompt tokens are excluded. The resulting
+continuous contexts are inserted into the frozen CLIP text encoder before the
+modality-specific class phrase:
 
 - `[C(x)] a photo of a {class}.`
 - `[C(x)] a sketch of a {class}.`
 
-Thus every text prompt is conditioned on the current image while keeping one
-common patch-to-text mapping across both domains.
-
-## Objectives
-
-For gallery photo `p_j`, the teacher or student generates
-`t_photo_j = Text(Prompt(Patches(p_j)), class)`. Each sketch similarly produces
-`t_sketch_i`. The prompt InfoNCE objective averages two exact-instance
-directions over all 100 gallery photos:
+Only the text prompt learner is trainable in Phase B. Visual features and
+patches are detached. Its objective is
 
 ```text
-L_prompt = 0.5 * [
-    CE(sim(sketch_image, photo_prompt_text) / tau_prompt, paired_photo_index)
-  + CE(sim(sketch_prompt_text, photo_image) / tau_prompt, paired_photo_index)
-]
+L_B = lambda_prompt * L_four_way_image_text_InfoNCE
+    + lambda_text_pair * L_sketch_text_photo_text_InfoNCE
+    + lambda_diversity * L_part_attention_diversity
+    + lambda_anchor * L_fixed_class_semantic_anchor
 ```
 
-The first direction makes each sketch select the text conditioned by its paired
-photo. The second makes the text conditioned by each sketch select its paired
-photo image. This retains both photo and sketch prompt learners without the
-same-image/category-classification shortcut.
+Both reverse directions use multi-positive targets. Text-to-text InfoNCE makes
+the learned parts retain exact-pair information common to sketch and photo;
+the diversity loss prevents every query from selecting the same patch. Phase
+B reports image-to-text, text-to-image, and text-to-text exact-instance
+Acc@1/Acc@5 plus normalized attention entropy.
 
-Teacher training uses three stages, with two matched tracks in Phase C:
+The metrics sidecar also stores `histories.visual_train`, so a run can be
+audited for underfitting on seen pairs rather than judging only unseen Acc.
+
+## Phase C: measured text-to-visual transfer
+
+Two tracks restart from the exact same best Phase-A checkpoint and consume the
+same deterministic batch sequence, optimizer, learning rate, scheduler, and
+epoch count:
 
 ```text
-Phase A: update visual prompts only with exact-instance visual InfoNCE.
-
-Phase B: freeze visual prompts and train text prompts with
-         L_text = lambda_prompt * L_prompt
-                + lambda_anchor * L_class_semantic_anchor.
-
-Phase C/control: restart from the best Phase-A checkpoint and update visual
-                 prompts with
-                 L_control = lambda_retrieval * L_visual
-                           + lambda_keep * L_visual_preservation.
-
-Phase C/semantic: restart from the same Phase-A checkpoint, consume the same
-                  batches, freeze text prompts, and update visual prompts with
-                  L_refine = L_control
-                           + warmup(lambda_semantic) * L_prompt_to_visual.
+control  = visual InfoNCE + hard-negative margin + visual preservation
+semantic = control + warmed frozen-text semantic InfoNCE
 ```
 
-All Phase-B image and patch tensors are detached. In Phase C the semantic text
-features come from a frozen Phase-A visual source and are detached inside the
-loss, so gradients flow in one direction: stable text target -> current teacher
-visual prompts. The matched control has the same start, batches, epoch count,
-optimizer, learning rate, retrieval loss, and preservation loss; its only
-difference is zero semantic weight. This separates text-prompt value from the
-effect of three extra visual-training epochs. The final cache restores the best
-teacher among Phase A, matched control, and semantic refinement by unseen
-Acc@1 (then Acc@5).
-
-Student training uses
+Only current teacher visual prompts receive gradients. The text learner and a
+copy of the Phase-A visual source are frozen. The decisive metric is
 
 ```text
-L_student = lambda_domain * L_domain_KD
-          + lambda_modality * L_modality_KD
-          + lambda_student_retrieval * L_visual_exact_instance_InfoNCE
-          + lambda_prompt_infonce * L_prompt
+[Teacher Text Added Value] = semantic best - matched-control best
 ```
 
-The CLIP/DFN backbones stay frozen. Retrieval inference uses visual features
-only. `--teacher_only` runs the three teacher phases, writes the persistent
-cache, reports the selected phase/checkpoint, and stops before student
-training. This is the recommended first experiment; train the student only
-after Phase C demonstrates a repeatable teacher gain.
+The cache always stores the best unseen Acc@1/Acc@5 checkpoint among Phase A,
+the visual-only continuation, and semantic refinement. Thus a failed text
+experiment cannot weaken the teacher later used for distillation.
 
-## Kaggle command
+## Recommended Kaggle teacher-only run
 
-Run `src.train_fg`, not the category-level `src.train` entry point:
+Run `src.train_fg`, not category-level `src.train`:
 
 ```python
 %cd /kaggle/working/KD-SBIR
@@ -107,21 +110,9 @@ Run `src.train_fg`, not the category-level `src.train` entry point:
 !python -m src.train_fg \
   --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy-fg \
   --dataset sketchy_2 \
-  --epochs 7 \
   --workers 8 \
   --batch_size 64 \
   --test_batch_size 1024 \
-  --n_ctx_visual 3 \
-  --prompt_depth 12 \
-  --student_n_ctx_text 8 \
-  --teacher_n_ctx_text 15 \
-  --text_prompt_gate_init 0.1 \
-  --text_prompt_lr 1e-3 \
-  --text_prompt_weight_decay 1e-4 \
-  --student_instance_temperature 0.07 \
-  --lambda_student_retrieval 1.0 \
-  --prompt_infonce_temperature 0.07 \
-  --lambda_prompt_infonce 1.0 \
   --teacher_pretrain_epochs 8 \
   --teacher_text_pretrain_epochs 3 \
   --teacher_semantic_refine_epochs 3 \
@@ -130,46 +121,49 @@ Run `src.train_fg`, not the category-level `src.train` entry point:
   --teacher_prompt_depth 12 \
   --teacher_prompt_std 0.02 \
   --teacher_prompt_lr 3e-2 \
+  --teacher_visual_prompt_coupling shared_residual \
+  --teacher_prompt_residual_scale 0.1 \
+  --teacher_momentum 0.9 \
+  --teacher_weight_decay 1e-3 \
+  --lambda_teacher_retrieval 1.5 \
+  --teacher_instance_temperature 0.07 \
+  --teacher_reverse_infonce_weight 1.0 \
+  --lambda_teacher_hard_negative 0.5 \
+  --teacher_hard_negative_margin 0.1 \
+  --teacher_n_ctx_text 8 \
+  --teacher_text_context_generator part_query \
+  --part_attention_temperature 0.07 \
+  --text_prompt_gate_init 0.1 \
   --teacher_text_prompt_lr 1e-3 \
   --teacher_text_prompt_weight_decay 1e-4 \
-  --lambda_teacher_retrieval 1.5 \
   --teacher_prompt_infonce_temperature 0.07 \
   --lambda_teacher_prompt_infonce 1.0 \
+  --lambda_teacher_text_pair_infonce 0.5 \
+  --lambda_teacher_part_diversity 0.02 \
   --lambda_teacher_text_anchor 0.05 \
   --teacher_semantic_refine_lr 1e-2 \
   --teacher_semantic_warmup_epochs 2 \
   --lambda_teacher_semantic_refine 0.25 \
   --lambda_teacher_visual_keep 0.1 \
-  --teacher_momentum 0.9 \
-  --teacher_weight_decay 1e-3 \
-  --lambda_domain 3.0 \
-  --kd_temperature 0.07 \
-  --lambda_modality 1.0 \
-  --image_text_kd_temperature 0.1 \
-  --lr 1e-2 \
-  --momentum 0.9 \
-  --weight_decay 1e-3 \
   --seed 42 \
-  --exp_name fg_teacher_matched_semantic_m15_seed42 \
+  --exp_name fg_teacher_part_query_m8_seed42 \
   --teacher_only \
   --progress
 ```
 
-After semantic refinement beats its matched control across the required seeds,
-remove `--teacher_only` and reuse the same automatic cache path to train the
-student without reloading DFN5B.
+First compare these lines with the preceding run:
 
-The first staged experiment deliberately keeps `teacher_n_ctx_text=15`, the
-best token count in the preceding joint-training runs. This isolates the
-training schedule as the changed variable. Phase B reports exact-instance
-Acc@1/Acc@5 in both prompt directions. `[Teacher Semantic Gain]` reports the
-semantic track against Phase A, while `[Teacher Text Added Value]` reports the
-decisive semantic-track minus matched-control difference.
+```text
+[Teacher Phase A Best]
+[Teacher Phase B Best]
+[Teacher Matched Control Best]
+[Teacher Semantic Best]
+[Teacher Text Added Value]
+[Teacher Best Gain]
+```
 
-Every teacher cache also writes a lightweight sibling report named
-`<cache>.metrics.json`. After repeating the same command with seeds 42, 43,
-and 44, aggregate compatible reports without loading the 140 MB feature
-caches:
+Only after seed 42 is promising should the same configuration be repeated for
+seeds 43 and 44. Aggregate the new reports with:
 
 ```python
 !python -m src.teacher_refinement_report \
@@ -178,33 +172,23 @@ caches:
   --require_all_positive
 ```
 
-The command rejects reports whose non-seed teacher configuration differs. It
-returns exit code 2 when any seed has non-positive text-added Acc@1 value over
-the matched control, preventing extra visual-training epochs or one favorable
-seed from being mistaken for evidence that text improves the teacher.
-
-Changing `--teacher_n_ctx_text` or another teacher text-prompt setting produces
-a different automatic teacher-cache key. Changing only
-`--student_n_ctx_text` reuses the same compatible teacher cache. Old caches
-from the baseline are intentionally incompatible. Use
-`--rebuild_teacher_cache` only when replacing an existing cache at the same
-explicit path.
+`--require_all_positive` evaluates text-added Acc@1 against the matched
+visual-only continuation, not merely against the earlier Phase-A checkpoint.
 
 ## Offline Kaggle bundle
 
-Two notebook scripts are included:
+- `test/kaggle_online.py` downloads the pinned source, offline wheels,
+  ViT-B/32, and DFN5B into `/kaggle/working/offline_bundle`.
+- `test/kaggle_offline.py` validates and restores that bundle in the
+  Internet-disabled GPU notebook, then runs deterministic CUDA smoke tests.
 
-- `test/kaggle_online.py`: run once with Internet enabled to download the
-  pinned source, Python wheels, ViT-B/32 checkpoint, and DFN5B checkpoint into
-  `/kaggle/working/offline_bundle`. Save that notebook version with output and
-  expose its output as an input dataset.
-- `test/kaggle_offline.py`: attach the saved bundle and the `sketchy-fg`
-  dataset to an Internet-disabled GPU notebook, then run this script. It checks
-  the manifest, commit, checkpoint sizes and SHA256 values, restores both model
-  caches, copies the repository to `/kaggle/working/KD-SBIR`, and runs import,
-  projection, loss, and CLI smoke tests.
+The online builder pins source commit `SOURCE_COMMIT_TO_PIN`. The later bundle
+commit intentionally differs so its manifest does not recursively pin itself.
 
-The bundle intentionally pins source commit
-`0edd774d5f8503da86fdf5d5bdb63c15053c2aed`. The later commit containing the
-bundle scripts is not used as training source, preventing the bundle metadata
-from changing itself.
+## Design references
+
+The image-conditional context principle follows CoCoOp; explicit coupling of
+visual and language adaptation is motivated by MaPLe. For FG-SBIR, the design
+retains exact-instance structural discrimination rather than replacing it with
+category classification, consistent with the CLIP FG-ZS-SBIR formulation and
+its emphasis on instance-level structure.

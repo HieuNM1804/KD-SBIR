@@ -9,6 +9,10 @@ def _random_prompt(rows, width, std, seed, device):
     return nn.Parameter(value.to(device=device))
 
 
+def _zero_prompt(rows, width, device):
+    return nn.Parameter(torch.zeros(rows, width, device=device))
+
+
 class ModalityVisualPrompts(nn.Module):
     """Independent deep visual prompts for photo and sketch teacher paths."""
 
@@ -42,10 +46,62 @@ class ModalityVisualPrompts(nn.Module):
         )
 
 
+class SharedResidualVisualPrompts(nn.Module):
+    """Shared cross-modal prompts plus small modality-specific residuals."""
+
+    _MODALITIES = ("photo", "sketch")
+
+    def __init__(self, width, n_ctx, depth, std, seed, device, residual_scale):
+        super().__init__()
+        if residual_scale < 0:
+            raise ValueError("teacher_prompt_residual_scale must be non-negative.")
+        self.n_ctx = n_ctx
+        self.depth = depth
+        self.residual_scale = float(residual_scale)
+        self.shared_prompts = nn.ParameterList(
+            [
+                _random_prompt(
+                    rows=n_ctx,
+                    width=width,
+                    std=std,
+                    seed=seed + layer_index,
+                    device=device,
+                )
+                for layer_index in range(depth)
+            ]
+        )
+        # One antisymmetric delta keeps the parameter count identical to two
+        # independent prompt banks while making their midpoint explicitly
+        # shared: photo = shared + delta, sketch = shared - delta.
+        self.modality_deltas = nn.ParameterList(
+            [_zero_prompt(n_ctx, width, device) for _ in range(depth)]
+        )
+
+    def for_layer(self, modality, layer_index, batch_size, dtype, device):
+        if modality not in self._MODALITIES:
+            raise ValueError(f"Unsupported teacher modality: {modality}")
+        sign = 1.0 if modality == "photo" else -1.0
+        prompt = self.shared_prompts[layer_index] + sign * (
+            self.residual_scale * self.modality_deltas[layer_index]
+        )
+        return prompt.to(device=device, dtype=dtype).unsqueeze(0).expand(
+            batch_size, -1, -1
+        )
+
+
 class TeacherPromptController(nn.Module):
     """Run a frozen OpenCLIP ViT with modality-specific visual prompts."""
 
-    def __init__(self, visual, n_ctx, depth, std, seed):
+    def __init__(
+        self,
+        visual,
+        n_ctx,
+        depth,
+        std,
+        seed,
+        coupling="independent",
+        residual_scale=0.1,
+    ):
         super().__init__()
         blocks = list(visual.transformer.resblocks)
         layer_count = len(blocks)
@@ -63,14 +119,32 @@ class TeacherPromptController(nn.Module):
         object.__setattr__(self, "_visual", visual)
         self.depth = depth
         self.n_ctx = n_ctx
-        self.prompt_learner = ModalityVisualPrompts(
-            width=width,
-            n_ctx=n_ctx,
-            depth=depth,
-            std=std,
-            seed=seed,
-            device=visual.conv1.weight.device,
-        )
+        if coupling == "independent":
+            learner = ModalityVisualPrompts(
+                width=width,
+                n_ctx=n_ctx,
+                depth=depth,
+                std=std,
+                seed=seed,
+                device=visual.conv1.weight.device,
+            )
+        elif coupling == "shared_residual":
+            learner = SharedResidualVisualPrompts(
+                width=width,
+                n_ctx=n_ctx,
+                depth=depth,
+                std=std,
+                seed=seed,
+                device=visual.conv1.weight.device,
+                residual_scale=residual_scale,
+            )
+        else:
+            raise ValueError(
+                "teacher_visual_prompt_coupling must be independent or "
+                "shared_residual."
+            )
+        self.coupling = coupling
+        self.prompt_learner = learner
 
     def trainable_parameter_count(self):
         return sum(parameter.numel() for parameter in self.parameters())
@@ -138,6 +212,8 @@ def build_teacher_prompt_controller(
     depth,
     std=0.02,
     seed=42,
+    coupling="independent",
+    residual_scale=0.1,
 ):
     return TeacherPromptController(
         visual=teacher.visual,
@@ -145,4 +221,6 @@ def build_teacher_prompt_controller(
         depth=depth,
         std=std,
         seed=seed,
+        coupling=coupling,
+        residual_scale=residual_scale,
     )

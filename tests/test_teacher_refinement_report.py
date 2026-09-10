@@ -15,7 +15,7 @@ class TeacherRefinementReportTests(unittest.TestCase):
         cache_path = Path(directory) / f"teacher_seed_{seed}.pt"
         metadata = {
             "teacher_objective": (
-                "matched_control_staged_visual_text_semantic_visual_refinement"
+                "part_query_matched_control_teacher_refinement"
             ),
             "dataset_fingerprint": "same-dataset",
             "seed": seed,

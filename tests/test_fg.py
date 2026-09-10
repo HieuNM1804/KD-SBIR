@@ -21,16 +21,22 @@ from src.dataset_fg import (
     photo_id_from_sketch,
 )
 from src.losses_fg import (
+    fine_grained_bidirectional_infonce_loss,
+    fine_grained_bidirectional_prompt_infonce_loss,
+    fine_grained_hard_negative_margin_loss,
     fine_grained_prompt_infonce_loss,
     fine_grained_prompt_retrieval_accuracy,
     fine_grained_teacher_infonce_loss,
     full_gallery_relational_kd_loss,
     image_conditioned_text_anchor_loss,
+    part_attention_diversity_loss,
+    part_attention_normalized_entropy,
     teacher_semantic_refinement_loss,
     teacher_visual_refinement_control_loss,
 )
 from src.image_text_prompts import (
     ImageConditionedTextPromptLearner,
+    PartQueryPatchToTextContexts,
     PatchToTextContexts,
     deterministic_adaptive_average_tokens,
 )
@@ -151,6 +157,8 @@ class FineGrainedCacheTests(unittest.TestCase):
                 teacher_prompt_depth=12,
                 teacher_prompt_std=0.02,
                 teacher_prompt_seed=42,
+                teacher_visual_prompt_coupling="shared_residual",
+                teacher_prompt_residual_scale=0.1,
                 teacher_prompt_gradient_checkpointing=True,
                 teacher_prompt_lr=3e-2,
                 teacher_momentum=0.9,
@@ -162,6 +170,8 @@ class FineGrainedCacheTests(unittest.TestCase):
                 teacher_instance_temperature=0.07,
                 student_n_ctx_text=8,
                 teacher_n_ctx_text=12,
+                teacher_text_context_generator="part_query",
+                part_attention_temperature=0.07,
                 text_prompt_gate_init=0.1,
                 teacher_text_prompt_seed=50042,
                 teacher_text_prompt_lr=1e-3,
@@ -170,6 +180,11 @@ class FineGrainedCacheTests(unittest.TestCase):
                 lambda_teacher_text_anchor=0.05,
                 teacher_prompt_infonce_temperature=0.07,
                 lambda_teacher_prompt_infonce=1.0,
+                lambda_teacher_text_pair_infonce=0.5,
+                lambda_teacher_part_diversity=0.02,
+                teacher_reverse_infonce_weight=1.0,
+                lambda_teacher_hard_negative=0.5,
+                teacher_hard_negative_margin=0.1,
                 teacher_semantic_refine_epochs=3,
                 teacher_semantic_refine_lr=1e-2,
                 teacher_semantic_warmup_epochs=2,
@@ -211,6 +226,26 @@ class FineGrainedCacheTests(unittest.TestCase):
                 original,
                 default_teacher_cache_path(teacher_prompt_loss_change, dataset),
             )
+            teacher_query_change = copy(args)
+            teacher_query_change.teacher_text_context_generator = (
+                "adaptive_average"
+            )
+            self.assertNotEqual(
+                original,
+                default_teacher_cache_path(teacher_query_change, dataset),
+            )
+            reverse_change = copy(args)
+            reverse_change.teacher_reverse_infonce_weight = 0.5
+            self.assertNotEqual(
+                original,
+                default_teacher_cache_path(reverse_change, dataset),
+            )
+            coupling_change = copy(args)
+            coupling_change.teacher_visual_prompt_coupling = "independent"
+            self.assertNotEqual(
+                original,
+                default_teacher_cache_path(coupling_change, dataset),
+            )
             semantic_refine_change = copy(args)
             semantic_refine_change.lambda_teacher_semantic_refine = 0.5
             self.assertNotEqual(
@@ -238,6 +273,87 @@ class FineGrainedCacheTests(unittest.TestCase):
 
 
 class FineGrainedLossAndMetricTests(unittest.TestCase):
+    def test_bidirectional_infonce_treats_duplicate_sketches_as_positives(self):
+        photos = torch.eye(100)
+        targets = torch.tensor([7, 7, 31])
+        sketches = photos[targets].clone().requires_grad_(True)
+        photos = photos.clone().requires_grad_(True)
+        loss, parts = fine_grained_bidirectional_infonce_loss(
+            sketches,
+            photos,
+            targets,
+            temperature=0.07,
+            reverse_weight=1.0,
+        )
+        self.assertTrue(torch.isfinite(loss))
+        self.assertLess(parts["sketch_to_photo"].item(), 1e-3)
+        self.assertLess(parts["photo_to_sketch"].item(), 1e-3)
+        loss.backward()
+        self.assertIsNotNone(sketches.grad)
+        self.assertIsNotNone(photos.grad)
+
+    def test_hard_negative_margin_focuses_the_highest_wrong_photo(self):
+        photos = torch.eye(100)
+        sketches = photos[[7, 31]].clone()
+        zero = fine_grained_hard_negative_margin_loss(
+            sketches,
+            photos,
+            torch.tensor([7, 31]),
+            margin=0.1,
+        )
+        self.assertEqual(zero.item(), 0.0)
+        confusing = sketches.clone()
+        confusing[0] = 0.51 * photos[7] + 0.86 * photos[8]
+        positive = fine_grained_hard_negative_margin_loss(
+            confusing,
+            photos,
+            torch.tensor([7, 31]),
+            margin=0.1,
+        )
+        self.assertGreater(positive.item(), 0.0)
+
+    def test_bidirectional_prompt_infonce_has_four_finite_directions(self):
+        generator = torch.Generator().manual_seed(41)
+        sketch_images = torch.randn(
+            3, 16, generator=generator, requires_grad=True
+        )
+        photo_images = torch.randn(
+            100, 16, generator=generator, requires_grad=True
+        )
+        sketch_text = torch.randn(
+            3, 16, generator=generator, requires_grad=True
+        )
+        photo_text = torch.randn(
+            100, 16, generator=generator, requires_grad=True
+        )
+        loss, parts = fine_grained_bidirectional_prompt_infonce_loss(
+            sketch_images,
+            photo_images,
+            sketch_text,
+            photo_text,
+            torch.tensor([0, 0, 2]),
+            reverse_weight=1.0,
+        )
+        self.assertEqual(
+            set(parts),
+            {
+                "sketch_to_photo_text",
+                "sketch_text_to_photo",
+                "photo_text_to_sketch",
+                "photo_image_to_sketch_text",
+            },
+        )
+        self.assertTrue(torch.isfinite(loss))
+        loss.backward()
+        for features in (
+            sketch_images,
+            photo_images,
+            sketch_text,
+            photo_text,
+        ):
+            self.assertIsNotNone(features.grad)
+            self.assertTrue(torch.isfinite(features.grad).all())
+
     def test_complete_student_image_conditioned_text_step_backpropagates(self):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         clip_model = CLIP(
@@ -278,6 +394,9 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             text_prompt_encode_chunk_size=128,
             teacher_text_prompt_encode_chunk_size=32,
             text_prompt_gradient_checkpointing=True,
+            student_text_context_generator="part_query",
+            teacher_text_context_generator="part_query",
+            part_attention_temperature=0.07,
         )
         model = FineGrainedCustomCLIP(
             cfg,
@@ -437,6 +556,53 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         self.assertGreater(visual_grad, 0.0)
         self.assertGreater(text_grad, 0.0)
 
+    def test_shared_residual_prompts_couple_without_extra_parameters(self):
+        teacher = OpenCLIP(
+            embed_dim=4,
+            vision_cfg=CLIPVisionCfg(
+                layers=2,
+                width=64,
+                head_width=64,
+                patch_size=4,
+                image_size=8,
+            ),
+            text_cfg=CLIPTextCfg(
+                context_length=6,
+                vocab_size=128,
+                width=8,
+                heads=1,
+                layers=1,
+            ),
+        ).eval().requires_grad_(False)
+        independent = build_teacher_prompt_controller(
+            teacher, n_ctx=2, depth=2, seed=42
+        )
+        coupled = build_teacher_prompt_controller(
+            teacher,
+            n_ctx=2,
+            depth=2,
+            seed=42,
+            coupling="shared_residual",
+            residual_scale=0.1,
+        )
+        self.assertEqual(
+            independent.trainable_parameter_count(),
+            coupled.trainable_parameter_count(),
+        )
+        learner = coupled.prompt_learner
+        photo = learner.for_layer("photo", 0, 1, torch.float32, "cpu")
+        sketch = learner.for_layer("sketch", 0, 1, torch.float32, "cpu")
+        torch.testing.assert_close(photo, sketch)
+        with torch.no_grad():
+            learner.modality_deltas[0].fill_(1.0)
+        photo = learner.for_layer("photo", 0, 1, torch.float32, "cpu")
+        sketch = learner.for_layer("sketch", 0, 1, torch.float32, "cpu")
+        midpoint = 0.5 * (photo + sketch)
+        torch.testing.assert_close(
+            midpoint[0], learner.shared_prompts[0]
+        )
+        torch.testing.assert_close(photo - sketch, torch.full_like(photo, 0.2))
+
     def test_staged_teacher_selects_control_when_text_is_worse(self):
         teacher = OpenCLIP(
             embed_dim=4,
@@ -471,6 +637,8 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             teacher_prompt_depth=1,
             teacher_prompt_std=0.02,
             teacher_prompt_seed=42,
+            teacher_visual_prompt_coupling="shared_residual",
+            teacher_prompt_residual_scale=0.1,
             teacher_prompt_lr=1e-2,
             teacher_semantic_refine_lr=1e-2,
             teacher_momentum=0.0,
@@ -484,6 +652,12 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             teacher_text_prompt_weight_decay=0.0,
             teacher_prompt_infonce_temperature=0.07,
             lambda_teacher_prompt_infonce=1.0,
+            lambda_teacher_text_pair_infonce=0.5,
+            lambda_teacher_part_diversity=0.02,
+            teacher_reverse_infonce_weight=1.0,
+            lambda_teacher_hard_negative=0.5,
+            teacher_hard_negative_margin=0.1,
+            teacher_text_context_generator="part_query",
             lambda_teacher_text_anchor=0.05,
             lambda_teacher_semantic_refine=0.25,
             lambda_teacher_visual_keep=0.1,
@@ -499,6 +673,8 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             n_ctx=2,
             depth=1,
             seed=42,
+            coupling="shared_residual",
+            residual_scale=0.1,
         )
         model.teacher_text_prompt_learner = (
             ImageConditionedTextPromptLearner(
@@ -568,6 +744,13 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         self.assertAlmostEqual(model.teacher_semantic_gain_acc1, 0.03)
         self.assertAlmostEqual(model.teacher_text_added_value_acc1, -0.02)
         self.assertAlmostEqual(model.teacher_best_gain_acc1, 0.05)
+        self.assertEqual(len(model.teacher_text_metric_history), 1)
+        self.assertIn(
+            "text_pair_infonce", model.teacher_text_metric_history[0]
+        )
+        self.assertIn(
+            "part_attention_entropy", model.teacher_text_metric_history[0]
+        )
         self.assertEqual(
             [entry["phase"] for entry in model.teacher_unseen_metric_history],
             [
@@ -655,6 +838,52 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         self.assertIsNotNone(patches.grad)
         self.assertIsNotNone(base.grad)
         self.assertIsNotNone(module.patch_projection.weight.grad)
+
+    def test_part_queries_select_all_patches_and_backpropagate(self):
+        module = PartQueryPatchToTextContexts(
+            visual_width=8,
+            text_width=6,
+            context_tokens=3,
+            seed=42,
+        )
+        patches = torch.randn(2, 12, 8, requires_grad=True)
+        base = torch.randn(3, 6, requires_grad=True)
+        contexts, attention = module(
+            patches,
+            base,
+            return_attention=True,
+        )
+        self.assertEqual(contexts.shape, (2, 3, 6))
+        self.assertEqual(attention.shape, (2, 3, 12))
+        torch.testing.assert_close(
+            attention.sum(dim=-1),
+            torch.ones(2, 3),
+        )
+        loss = contexts.square().mean() + part_attention_diversity_loss(
+            attention
+        )
+        loss.backward()
+        self.assertIsNotNone(patches.grad)
+        self.assertIsNotNone(base.grad)
+        self.assertIsNotNone(module.part_queries.grad)
+        self.assertGreater(module.part_queries.grad.abs().sum().item(), 0.0)
+
+    def test_part_diversity_penalizes_collapsed_queries(self):
+        collapsed = torch.tensor(
+            [[[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]]
+        )
+        separated = torch.tensor(
+            [[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]]
+        )
+        self.assertGreater(
+            part_attention_diversity_loss(collapsed).item(),
+            part_attention_diversity_loss(separated).item(),
+        )
+        uniform = torch.full((1, 2, 3), 1.0 / 3.0)
+        self.assertLess(
+            part_attention_normalized_entropy(collapsed).item(),
+            part_attention_normalized_entropy(uniform).item(),
+        )
 
     def test_openai_text_prompt_learner_backpropagates_to_image_patches(self):
         text_model = CLIP(
@@ -868,6 +1097,9 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
                 "keep",
                 "sketch_to_photo_text",
                 "sketch_text_to_photo",
+                "photo_text_to_sketch",
+                "photo_image_to_sketch_text",
+                "hard_negative",
             },
         )
         self.assertGreater(current_sketch.grad.abs().sum().item(), 0.0)
@@ -902,7 +1134,9 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             lambda_keep=0.1,
         )
         loss.backward()
-        self.assertEqual(set(parts), {"retrieval", "keep"})
+        self.assertEqual(
+            set(parts), {"retrieval", "keep", "hard_negative"}
+        )
         self.assertGreater(current_sketch.grad.abs().sum().item(), 0.0)
         self.assertGreater(current_photo.grad.abs().sum().item(), 0.0)
         self.assertIsNone(source_sketch.grad)
@@ -1094,6 +1328,24 @@ class FineGrainedCliTests(unittest.TestCase):
                 "0.25",
                 "--lambda_teacher_prompt_infonce",
                 "0.75",
+                "--lambda_teacher_text_pair_infonce",
+                "0.4",
+                "--lambda_teacher_part_diversity",
+                "0.03",
+                "--teacher_reverse_infonce_weight",
+                "0.8",
+                "--lambda_teacher_hard_negative",
+                "0.6",
+                "--teacher_hard_negative_margin",
+                "0.12",
+                "--teacher_visual_prompt_coupling",
+                "shared_residual",
+                "--teacher_prompt_residual_scale",
+                "0.2",
+                "--teacher_text_context_generator",
+                "part_query",
+                "--part_attention_temperature",
+                "0.08",
                 "--student_instance_temperature",
                 "0.08",
                 "--prompt_infonce_temperature",
@@ -1119,6 +1371,15 @@ class FineGrainedCliTests(unittest.TestCase):
         self.assertEqual(args.lambda_student_retrieval, 0.5)
         self.assertEqual(args.lambda_prompt_infonce, 0.25)
         self.assertEqual(args.lambda_teacher_prompt_infonce, 0.75)
+        self.assertEqual(args.lambda_teacher_text_pair_infonce, 0.4)
+        self.assertEqual(args.lambda_teacher_part_diversity, 0.03)
+        self.assertEqual(args.teacher_reverse_infonce_weight, 0.8)
+        self.assertEqual(args.lambda_teacher_hard_negative, 0.6)
+        self.assertEqual(args.teacher_hard_negative_margin, 0.12)
+        self.assertEqual(args.teacher_visual_prompt_coupling, "shared_residual")
+        self.assertEqual(args.teacher_prompt_residual_scale, 0.2)
+        self.assertEqual(args.teacher_text_context_generator, "part_query")
+        self.assertEqual(args.part_attention_temperature, 0.08)
         self.assertEqual(args.student_instance_temperature, 0.08)
         self.assertEqual(args.prompt_infonce_temperature, 0.09)
         self.assertEqual(args.teacher_prompt_infonce_temperature, 0.1)

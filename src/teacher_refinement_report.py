@@ -61,7 +61,7 @@ def summarize_teacher_refinement_reports(report_paths, minimum_runs=3):
             raise ValueError(f"Unsupported report format: {path}")
         metadata = report.get("metadata", {})
         if metadata.get("teacher_objective") != (
-            "matched_control_staged_visual_text_semantic_visual_refinement"
+            "part_query_matched_control_teacher_refinement"
         ):
             raise ValueError(f"Not a staged teacher report: {path}")
         current_signature = _comparison_signature(metadata)

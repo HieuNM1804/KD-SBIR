@@ -93,7 +93,9 @@ class PatchToTextContexts(nn.Module):
     ):
         super().__init__()
         if min(visual_width, text_width, context_tokens) < 1:
-            raise ValueError("Patch/text widths and context_tokens must be positive.")
+            raise ValueError(
+                "Patch/text widths and context_tokens must be positive."
+            )
         if gate_init <= 0:
             raise ValueError("gate_init must be positive.")
 
@@ -138,6 +140,93 @@ class PatchToTextContexts(nn.Module):
         return base_context.unsqueeze(0) + self.gate * residual
 
 
+class PartQueryPatchToTextContexts(nn.Module):
+    """Extract unordered semantic parts with learned queries over all patches.
+
+    Unlike fixed spatial averaging, every context token has its own learned
+    query and can follow the same semantic part across sketch/photo layout
+    changes. Keys and queries are cosine-normalized; a learned bounded scale
+    controls attention sharpness without relying on a CUDA attention kernel.
+    """
+
+    def __init__(
+        self,
+        visual_width,
+        text_width,
+        context_tokens,
+        seed,
+        gate_init=0.1,
+        attention_temperature=0.07,
+    ):
+        super().__init__()
+        if min(visual_width, text_width, context_tokens) < 1:
+            raise ValueError("Patch/text widths and context_tokens must be positive.")
+        if gate_init <= 0:
+            raise ValueError("gate_init must be positive.")
+        if attention_temperature <= 0:
+            raise ValueError("attention_temperature must be positive.")
+
+        self.visual_width = visual_width
+        self.context_tokens = context_tokens
+        self.patch_norm = nn.LayerNorm(visual_width)
+        self.key_projection = nn.Linear(visual_width, text_width)
+        self.value_projection = nn.Linear(visual_width, text_width)
+        self.query_norm = nn.LayerNorm(text_width)
+        self.context_norm = nn.LayerNorm(text_width)
+        self.part_queries = nn.Parameter(
+            torch.empty(context_tokens, text_width)
+        )
+        self.logit_scale = nn.Parameter(
+            torch.tensor(float(1.0 / attention_temperature)).log()
+        )
+        self.gate = nn.Parameter(torch.tensor(float(gate_init)))
+
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+        for projection in (self.key_projection, self.value_projection):
+            nn.init.normal_(
+                projection.weight,
+                std=visual_width**-0.5,
+                generator=generator,
+            )
+            nn.init.zeros_(projection.bias)
+        nn.init.normal_(
+            self.part_queries,
+            std=text_width**-0.5,
+            generator=generator,
+        )
+
+    def forward(self, patch_features, base_context, return_attention=False):
+        if patch_features.ndim != 3:
+            raise ValueError("Patch features must have shape [B, N, D].")
+        if patch_features.shape[-1] != self.visual_width:
+            raise ValueError(
+                f"Expected patch width {self.visual_width}, got "
+                f"{patch_features.shape[-1]}."
+            )
+        if base_context.shape != (
+            self.context_tokens,
+            self.part_queries.shape[-1],
+        ):
+            raise ValueError("base_context has an incompatible shape.")
+
+        patches = self.patch_norm(patch_features.float())
+        keys = F.normalize(self.key_projection(patches), dim=-1)
+        values = self.value_projection(patches)
+        queries = F.normalize(
+            self.query_norm(self.part_queries.float()), dim=-1
+        )
+        scale = self.logit_scale.float().exp().clamp(max=100.0)
+        logits = torch.einsum("md,bnd->bmn", queries, keys) * scale
+        attention = logits.softmax(dim=-1)
+        parts = torch.einsum("bmn,bnd->bmd", attention, values)
+        contexts = base_context.unsqueeze(0) + self.gate * (
+            self.context_norm(parts)
+        )
+        if return_attention:
+            return contexts, attention
+        return contexts
+
+
 class ImageConditionedTextPromptLearner(nn.Module):
     """Generate true-class text features from the current image's patches."""
 
@@ -155,6 +244,8 @@ class ImageConditionedTextPromptLearner(nn.Module):
         gate_init=0.1,
         encode_chunk_size=64,
         gradient_checkpointing=True,
+        context_generator="part_query",
+        part_attention_temperature=0.07,
     ):
         super().__init__()
         if text_backend not in {"openai", "open_clip"}:
@@ -165,6 +256,7 @@ class ImageConditionedTextPromptLearner(nn.Module):
         self.text_backend = text_backend
         self.encode_chunk_size = encode_chunk_size
         self.gradient_checkpointing = gradient_checkpointing
+        self.context_generator_name = context_generator
         text_width = text_model.token_embedding.weight.shape[1]
 
         initial_context = self._initial_context(
@@ -175,12 +267,25 @@ class ImageConditionedTextPromptLearner(nn.Module):
             seed,
         )
         self.base_context = nn.Parameter(initial_context)
-        self.context_generator = PatchToTextContexts(
+        if context_generator == "adaptive_average":
+            generator_class = PatchToTextContexts
+            generator_kwargs = {}
+        elif context_generator == "part_query":
+            generator_class = PartQueryPatchToTextContexts
+            generator_kwargs = {
+                "attention_temperature": part_attention_temperature,
+            }
+        else:
+            raise ValueError(
+                "context_generator must be adaptive_average or part_query."
+            )
+        self.context_generator = generator_class(
             visual_width=visual_width,
             text_width=text_width,
             context_tokens=context_tokens,
             seed=seed + 1,
             gate_init=gate_init,
+            **generator_kwargs,
         )
         for modality in self._MODALITIES:
             self.register_buffer(
@@ -267,7 +372,14 @@ class ImageConditionedTextPromptLearner(nn.Module):
             )
         return encode_context(contexts)
 
-    def forward(self, text_model, patch_features, class_labels, modality):
+    def forward(
+        self,
+        text_model,
+        patch_features,
+        class_labels,
+        modality,
+        return_attention=False,
+    ):
         if modality not in self._MODALITIES:
             raise ValueError(f"Unsupported modality: {modality}.")
         labels = class_labels.long().reshape(-1)
@@ -279,10 +391,21 @@ class ImageConditionedTextPromptLearner(nn.Module):
         ):
             raise ValueError("A class label is outside the text token bank.")
 
-        contexts = self.context_generator(
-            patch_features,
-            self.base_context,
-        )
+        if return_attention:
+            if self.context_generator_name != "part_query":
+                raise RuntimeError(
+                    "Attention maps require the part_query context generator."
+                )
+            contexts, attention = self.context_generator(
+                patch_features,
+                self.base_context,
+                return_attention=True,
+            )
+        else:
+            contexts = self.context_generator(
+                patch_features,
+                self.base_context,
+            )
         tokens = token_bank[labels.to(token_bank.device)].to(
             patch_features.device
         )
@@ -297,7 +420,10 @@ class ImageConditionedTextPromptLearner(nn.Module):
             ],
             dim=0,
         )
-        return F.normalize(features.float(), dim=-1), contexts
+        output = (F.normalize(features.float(), dim=-1), contexts)
+        if return_attention:
+            return (*output, attention)
+        return output
 
     def trainable_parameter_count(self):
         return sum(parameter.numel() for parameter in self.parameters())
