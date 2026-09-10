@@ -1,4 +1,4 @@
-"""Restore exact-instance fine-grained text-prompt InfoNCE on Kaggle."""
+"""Restore staged fine-grained teacher semantic refinement on Kaggle."""
 
 from pathlib import Path
 import glob
@@ -11,9 +11,9 @@ import sys
 
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
-EXPECTED_BRANCH = "experiment/fine-grained-image-conditioned-text-infonce"
-EXPECTED_COMMIT = "a244c06fd8d6fb79e34af35b29c8e529b9dfffa6"
-EXPECTED_TASK = "fine_grained_image_conditioned_text_infonce"
+EXPECTED_BRANCH = "experiment/fine-grained-teacher-semantic-refinement"
+EXPECTED_COMMIT = "ae035eea4c05a03ef756b5674f30e25ac41ec3b9"
+EXPECTED_TASK = "fine_grained_teacher_semantic_refinement"
 EXPECTED_ENTRYPOINT = "src.train_fg"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy-fg"
 
@@ -79,7 +79,7 @@ for manifest_path in manifest_paths:
 
 if not matching_bundles:
     raise FileNotFoundError(
-        "Cannot find the required FG exact-instance prompt bundle.\n\n"
+        "Cannot find the required staged FG teacher bundle.\n\n"
         f"Expected branch: {EXPECTED_BRANCH}\n"
         f"Expected commit: {EXPECTED_COMMIT}\n"
         f"Expected task: {EXPECTED_TASK}\n"
@@ -254,6 +254,8 @@ from src.image_text_prompts import PatchToTextContexts
 from src.losses_fg import (
     fine_grained_prompt_infonce_loss,
     fine_grained_teacher_infonce_loss,
+    image_conditioned_text_anchor_loss,
+    teacher_semantic_refinement_loss,
 )
 from src.model_fg import FineGrainedCustomCLIP, FineGrainedZS_SBIR
 
@@ -302,12 +304,53 @@ for features in (sketch_images, photo_images, sketch_text, photo_text):
     assert torch.isfinite(features.grad).all()
     assert features.grad.abs().sum() > 0
 
+current_sketch = torch.randn(3, 16, device=device, requires_grad=True)
+current_photo = torch.randn(100, 16, device=device, requires_grad=True)
+source_sketch = torch.randn(3, 16, device=device, requires_grad=True)
+source_photo = torch.randn(100, 16, device=device, requires_grad=True)
+fixed_sketch_text = torch.randn(3, 16, device=device, requires_grad=True)
+fixed_photo_text = torch.randn(100, 16, device=device, requires_grad=True)
+with torch.autocast(device_type=device.type, dtype=autocast_dtype):
+    refine_loss, refine_parts = teacher_semantic_refinement_loss(
+        current_sketch,
+        current_photo,
+        source_sketch,
+        source_photo,
+        fixed_sketch_text,
+        fixed_photo_text,
+        targets,
+        0.07,
+        0.07,
+        1.0,
+        0.25,
+        0.1,
+    )
+refine_loss.backward()
+assert current_sketch.grad is not None and current_photo.grad is not None
+assert source_sketch.grad is None and source_photo.grad is None
+assert fixed_sketch_text.grad is None and fixed_photo_text.grad is None
+assert set(refine_parts) == {
+    "retrieval",
+    "semantic",
+    "keep",
+    "sketch_to_photo_text",
+    "sketch_text_to_photo",
+}
+anchor_loss = image_conditioned_text_anchor_loss(
+    fixed_sketch_text.detach(),
+    fixed_photo_text.detach(),
+    fixed_sketch_text.detach(),
+    fixed_photo_text.detach(),
+)
+assert abs(anchor_loss.item()) < 1e-5
+
 print("PyTorch:", torch.__version__)
 print("OpenCLIP:", getattr(open_clip, "__version__", "unknown"))
 print("Lightning:", pytorch_lightning.__version__)
 print("CUDA available:", torch.cuda.is_available())
 print("Deterministic patch-pooling backward: OK")
 print("Exact-instance visual/prompt InfoNCE backward: OK")
+print("Staged semantic refinement stop-gradient direction: OK")
 """
 subprocess.run(
     [sys.executable, "-c", smoke_test],
@@ -325,7 +368,7 @@ subprocess.run(
 
 print()
 print("=" * 70)
-print("OFFLINE FG EXACT-INSTANCE TEXT-PROMPT INFONCE SETUP COMPLETE")
+print("OFFLINE FG STAGED TEACHER SEMANTIC REFINEMENT SETUP COMPLETE")
 print("=" * 70)
 print("Project:", WORKING_PROJECT)
 print("Dataset:", SKETCHY_ROOT)

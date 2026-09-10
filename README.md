@@ -173,6 +173,6 @@ Two notebook scripts are included:
   projection, loss, and CLI smoke tests.
 
 The bundle intentionally pins source commit
-`a244c06fd8d6fb79e34af35b29c8e529b9dfffa6`. The later commit containing the
+`ae035eea4c05a03ef756b5674f30e25ac41ec3b9`. The later commit containing the
 bundle scripts is not used as training source, preventing the bundle metadata
 from changing itself.
