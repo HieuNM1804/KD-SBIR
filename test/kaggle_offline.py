@@ -1,4 +1,4 @@
-"""Restore staged fine-grained teacher semantic refinement on Kaggle."""
+"""Restore part-query fine-grained teacher refinement on offline Kaggle."""
 
 from pathlib import Path
 import glob
@@ -11,9 +11,9 @@ import sys
 
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
-EXPECTED_BRANCH = "experiment/fine-grained-teacher-semantic-refinement"
-EXPECTED_COMMIT = "0edd774d5f8503da86fdf5d5bdb63c15053c2aed"
-EXPECTED_TASK = "fine_grained_teacher_semantic_refinement"
+EXPECTED_BRANCH = "experiment/fine-grained-teacher-part-query"
+EXPECTED_COMMIT = "02147563a14ae156d9a8d933ed60cd7a596ad045"
+EXPECTED_TASK = "fine_grained_teacher_part_query"
 EXPECTED_ENTRYPOINT = "src.train_fg"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy-fg"
 
@@ -79,7 +79,7 @@ for manifest_path in manifest_paths:
 
 if not matching_bundles:
     raise FileNotFoundError(
-        "Cannot find the required staged FG teacher bundle.\n\n"
+        "Cannot find the required part-query FG teacher bundle.\n\n"
         f"Expected branch: {EXPECTED_BRANCH}\n"
         f"Expected commit: {EXPECTED_COMMIT}\n"
         f"Expected task: {EXPECTED_TASK}\n"
@@ -251,54 +251,111 @@ import torch
 import open_clip
 import pytorch_lightning
 
-from src.image_text_prompts import PatchToTextContexts
+from src.image_text_prompts import PartQueryPatchToTextContexts
 from src.losses_fg import (
-    fine_grained_prompt_infonce_loss,
-    fine_grained_teacher_infonce_loss,
+    fine_grained_bidirectional_infonce_loss,
+    fine_grained_bidirectional_prompt_infonce_loss,
+    fine_grained_hard_negative_margin_loss,
+    fine_grained_text_pair_infonce_loss,
     image_conditioned_text_anchor_loss,
+    part_attention_diversity_loss,
+    part_attention_normalized_entropy,
     teacher_semantic_refinement_loss,
     teacher_visual_refinement_control_loss,
 )
 from src.model_fg import FineGrainedCustomCLIP, FineGrainedZS_SBIR
+from src.teacher_prompts import SharedResidualVisualPrompts
 from src.teacher_refinement_report import report_path_for_cache
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.use_deterministic_algorithms(True)
-projector = PatchToTextContexts(64, 32, 8, 42).to(device)
+projector = PartQueryPatchToTextContexts(64, 32, 8, 42).to(device)
 patches = torch.randn(2, 49, 64, device=device, requires_grad=True)
 base_context = torch.randn(8, 32, device=device, requires_grad=True)
-contexts = projector(patches, base_context)
+contexts, attention = projector(patches, base_context, return_attention=True)
 assert contexts.shape == (2, 8, 32)
-contexts.square().mean().backward()
+assert attention.shape == (2, 8, 49)
+torch.testing.assert_close(
+    attention.sum(dim=-1),
+    torch.ones(2, 8, device=device),
+)
+diversity = part_attention_diversity_loss(attention)
+entropy = part_attention_normalized_entropy(attention)
+assert diversity.ndim == entropy.ndim == 0
+(contexts.square().mean() + diversity).backward()
 assert patches.grad is not None
+assert projector.part_queries.grad is not None
+
+coupled = SharedResidualVisualPrompts(
+    width=64,
+    n_ctx=2,
+    depth=2,
+    std=0.02,
+    seed=42,
+    device=device,
+    residual_scale=0.1,
+)
+with torch.no_grad():
+    coupled.modality_deltas[0].fill_(1.0)
+photo_prompt = coupled.for_layer("photo", 0, 1, torch.float32, device)
+sketch_prompt = coupled.for_layer("sketch", 0, 1, torch.float32, device)
+torch.testing.assert_close(
+    0.5 * (photo_prompt + sketch_prompt),
+    coupled.shared_prompts[0].unsqueeze(0),
+)
+torch.testing.assert_close(
+    photo_prompt - sketch_prompt,
+    torch.full_like(photo_prompt, 0.2),
+)
 
 sketch_images = torch.randn(3, 16, device=device, requires_grad=True)
 photo_images = torch.randn(100, 16, device=device, requires_grad=True)
 sketch_text = torch.randn(3, 16, device=device, requires_grad=True)
 photo_text = torch.randn(100, 16, device=device, requires_grad=True)
-targets = torch.tensor([0, 1, 2], device=device)
+targets = torch.tensor([0, 0, 2], device=device)
 autocast_dtype = torch.float16 if device.type == "cuda" else torch.bfloat16
 with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-    visual_loss = fine_grained_teacher_infonce_loss(
+    visual_loss, visual_parts = fine_grained_bidirectional_infonce_loss(
         sketch_images,
         photo_images,
         targets,
         0.07,
+        1.0,
     )
-    prompt_loss, prompt_parts = fine_grained_prompt_infonce_loss(
+    prompt_loss, prompt_parts = fine_grained_bidirectional_prompt_infonce_loss(
         sketch_images,
         photo_images,
         sketch_text,
         photo_text,
         targets,
         0.07,
+        1.0,
     )
-    loss = visual_loss + prompt_loss
-assert visual_loss.ndim == prompt_loss.ndim == loss.ndim == 0
-assert visual_loss.dtype == prompt_loss.dtype == loss.dtype == torch.float32
+    text_pair_loss, text_pair_parts = fine_grained_text_pair_infonce_loss(
+        sketch_text,
+        photo_text,
+        targets,
+        0.07,
+        1.0,
+    )
+    hard_loss = fine_grained_hard_negative_margin_loss(
+        sketch_images,
+        photo_images,
+        targets,
+        0.1,
+    )
+    loss = visual_loss + prompt_loss + text_pair_loss + hard_loss
+assert visual_loss.ndim == prompt_loss.ndim == text_pair_loss.ndim == 0
+assert hard_loss.ndim == loss.ndim == 0
+assert visual_loss.dtype == prompt_loss.dtype == torch.float32
+assert text_pair_loss.dtype == hard_loss.dtype == loss.dtype == torch.float32
+assert set(visual_parts) == {"sketch_to_photo", "photo_to_sketch"}
+assert set(text_pair_parts) == {"sketch_to_photo", "photo_to_sketch"}
 assert set(prompt_parts) == {
     "sketch_to_photo_text",
     "sketch_text_to_photo",
+    "photo_text_to_sketch",
+    "photo_image_to_sketch_text",
 }
 assert torch.isfinite(loss)
 loss.backward()
@@ -327,6 +384,9 @@ with torch.autocast(device_type=device.type, dtype=autocast_dtype):
         1.0,
         0.25,
         0.1,
+        1.0,
+        0.5,
+        0.1,
     )
 refine_loss.backward()
 assert current_sketch.grad is not None and current_photo.grad is not None
@@ -336,8 +396,11 @@ assert set(refine_parts) == {
     "retrieval",
     "semantic",
     "keep",
+    "hard_negative",
     "sketch_to_photo_text",
     "sketch_text_to_photo",
+    "photo_text_to_sketch",
+    "photo_image_to_sketch_text",
 }
 control_sketch = torch.randn(3, 16, device=device, requires_grad=True)
 control_photo = torch.randn(100, 16, device=device, requires_grad=True)
@@ -353,12 +416,15 @@ with torch.autocast(device_type=device.type, dtype=autocast_dtype):
         0.07,
         1.0,
         0.1,
+        1.0,
+        0.5,
+        0.1,
     )
 control_loss.backward()
 assert control_sketch.grad is not None and control_photo.grad is not None
 assert control_source_sketch.grad is None
 assert control_source_photo.grad is None
-assert set(control_parts) == {"retrieval", "keep"}
+assert set(control_parts) == {"retrieval", "keep", "hard_negative"}
 anchor_loss = image_conditioned_text_anchor_loss(
     fixed_sketch_text.detach(),
     fixed_photo_text.detach(),
@@ -372,8 +438,9 @@ print("PyTorch:", torch.__version__)
 print("OpenCLIP:", getattr(open_clip, "__version__", "unknown"))
 print("Lightning:", pytorch_lightning.__version__)
 print("CUDA available:", torch.cuda.is_available())
-print("Deterministic patch-pooling backward: OK")
-print("Exact-instance visual/prompt InfoNCE backward: OK")
+print("Deterministic learned part-query backward: OK")
+print("Shared-residual visual prompt parameterization: OK")
+print("Bidirectional visual/text InfoNCE and hard-negative backward: OK")
 print("Staged semantic refinement stop-gradient direction: OK")
 print("Matched visual-only control stop-gradient direction: OK")
 """
@@ -393,7 +460,7 @@ subprocess.run(
 
 print()
 print("=" * 70)
-print("OFFLINE FG STAGED TEACHER SEMANTIC REFINEMENT SETUP COMPLETE")
+print("OFFLINE FG PART-QUERY TEACHER REFINEMENT SETUP COMPLETE")
 print("=" * 70)
 print("Project:", WORKING_PROJECT)
 print("Dataset:", SKETCHY_ROOT)

@@ -121,6 +121,7 @@ Run `src.train_fg`, not category-level `src.train`:
   --teacher_prompt_depth 12 \
   --teacher_prompt_std 0.02 \
   --teacher_prompt_lr 3e-2 \
+  --teacher_prompt_gradient_checkpointing \
   --teacher_visual_prompt_coupling shared_residual \
   --teacher_prompt_residual_scale 0.1 \
   --teacher_momentum 0.9 \
@@ -182,8 +183,9 @@ visual-only continuation, not merely against the earlier Phase-A checkpoint.
 - `test/kaggle_offline.py` validates and restores that bundle in the
   Internet-disabled GPU notebook, then runs deterministic CUDA smoke tests.
 
-The online builder pins source commit `SOURCE_COMMIT_TO_PIN`. The later bundle
-commit intentionally differs so its manifest does not recursively pin itself.
+The online builder pins source commit
+`02147563a14ae156d9a8d933ed60cd7a596ad045`. The later bundle commit
+intentionally differs so its manifest does not recursively pin itself.
 
 ## Design references
 
