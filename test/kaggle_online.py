@@ -19,7 +19,7 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/fine-grained-teacher-semantic-refinement"
 # Pin the source commit. The later bundle-script commit intentionally differs.
-COMMIT = "ae035eea4c05a03ef756b5674f30e25ac41ec3b9"
+COMMIT = "30659a24424dd4ad3a2866b225577c345e89d2eb"
 TASK = "fine_grained_teacher_semantic_refinement"
 ENTRYPOINT = "src.train_fg"
 DATASET = "b20dccn616nguynhutun/sketchy-fg"
