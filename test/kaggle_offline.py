@@ -12,7 +12,7 @@ import sys
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/fine-grained-teacher-semantic-refinement"
-EXPECTED_COMMIT = "684a71d2f55f7b06504b2902448971b01a8e664d"
+EXPECTED_COMMIT = "0edd774d5f8503da86fdf5d5bdb63c15053c2aed"
 EXPECTED_TASK = "fine_grained_teacher_semantic_refinement"
 EXPECTED_ENTRYPOINT = "src.train_fg"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy-fg"
