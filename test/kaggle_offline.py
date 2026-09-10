@@ -12,7 +12,7 @@ import sys
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/fine-grained-teacher-semantic-refinement"
-EXPECTED_COMMIT = "30659a24424dd4ad3a2866b225577c345e89d2eb"
+EXPECTED_COMMIT = "684a71d2f55f7b06504b2902448971b01a8e664d"
 EXPECTED_TASK = "fine_grained_teacher_semantic_refinement"
 EXPECTED_ENTRYPOINT = "src.train_fg"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy-fg"
@@ -114,6 +114,7 @@ required_bundle_paths = (
     source_project / "src" / "model.py",
     source_project / "src" / "model_fg.py",
     source_project / "src" / "teacher_prompts.py",
+    source_project / "src" / "teacher_refinement_report.py",
     source_project / "src" / "train_fg.py",
     dfn_source,
     student_source,
@@ -258,6 +259,7 @@ from src.losses_fg import (
     teacher_semantic_refinement_loss,
 )
 from src.model_fg import FineGrainedCustomCLIP, FineGrainedZS_SBIR
+from src.teacher_refinement_report import report_path_for_cache
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.use_deterministic_algorithms(True)
@@ -343,6 +345,7 @@ anchor_loss = image_conditioned_text_anchor_loss(
     fixed_photo_text.detach(),
 )
 assert abs(anchor_loss.item()) < 1e-5
+assert report_path_for_cache("teacher.pt").name == "teacher.pt.metrics.json"
 
 print("PyTorch:", torch.__version__)
 print("OpenCLIP:", getattr(open_clip, "__version__", "unknown"))
