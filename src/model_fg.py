@@ -18,6 +18,7 @@ from src.losses_fg import (
     fine_grained_teacher_infonce_loss,
     image_conditioned_text_anchor_loss,
     teacher_semantic_refinement_loss,
+    teacher_visual_refinement_control_loss,
 )
 from src.image_text_prompts import ImageConditionedTextPromptLearner
 from src.teacher_prompts import build_teacher_prompt_controller
@@ -32,7 +33,7 @@ from src.model import (
 )
 
 
-FG_CACHE_FORMAT_VERSION = 8
+FG_CACHE_FORMAT_VERSION = 9
 
 
 def better_acc1_acc5(acc1, acc5, best_acc1, best_acc5):
@@ -155,7 +156,7 @@ def _fg_teacher_config(args):
             "task": "fine_grained_exact_instance",
             "teacher_negative_scope": "full_100_photo_category_gallery",
             "teacher_objective": (
-                "staged_visual_text_semantic_visual_refinement"
+                "matched_control_staged_visual_text_semantic_visual_refinement"
             ),
             "teacher_auxiliary_objective": (
                 "sketch_image_to_photo_text_and_sketch_text_to_photo_image"
@@ -191,9 +192,13 @@ def _fg_teacher_config(args):
             "lambda_teacher_visual_keep": args.lambda_teacher_visual_keep,
             "lambda_teacher_text_anchor": args.lambda_teacher_text_anchor,
             "teacher_training_schedule": (
-                "visual_bootstrap_then_text_bootstrap_then_visual_refine"
+                "visual_bootstrap_then_text_bootstrap_then_matched_control_"
+                "and_semantic_visual_refine"
             ),
-            "checkpoint_selection": "best_unseen_acc1_then_acc5",
+            "matched_phase_c_control": True,
+            "checkpoint_selection": (
+                "best_unseen_acc1_then_acc5_across_phase_a_control_semantic"
+            ),
         }
     )
     return config
@@ -721,12 +726,11 @@ class FineGrainedCustomCLIP(CustomCLIP):
         )
         self.teacher_text_prompt_learner.eval().requires_grad_(False)
 
-        # Phase C: use the frozen text learner and a frozen copy of the Phase-A
-        # visual prompts as semantic targets. Only current visual prompts move.
-        print(
-            "[Teacher Phase C] frozen-text semantic visual refinement; "
-            f"epochs={cfg.teacher_semantic_refine_epochs}"
-        )
+        # Both Phase-C tracks start from the exact same Phase-A checkpoint and
+        # consume the exact same deterministic batch order. The matched
+        # visual-only continuation is required to distinguish a genuine text
+        # contribution from the effect of simply training visual prompts for
+        # more epochs.
         semantic_source = build_teacher_prompt_controller(
             teacher=self._teacher,
             n_ctx=cfg.teacher_n_ctx_visual,
@@ -736,136 +740,268 @@ class FineGrainedCustomCLIP(CustomCLIP):
         ).to(teacher_device)
         semantic_source.load_state_dict(visual_source_state, strict=True)
         semantic_source.eval().requires_grad_(False)
-        self.teacher_prompts.load_state_dict(visual_source_state, strict=True)
-        self.teacher_prompts.train().requires_grad_(True)
-        refine_optimizer = torch.optim.SGD(
-            self.teacher_prompts.parameters(),
-            lr=cfg.teacher_semantic_refine_lr,
-            momentum=cfg.teacher_momentum,
-            weight_decay=cfg.teacher_weight_decay,
-        )
-        refine_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            refine_optimizer,
-            mode="max",
-            factor=cfg.teacher_scheduler_gamma,
-            patience=_reduce_on_plateau_patience(
-                cfg.teacher_scheduler_patience
-            ),
-            threshold=0.0,
-            threshold_mode="abs",
-        )
-        # Phase A is the fallback candidate. Semantic refinement is accepted
-        # only when its retrieval validation is strictly better.
-        best_acc1, best_acc5 = visual_source_acc1, visual_source_acc5
-        best_prompt_state = visual_source_state
-        best_phase = visual_source_phase
-        best_epoch = visual_source_epoch
-        for epoch in range(cfg.teacher_semantic_refine_epochs):
-            semantic_weight = cfg.lambda_teacher_semantic_refine * min(
-                1.0,
-                (epoch + 1) / cfg.teacher_semantic_warmup_epochs,
+
+        refinement_sampler_epoch = sampler.epoch
+
+        def run_visual_refinement(phase, use_semantic, metric_epoch_offset):
+            # Reset both weights and sampler position so the semantic and
+            # control tracks differ in exactly one term of the objective.
+            sampler.epoch = refinement_sampler_epoch
+            self.teacher_prompts.load_state_dict(
+                visual_source_state, strict=True
             )
-            totals = {
-                "retrieval": 0.0,
-                "semantic": 0.0,
-                "keep": 0.0,
-            }
-            steps = 0
-            batches = tqdm(
-                loader,
-                desc=(
-                    "Teacher semantic refine "
-                    f"{epoch + 1}/{cfg.teacher_semantic_refine_epochs}"
+            self.teacher_prompts.train().requires_grad_(True)
+            optimizer = torch.optim.SGD(
+                self.teacher_prompts.parameters(),
+                lr=cfg.teacher_semantic_refine_lr,
+                momentum=cfg.teacher_momentum,
+                weight_decay=cfg.teacher_weight_decay,
+            )
+            track_scaler = torch.amp.GradScaler(
+                "cuda", enabled=teacher_device.type == "cuda"
+            )
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode="max",
+                factor=cfg.teacher_scheduler_gamma,
+                patience=_reduce_on_plateau_patience(
+                    cfg.teacher_scheduler_patience
                 ),
-                disable=not show_progress,
+                threshold=0.0,
+                threshold_mode="abs",
             )
-            for batch in batches:
-                photo, sketch, categories, targets = move_batch(batch)
-                photo_categories = categories[:1].expand(len(photo))
-                with torch.no_grad(), torch.amp.autocast(
-                    "cuda",
-                    dtype=torch.float16,
-                    enabled=teacher_device.type == "cuda",
-                ):
-                    source_photo, source_photo_patches = semantic_source(
-                        photo, "photo", return_patch_tokens=True
-                    )
-                    source_sketch, source_sketch_patches = semantic_source(
-                        sketch, "sketch", return_patch_tokens=True
-                    )
-                    fixed_photo_text, _ = self.teacher_text_prompt_learner(
-                        self._teacher,
-                        source_photo_patches,
-                        photo_categories,
-                        "photo",
-                    )
-                    fixed_sketch_text, _ = self.teacher_text_prompt_learner(
-                        self._teacher,
-                        source_sketch_patches,
-                        categories,
-                        "sketch",
-                    )
-                with torch.amp.autocast(
-                    "cuda",
-                    dtype=torch.float16,
-                    enabled=teacher_device.type == "cuda",
-                ):
-                    photo_features = self._encode_teacher_image(photo, "photo")
-                    sketch_features = self._encode_teacher_image(
-                        sketch, "sketch"
-                    )
-                    loss, parts = teacher_semantic_refinement_loss(
-                        sketch_features,
-                        photo_features,
-                        source_sketch,
-                        source_photo,
-                        fixed_sketch_text,
-                        fixed_photo_text,
-                        targets,
-                        cfg.teacher_instance_temperature,
-                        cfg.teacher_prompt_infonce_temperature,
-                        cfg.lambda_teacher_retrieval,
-                        semantic_weight,
-                        cfg.lambda_teacher_visual_keep,
-                    )
-                refine_optimizer.zero_grad(set_to_none=True)
-                scaler.scale(loss).backward()
-                scaler.step(refine_optimizer)
-                scaler.update()
-                for name in totals:
-                    totals[name] += parts[name].detach().item()
-                steps += 1
-                if show_progress:
-                    batches.set_postfix(
-                        T_VIS=f"{parts['retrieval'].item():.3f}",
-                        T_SEM=f"{parts['semantic'].item():.3f}",
-                        T_KEEP=f"{parts['keep'].item():.3f}",
-                    )
-            if steps == 0:
-                raise RuntimeError("Teacher semantic refinement produced no batches.")
+            track_acc1, track_acc5 = visual_source_acc1, visual_source_acc5
+            track_state = visual_source_state
+            track_phase = visual_source_phase
+            track_epoch = visual_source_epoch
+
+            label = "semantic" if use_semantic else "matched control"
             print(
-                f"[Teacher Phase C] epoch={epoch + 1}, "
-                f"visual_instance_nce={totals['retrieval'] / steps:.6f}, "
-                f"semantic_infonce={totals['semantic'] / steps:.6f}, "
-                f"visual_keep={totals['keep'] / steps:.6f}, "
-                f"semantic_weight={semantic_weight:.6f}"
+                f"[Teacher Phase C/{label}] "
+                f"epochs={cfg.teacher_semantic_refine_epochs}; "
+                f"same_start=True; same_batches=True"
             )
-            metric_epoch = cfg.teacher_pretrain_epochs + epoch + 1
-            acc1, acc5 = evaluate_visual("semantic_refine", metric_epoch)
-            refine_scheduler.step(acc1 + acc5 * 1e-6)
-            if better_acc1_acc5(acc1, acc5, best_acc1, best_acc5):
-                best_acc1, best_acc5 = acc1, acc5
-                best_epoch = metric_epoch
-                best_phase = "semantic_refine"
-                best_prompt_state = clone_state(self.teacher_prompts)
+            for epoch in range(cfg.teacher_semantic_refine_epochs):
+                semantic_weight = (
+                    cfg.lambda_teacher_semantic_refine
+                    * min(
+                        1.0,
+                        (epoch + 1) / cfg.teacher_semantic_warmup_epochs,
+                    )
+                    if use_semantic
+                    else 0.0
+                )
+                totals = {"retrieval": 0.0, "keep": 0.0}
+                if use_semantic:
+                    totals["semantic"] = 0.0
+                steps = 0
+                batches = tqdm(
+                    loader,
+                    desc=(
+                        f"Teacher {label} refine "
+                        f"{epoch + 1}/{cfg.teacher_semantic_refine_epochs}"
+                    ),
+                    disable=not show_progress,
+                )
+                for batch in batches:
+                    photo, sketch, categories, targets = move_batch(batch)
+                    photo_categories = categories[:1].expand(len(photo))
+                    with torch.no_grad(), torch.amp.autocast(
+                        "cuda",
+                        dtype=torch.float16,
+                        enabled=teacher_device.type == "cuda",
+                    ):
+                        if use_semantic:
+                            source_photo, source_photo_patches = semantic_source(
+                                photo, "photo", return_patch_tokens=True
+                            )
+                            source_sketch, source_sketch_patches = semantic_source(
+                                sketch, "sketch", return_patch_tokens=True
+                            )
+                            fixed_photo_text, _ = (
+                                self.teacher_text_prompt_learner(
+                                    self._teacher,
+                                    source_photo_patches,
+                                    photo_categories,
+                                    "photo",
+                                )
+                            )
+                            fixed_sketch_text, _ = (
+                                self.teacher_text_prompt_learner(
+                                    self._teacher,
+                                    source_sketch_patches,
+                                    categories,
+                                    "sketch",
+                                )
+                            )
+                        else:
+                            source_photo = semantic_source(photo, "photo")
+                            source_sketch = semantic_source(sketch, "sketch")
+                    with torch.amp.autocast(
+                        "cuda",
+                        dtype=torch.float16,
+                        enabled=teacher_device.type == "cuda",
+                    ):
+                        photo_features = self._encode_teacher_image(
+                            photo, "photo"
+                        )
+                        sketch_features = self._encode_teacher_image(
+                            sketch, "sketch"
+                        )
+                        if use_semantic:
+                            loss, parts = teacher_semantic_refinement_loss(
+                                sketch_features,
+                                photo_features,
+                                source_sketch,
+                                source_photo,
+                                fixed_sketch_text,
+                                fixed_photo_text,
+                                targets,
+                                cfg.teacher_instance_temperature,
+                                cfg.teacher_prompt_infonce_temperature,
+                                cfg.lambda_teacher_retrieval,
+                                semantic_weight,
+                                cfg.lambda_teacher_visual_keep,
+                            )
+                        else:
+                            loss, parts = (
+                                teacher_visual_refinement_control_loss(
+                                    sketch_features,
+                                    photo_features,
+                                    source_sketch,
+                                    source_photo,
+                                    targets,
+                                    cfg.teacher_instance_temperature,
+                                    cfg.lambda_teacher_retrieval,
+                                    cfg.lambda_teacher_visual_keep,
+                                )
+                            )
+                    optimizer.zero_grad(set_to_none=True)
+                    track_scaler.scale(loss).backward()
+                    track_scaler.step(optimizer)
+                    track_scaler.update()
+                    for name in totals:
+                        totals[name] += parts[name].detach().item()
+                    steps += 1
+                    if show_progress:
+                        postfix = {
+                            "T_VIS": f"{parts['retrieval'].item():.3f}",
+                            "T_KEEP": f"{parts['keep'].item():.3f}",
+                        }
+                        if use_semantic:
+                            postfix["T_SEM"] = (
+                                f"{parts['semantic'].item():.3f}"
+                            )
+                        batches.set_postfix(**postfix)
+                if steps == 0:
+                    raise RuntimeError(
+                        f"Teacher {label} refinement produced no batches."
+                    )
+                message = (
+                    f"[Teacher Phase C/{label}] epoch={epoch + 1}, "
+                    f"visual_instance_nce="
+                    f"{totals['retrieval'] / steps:.6f}, "
+                    f"visual_keep={totals['keep'] / steps:.6f}"
+                )
+                if use_semantic:
+                    message += (
+                        f", semantic_infonce="
+                        f"{totals['semantic'] / steps:.6f}, "
+                        f"semantic_weight={semantic_weight:.6f}"
+                    )
+                print(message)
+                metric_epoch = metric_epoch_offset + epoch + 1
+                acc1, acc5 = evaluate_visual(phase, metric_epoch)
+                scheduler.step(acc1 + acc5 * 1e-6)
+                if better_acc1_acc5(
+                    acc1, acc5, track_acc1, track_acc5
+                ):
+                    track_acc1, track_acc5 = acc1, acc5
+                    track_epoch = metric_epoch
+                    track_phase = phase
+                    track_state = clone_state(self.teacher_prompts)
+
+            return (
+                track_state,
+                track_acc1,
+                track_acc5,
+                track_epoch,
+                track_phase,
+            )
+
+        control_result = run_visual_refinement(
+            "matched_control",
+            use_semantic=False,
+            metric_epoch_offset=cfg.teacher_pretrain_epochs,
+        )
+        (
+            control_state,
+            control_acc1,
+            control_acc5,
+            control_epoch,
+            control_phase,
+        ) = control_result
+        print(
+            "[Teacher Matched Control Best] "
+            f"phase={control_phase}, epoch={control_epoch}, "
+            f"Acc@1={control_acc1:.4f}, Acc@5={control_acc5:.4f}"
+        )
+
+        semantic_result = run_visual_refinement(
+            "semantic_refine",
+            use_semantic=True,
+            metric_epoch_offset=(
+                cfg.teacher_pretrain_epochs
+                + cfg.teacher_semantic_refine_epochs
+            ),
+        )
+        (
+            semantic_state,
+            semantic_acc1,
+            semantic_acc5,
+            semantic_epoch,
+            semantic_phase,
+        ) = semantic_result
+        print(
+            "[Teacher Semantic Best] "
+            f"phase={semantic_phase}, epoch={semantic_epoch}, "
+            f"Acc@1={semantic_acc1:.4f}, Acc@5={semantic_acc5:.4f}"
+        )
+
+        best_prompt_state = control_state
+        best_acc1, best_acc5 = control_acc1, control_acc5
+        best_epoch, best_phase = control_epoch, control_phase
+        if better_acc1_acc5(
+            semantic_acc1,
+            semantic_acc5,
+            control_acc1,
+            control_acc5,
+        ):
+            best_prompt_state = semantic_state
+            best_acc1, best_acc5 = semantic_acc1, semantic_acc5
+            best_epoch, best_phase = semantic_epoch, semantic_phase
 
         self.teacher_prompts.load_state_dict(best_prompt_state, strict=True)
         self.teacher_best_epoch = best_epoch
         self.teacher_best_phase = best_phase
         self.teacher_best_acc1 = best_acc1
         self.teacher_best_acc5 = best_acc5
-        self.teacher_semantic_gain_acc1 = best_acc1 - visual_source_acc1
-        self.teacher_semantic_gain_acc5 = best_acc5 - visual_source_acc5
+        self.teacher_control_best_epoch = control_epoch
+        self.teacher_control_best_phase = control_phase
+        self.teacher_control_acc1 = control_acc1
+        self.teacher_control_acc5 = control_acc5
+        self.teacher_semantic_best_epoch = semantic_epoch
+        self.teacher_semantic_best_phase = semantic_phase
+        self.teacher_semantic_acc1 = semantic_acc1
+        self.teacher_semantic_acc5 = semantic_acc5
+        self.teacher_control_gain_acc1 = control_acc1 - visual_source_acc1
+        self.teacher_control_gain_acc5 = control_acc5 - visual_source_acc5
+        self.teacher_semantic_gain_acc1 = semantic_acc1 - visual_source_acc1
+        self.teacher_semantic_gain_acc5 = semantic_acc5 - visual_source_acc5
+        self.teacher_text_added_value_acc1 = semantic_acc1 - control_acc1
+        self.teacher_text_added_value_acc5 = semantic_acc5 - control_acc5
+        self.teacher_best_gain_acc1 = best_acc1 - visual_source_acc1
+        self.teacher_best_gain_acc5 = best_acc5 - visual_source_acc5
         print(
             "[Teacher Best] restored visual prompts from "
             f"phase={best_phase}, epoch={best_epoch}, "
@@ -875,6 +1011,16 @@ class FineGrainedCustomCLIP(CustomCLIP):
             "[Teacher Semantic Gain] versus Phase-A best: "
             f"delta_Acc@1={self.teacher_semantic_gain_acc1:+.4f}, "
             f"delta_Acc@5={self.teacher_semantic_gain_acc5:+.4f}"
+        )
+        print(
+            "[Teacher Text Added Value] versus matched visual-only control: "
+            f"delta_Acc@1={self.teacher_text_added_value_acc1:+.4f}, "
+            f"delta_Acc@5={self.teacher_text_added_value_acc5:+.4f}"
+        )
+        print(
+            "[Teacher Best Gain] versus Phase-A best: "
+            f"delta_Acc@1={self.teacher_best_gain_acc1:+.4f}, "
+            f"delta_Acc@5={self.teacher_best_gain_acc5:+.4f}"
         )
         self.teacher_prompts.eval().requires_grad_(False)
         self.teacher_text_prompt_learner.eval().requires_grad_(False)
@@ -1023,11 +1169,53 @@ class FineGrainedCustomCLIP(CustomCLIP):
             ),
             "teacher_best_acc1": getattr(self, "teacher_best_acc1", None),
             "teacher_best_acc5": getattr(self, "teacher_best_acc5", None),
+            "teacher_control_best_epoch": getattr(
+                self, "teacher_control_best_epoch", None
+            ),
+            "teacher_control_best_phase": getattr(
+                self, "teacher_control_best_phase", None
+            ),
+            "teacher_control_acc1": getattr(
+                self, "teacher_control_acc1", None
+            ),
+            "teacher_control_acc5": getattr(
+                self, "teacher_control_acc5", None
+            ),
+            "teacher_semantic_best_epoch": getattr(
+                self, "teacher_semantic_best_epoch", None
+            ),
+            "teacher_semantic_best_phase": getattr(
+                self, "teacher_semantic_best_phase", None
+            ),
+            "teacher_semantic_acc1": getattr(
+                self, "teacher_semantic_acc1", None
+            ),
+            "teacher_semantic_acc5": getattr(
+                self, "teacher_semantic_acc5", None
+            ),
+            "teacher_control_gain_acc1": getattr(
+                self, "teacher_control_gain_acc1", None
+            ),
+            "teacher_control_gain_acc5": getattr(
+                self, "teacher_control_gain_acc5", None
+            ),
             "teacher_semantic_gain_acc1": getattr(
                 self, "teacher_semantic_gain_acc1", None
             ),
             "teacher_semantic_gain_acc5": getattr(
                 self, "teacher_semantic_gain_acc5", None
+            ),
+            "teacher_text_added_value_acc1": getattr(
+                self, "teacher_text_added_value_acc1", None
+            ),
+            "teacher_text_added_value_acc5": getattr(
+                self, "teacher_text_added_value_acc5", None
+            ),
+            "teacher_best_gain_acc1": getattr(
+                self, "teacher_best_gain_acc1", None
+            ),
+            "teacher_best_gain_acc5": getattr(
+                self, "teacher_best_gain_acc5", None
             ),
             "teacher_train_metric_history": getattr(
                 self,
@@ -1056,13 +1244,47 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 "phase_a_epoch": getattr(self, "teacher_phase_a_epoch", None),
                 "phase_a_acc1": getattr(self, "teacher_phase_a_acc1", None),
                 "phase_a_acc5": getattr(self, "teacher_phase_a_acc5", None),
+                "control_phase": getattr(
+                    self, "teacher_control_best_phase", None
+                ),
+                "control_epoch": getattr(
+                    self, "teacher_control_best_epoch", None
+                ),
+                "control_acc1": getattr(self, "teacher_control_acc1", None),
+                "control_acc5": getattr(self, "teacher_control_acc5", None),
+                "semantic_phase": getattr(
+                    self, "teacher_semantic_best_phase", None
+                ),
+                "semantic_epoch": getattr(
+                    self, "teacher_semantic_best_epoch", None
+                ),
+                "semantic_acc1": getattr(self, "teacher_semantic_acc1", None),
+                "semantic_acc5": getattr(self, "teacher_semantic_acc5", None),
                 "best_acc1": getattr(self, "teacher_best_acc1", None),
                 "best_acc5": getattr(self, "teacher_best_acc5", None),
-                "delta_acc1": getattr(
+                "control_delta_vs_phase_a_acc1": getattr(
+                    self, "teacher_control_gain_acc1", None
+                ),
+                "control_delta_vs_phase_a_acc5": getattr(
+                    self, "teacher_control_gain_acc5", None
+                ),
+                "semantic_delta_vs_phase_a_acc1": getattr(
                     self, "teacher_semantic_gain_acc1", None
                 ),
-                "delta_acc5": getattr(
+                "semantic_delta_vs_phase_a_acc5": getattr(
                     self, "teacher_semantic_gain_acc5", None
+                ),
+                "text_added_value_acc1": getattr(
+                    self, "teacher_text_added_value_acc1", None
+                ),
+                "text_added_value_acc5": getattr(
+                    self, "teacher_text_added_value_acc5", None
+                ),
+                "best_delta_vs_phase_a_acc1": getattr(
+                    self, "teacher_best_gain_acc1", None
+                ),
+                "best_delta_vs_phase_a_acc5": getattr(
+                    self, "teacher_best_gain_acc5", None
                 ),
             },
             {

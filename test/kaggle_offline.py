@@ -257,6 +257,7 @@ from src.losses_fg import (
     fine_grained_teacher_infonce_loss,
     image_conditioned_text_anchor_loss,
     teacher_semantic_refinement_loss,
+    teacher_visual_refinement_control_loss,
 )
 from src.model_fg import FineGrainedCustomCLIP, FineGrainedZS_SBIR
 from src.teacher_refinement_report import report_path_for_cache
@@ -338,6 +339,26 @@ assert set(refine_parts) == {
     "sketch_to_photo_text",
     "sketch_text_to_photo",
 }
+control_sketch = torch.randn(3, 16, device=device, requires_grad=True)
+control_photo = torch.randn(100, 16, device=device, requires_grad=True)
+control_source_sketch = torch.randn(3, 16, device=device, requires_grad=True)
+control_source_photo = torch.randn(100, 16, device=device, requires_grad=True)
+with torch.autocast(device_type=device.type, dtype=autocast_dtype):
+    control_loss, control_parts = teacher_visual_refinement_control_loss(
+        control_sketch,
+        control_photo,
+        control_source_sketch,
+        control_source_photo,
+        targets,
+        0.07,
+        1.0,
+        0.1,
+    )
+control_loss.backward()
+assert control_sketch.grad is not None and control_photo.grad is not None
+assert control_source_sketch.grad is None
+assert control_source_photo.grad is None
+assert set(control_parts) == {"retrieval", "keep"}
 anchor_loss = image_conditioned_text_anchor_loss(
     fixed_sketch_text.detach(),
     fixed_photo_text.detach(),
@@ -354,6 +375,7 @@ print("CUDA available:", torch.cuda.is_available())
 print("Deterministic patch-pooling backward: OK")
 print("Exact-instance visual/prompt InfoNCE backward: OK")
 print("Staged semantic refinement stop-gradient direction: OK")
+print("Matched visual-only control stop-gradient direction: OK")
 """
 subprocess.run(
     [sys.executable, "-c", smoke_test],

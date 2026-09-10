@@ -8,7 +8,7 @@ from pathlib import Path
 import statistics
 
 
-REPORT_FORMAT_VERSION = 1
+REPORT_FORMAT_VERSION = 2
 _SEED_FIELDS = {"seed", "teacher_prompt_seed", "teacher_text_prompt_seed"}
 
 
@@ -44,7 +44,7 @@ def _comparison_signature(metadata):
 
 
 def summarize_teacher_refinement_reports(report_paths, minimum_runs=3):
-    """Validate comparable seeds and summarize semantic retrieval gains."""
+    """Summarize text value against a matched visual-only continuation."""
     if minimum_runs < 1:
         raise ValueError("minimum_runs must be positive.")
     paths = [Path(path) for path in report_paths]
@@ -61,7 +61,7 @@ def summarize_teacher_refinement_reports(report_paths, minimum_runs=3):
             raise ValueError(f"Unsupported report format: {path}")
         metadata = report.get("metadata", {})
         if metadata.get("teacher_objective") != (
-            "staged_visual_text_semantic_visual_refinement"
+            "matched_control_staged_visual_text_semantic_visual_refinement"
         ):
             raise ValueError(f"Not a staged teacher report: {path}")
         current_signature = _comparison_signature(metadata)
@@ -77,18 +77,40 @@ def summarize_teacher_refinement_reports(report_paths, minimum_runs=3):
             "best_phase",
             "phase_a_acc1",
             "phase_a_acc5",
+            "control_acc1",
+            "control_acc5",
+            "semantic_acc1",
+            "semantic_acc5",
             "best_acc1",
             "best_acc5",
-            "delta_acc1",
-            "delta_acc5",
+            "semantic_delta_vs_phase_a_acc1",
+            "semantic_delta_vs_phase_a_acc5",
+            "text_added_value_acc1",
+            "text_added_value_acc5",
+            "best_delta_vs_phase_a_acc1",
+            "best_delta_vs_phase_a_acc5",
         }
         missing = sorted(required - set(result))
         if missing:
             raise ValueError(f"Report {path} is missing: {missing}")
         reports.append((path, metadata, result))
 
-    delta_acc1 = [float(result["delta_acc1"]) for _, _, result in reports]
-    delta_acc5 = [float(result["delta_acc5"]) for _, _, result in reports]
+    text_value_acc1 = [
+        float(result["text_added_value_acc1"])
+        for _, _, result in reports
+    ]
+    text_value_acc5 = [
+        float(result["text_added_value_acc5"])
+        for _, _, result in reports
+    ]
+    semantic_vs_phase_a_acc1 = [
+        float(result["semantic_delta_vs_phase_a_acc1"])
+        for _, _, result in reports
+    ]
+    best_vs_phase_a_acc1 = [
+        float(result["best_delta_vs_phase_a_acc1"])
+        for _, _, result in reports
+    ]
     runs = []
     for path, metadata, result in reports:
         runs.append(
@@ -97,22 +119,48 @@ def summarize_teacher_refinement_reports(report_paths, minimum_runs=3):
                 "seed": metadata.get("seed"),
                 "best_phase": result["best_phase"],
                 "phase_a_acc1": float(result["phase_a_acc1"]),
+                "control_acc1": float(result["control_acc1"]),
+                "semantic_acc1": float(result["semantic_acc1"]),
                 "best_acc1": float(result["best_acc1"]),
-                "delta_acc1": float(result["delta_acc1"]),
-                "delta_acc5": float(result["delta_acc5"]),
+                "semantic_delta_vs_phase_a_acc1": float(
+                    result["semantic_delta_vs_phase_a_acc1"]
+                ),
+                "text_added_value_acc1": float(
+                    result["text_added_value_acc1"]
+                ),
+                "text_added_value_acc5": float(
+                    result["text_added_value_acc5"]
+                ),
+                "best_delta_vs_phase_a_acc1": float(
+                    result["best_delta_vs_phase_a_acc1"]
+                ),
             }
         )
     return {
         "run_count": len(runs),
-        "positive_acc1_runs": sum(value > 0 for value in delta_acc1),
-        "all_acc1_positive": all(value > 0 for value in delta_acc1),
-        "mean_delta_acc1": statistics.fmean(delta_acc1),
-        "stdev_delta_acc1": (
-            statistics.stdev(delta_acc1) if len(delta_acc1) > 1 else 0.0
+        "positive_text_value_acc1_runs": sum(
+            value > 0 for value in text_value_acc1
         ),
-        "mean_delta_acc5": statistics.fmean(delta_acc5),
-        "stdev_delta_acc5": (
-            statistics.stdev(delta_acc5) if len(delta_acc5) > 1 else 0.0
+        "all_text_value_acc1_positive": all(
+            value > 0 for value in text_value_acc1
+        ),
+        "mean_text_added_value_acc1": statistics.fmean(text_value_acc1),
+        "stdev_text_added_value_acc1": (
+            statistics.stdev(text_value_acc1)
+            if len(text_value_acc1) > 1
+            else 0.0
+        ),
+        "mean_text_added_value_acc5": statistics.fmean(text_value_acc5),
+        "stdev_text_added_value_acc5": (
+            statistics.stdev(text_value_acc5)
+            if len(text_value_acc5) > 1
+            else 0.0
+        ),
+        "mean_semantic_delta_vs_phase_a_acc1": statistics.fmean(
+            semantic_vs_phase_a_acc1
+        ),
+        "mean_best_delta_vs_phase_a_acc1": statistics.fmean(
+            best_vs_phase_a_acc1
         ),
         "runs": runs,
     }
@@ -131,7 +179,10 @@ def main():
         minimum_runs=args.minimum_runs,
     )
     print(json.dumps(summary, indent=2, ensure_ascii=False))
-    if args.require_all_positive and not summary["all_acc1_positive"]:
+    if (
+        args.require_all_positive
+        and not summary["all_text_value_acc1_positive"]
+    ):
         raise SystemExit(2)
 
 

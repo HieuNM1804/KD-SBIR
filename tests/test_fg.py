@@ -27,6 +27,7 @@ from src.losses_fg import (
     full_gallery_relational_kd_loss,
     image_conditioned_text_anchor_loss,
     teacher_semantic_refinement_loss,
+    teacher_visual_refinement_control_loss,
 )
 from src.image_text_prompts import (
     ImageConditionedTextPromptLearner,
@@ -102,6 +103,17 @@ class FineGrainedSamplerTests(unittest.TestCase):
         first = FineGrainedFullGalleryBatchSampler(dataset, 4, seed=42)
         second = FineGrainedFullGalleryBatchSampler(dataset, 4, seed=42)
         self.assertEqual(list(iter(first)), list(iter(second)))
+
+    def test_sampler_epoch_reset_gives_matched_refinement_batches(self):
+        sampler = FineGrainedFullGalleryBatchSampler(
+            _FakeDataset(), 4, seed=42
+        )
+        list(iter(sampler))
+        refinement_epoch = sampler.epoch
+        control_batches = [list(iter(sampler)), list(iter(sampler))]
+        sampler.epoch = refinement_epoch
+        semantic_batches = [list(iter(sampler)), list(iter(sampler))]
+        self.assertEqual(control_batches, semantic_batches)
 
     def test_category_chunks_are_shuffled_globally(self):
         dataset = SimpleNamespace(
@@ -425,7 +437,7 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         self.assertGreater(visual_grad, 0.0)
         self.assertGreater(text_grad, 0.0)
 
-    def test_staged_teacher_keeps_visual_bootstrap_when_refinement_is_worse(self):
+    def test_staged_teacher_selects_control_when_text_is_worse(self):
         teacher = OpenCLIP(
             embed_dim=4,
             vision_cfg=CLIPVisionCfg(
@@ -505,7 +517,14 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             torch.nn.functional.normalize(torch.randn(1, 4), dim=-1),
         )
         model._validate_teacher_train = lambda *args, **kwargs: (0.1, 0.2)
-        validation = iter(((0.1, 0.2), (0.2, 0.3), (0.15, 0.25)))
+        validation = iter(
+            (
+                (0.1, 0.2),
+                (0.2, 0.3),
+                (0.25, 0.35),
+                (0.23, 0.34),
+            )
+        )
         model._validate_teacher_unseen = (
             lambda *args, **kwargs: next(validation)
         )
@@ -542,13 +561,21 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             workers=0,
             show_progress=False,
         )
-        self.assertEqual(model.teacher_best_phase, "visual_bootstrap")
-        self.assertEqual(model.teacher_best_acc1, 0.2)
-        self.assertEqual(model.teacher_semantic_gain_acc1, 0.0)
-        self.assertEqual(model.teacher_semantic_gain_acc5, 0.0)
+        self.assertEqual(model.teacher_best_phase, "matched_control")
+        self.assertEqual(model.teacher_best_acc1, 0.25)
+        self.assertEqual(model.teacher_control_acc1, 0.25)
+        self.assertEqual(model.teacher_semantic_acc1, 0.23)
+        self.assertAlmostEqual(model.teacher_semantic_gain_acc1, 0.03)
+        self.assertAlmostEqual(model.teacher_text_added_value_acc1, -0.02)
+        self.assertAlmostEqual(model.teacher_best_gain_acc1, 0.05)
         self.assertEqual(
             [entry["phase"] for entry in model.teacher_unseen_metric_history],
-            ["initial", "visual_bootstrap", "semantic_refine"],
+            [
+                "initial",
+                "visual_bootstrap",
+                "matched_control",
+                "semantic_refine",
+            ],
         )
         self.assertTrue(
             all(
@@ -849,6 +876,37 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         self.assertIsNone(source_photo.grad)
         self.assertIsNone(fixed_sketch_text.grad)
         self.assertIsNone(fixed_photo_text.grad)
+
+    def test_matched_control_has_no_text_path_and_detaches_source(self):
+        generator = torch.Generator().manual_seed(43)
+        current_sketch = torch.randn(
+            3, 16, generator=generator, requires_grad=True
+        )
+        current_photo = torch.randn(
+            100, 16, generator=generator, requires_grad=True
+        )
+        source_sketch = torch.randn(
+            3, 16, generator=generator, requires_grad=True
+        )
+        source_photo = torch.randn(
+            100, 16, generator=generator, requires_grad=True
+        )
+        loss, parts = teacher_visual_refinement_control_loss(
+            current_sketch,
+            current_photo,
+            source_sketch,
+            source_photo,
+            torch.tensor([0, 1, 2]),
+            visual_temperature=0.07,
+            lambda_retrieval=1.0,
+            lambda_keep=0.1,
+        )
+        loss.backward()
+        self.assertEqual(set(parts), {"retrieval", "keep"})
+        self.assertGreater(current_sketch.grad.abs().sum().item(), 0.0)
+        self.assertGreater(current_photo.grad.abs().sum().item(), 0.0)
+        self.assertIsNone(source_sketch.grad)
+        self.assertIsNone(source_photo.grad)
 
     def test_acc1_primary_acc5_tie_break(self):
         self.assertTrue(better_acc1_acc5(0.2, 0.4, 0.1, 0.9))

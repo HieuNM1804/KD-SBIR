@@ -52,7 +52,7 @@ photo. The second makes the text conditioned by each sketch select its paired
 photo image. This retains both photo and sketch prompt learners without the
 same-image/category-classification shortcut.
 
-Teacher training uses three phases:
+Teacher training uses three stages, with two matched tracks in Phase C:
 
 ```text
 Phase A: update visual prompts only with exact-instance visual InfoNCE.
@@ -61,18 +61,26 @@ Phase B: freeze visual prompts and train text prompts with
          L_text = lambda_prompt * L_prompt
                 + lambda_anchor * L_class_semantic_anchor.
 
-Phase C: freeze text prompts and the best Phase-A visual source; update only
-         current visual prompts with
-         L_refine = lambda_retrieval * L_visual
-                  + warmup(lambda_semantic) * L_prompt_to_visual
-                  + lambda_keep * L_visual_preservation.
+Phase C/control: restart from the best Phase-A checkpoint and update visual
+                 prompts with
+                 L_control = lambda_retrieval * L_visual
+                           + lambda_keep * L_visual_preservation.
+
+Phase C/semantic: restart from the same Phase-A checkpoint, consume the same
+                  batches, freeze text prompts, and update visual prompts with
+                  L_refine = L_control
+                           + warmup(lambda_semantic) * L_prompt_to_visual.
 ```
 
 All Phase-B image and patch tensors are detached. In Phase C the semantic text
 features come from a frozen Phase-A visual source and are detached inside the
 loss, so gradients flow in one direction: stable text target -> current teacher
-visual prompts. The best Phase-A checkpoint remains a fallback candidate;
-semantic refinement is accepted only if retrieval Acc@1 (then Acc@5) improves.
+visual prompts. The matched control has the same start, batches, epoch count,
+optimizer, learning rate, retrieval loss, and preservation loss; its only
+difference is zero semantic weight. This separates text-prompt value from the
+effect of three extra visual-training epochs. The final cache restores the best
+teacher among Phase A, matched control, and semantic refinement by unseen
+Acc@1 (then Acc@5).
 
 Student training uses
 
@@ -142,21 +150,21 @@ Run `src.train_fg`, not the category-level `src.train` entry point:
   --momentum 0.9 \
   --weight_decay 1e-3 \
   --seed 42 \
-  --exp_name fg_teacher_staged_semantic_m15 \
+  --exp_name fg_teacher_matched_semantic_m15_seed42 \
   --teacher_only \
   --progress
 ```
 
-After a teacher-only run improves over Phase A across the required seeds,
+After semantic refinement beats its matched control across the required seeds,
 remove `--teacher_only` and reuse the same automatic cache path to train the
 student without reloading DFN5B.
 
 The first staged experiment deliberately keeps `teacher_n_ctx_text=15`, the
 best token count in the preceding joint-training runs. This isolates the
 training schedule as the changed variable. Phase B reports exact-instance
-Acc@1/Acc@5 in both prompt directions, and the final
-`[Teacher Semantic Gain]` line reports the Phase-C improvement over the best
-Phase-A visual teacher.
+Acc@1/Acc@5 in both prompt directions. `[Teacher Semantic Gain]` reports the
+semantic track against Phase A, while `[Teacher Text Added Value]` reports the
+decisive semantic-track minus matched-control difference.
 
 Every teacher cache also writes a lightweight sibling report named
 `<cache>.metrics.json`. After repeating the same command with seeds 42, 43,
@@ -171,9 +179,9 @@ caches:
 ```
 
 The command rejects reports whose non-seed teacher configuration differs. It
-returns exit code 2 when any seed has non-positive Acc@1 gain, preventing a
-single favorable run from being treated as evidence that text improves the
-teacher.
+returns exit code 2 when any seed has non-positive text-added Acc@1 value over
+the matched control, preventing extra visual-training epochs or one favorable
+seed from being mistaken for evidence that text improves the teacher.
 
 Changing `--teacher_n_ctx_text` or another teacher text-prompt setting produces
 a different automatic teacher-cache key. Changing only

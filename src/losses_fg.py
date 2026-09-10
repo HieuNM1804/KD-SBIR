@@ -142,6 +142,54 @@ def image_conditioned_text_anchor_loss(
     return 0.5 * (losses[0] + losses[1])
 
 
+def teacher_visual_preservation_loss(
+    sketch_features,
+    photo_features,
+    source_sketch_features,
+    source_photo_features,
+):
+    """Cosine preservation against the frozen Phase-A visual teacher."""
+    current_sketch = F.normalize(sketch_features.float(), dim=-1)
+    current_photo = F.normalize(photo_features.float(), dim=-1)
+    source_sketch = F.normalize(
+        source_sketch_features.detach().float(), dim=-1
+    )
+    source_photo = F.normalize(
+        source_photo_features.detach().float(), dim=-1
+    )
+    return 0.5 * (
+        (1.0 - (current_sketch * source_sketch).sum(dim=-1)).mean()
+        + (1.0 - (current_photo * source_photo).sum(dim=-1)).mean()
+    )
+
+
+def teacher_visual_refinement_control_loss(
+    sketch_features,
+    photo_features,
+    source_sketch_features,
+    source_photo_features,
+    target_photo_indices,
+    visual_temperature,
+    lambda_retrieval,
+    lambda_keep,
+):
+    """Matched Phase-C control with no information from the text branch."""
+    retrieval = fine_grained_teacher_infonce_loss(
+        sketch_features,
+        photo_features,
+        target_photo_indices,
+        visual_temperature,
+    )
+    keep = teacher_visual_preservation_loss(
+        sketch_features,
+        photo_features,
+        source_sketch_features,
+        source_photo_features,
+    )
+    total = lambda_retrieval * retrieval + lambda_keep * keep
+    return total, {"retrieval": retrieval, "keep": keep}
+
+
 def teacher_semantic_refinement_loss(
     sketch_features,
     photo_features,
@@ -176,17 +224,11 @@ def teacher_semantic_refinement_loss(
         target_photo_indices,
         semantic_temperature,
     )
-    current_sketch = F.normalize(sketch_features.float(), dim=-1)
-    current_photo = F.normalize(photo_features.float(), dim=-1)
-    source_sketch = F.normalize(
-        source_sketch_features.detach().float(), dim=-1
-    )
-    source_photo = F.normalize(
-        source_photo_features.detach().float(), dim=-1
-    )
-    keep = 0.5 * (
-        (1.0 - (current_sketch * source_sketch).sum(dim=-1)).mean()
-        + (1.0 - (current_photo * source_photo).sum(dim=-1)).mean()
+    keep = teacher_visual_preservation_loss(
+        sketch_features,
+        photo_features,
+        source_sketch_features,
+        source_photo_features,
     )
     total = (
         lambda_retrieval * retrieval
