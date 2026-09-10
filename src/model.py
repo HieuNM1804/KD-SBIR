@@ -27,6 +27,7 @@ from src.losses import (
     loss_fn,
 )
 from src.teacher_prompts import build_teacher_prompt_controller
+from src.structural_config import teacher_needed
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -205,6 +206,7 @@ def _load_teacher(args):
         args.lambda_domain <= 0
         and not _image_text_kd_active(args)
         and args.teacher_pretrain_epochs == 0
+        and not teacher_needed(args)
     ):
         return None
 
@@ -508,7 +510,8 @@ class CustomCLIP(nn.Module):
                 disable=not show_progress,
             )
             with torch.enable_grad():
-                for photo, sketch, _, _, labels in batches:
+                for teacher_batch in batches:
+                    photo, sketch, _, _, labels = teacher_batch[:5]
                     photo = photo.to(
                         teacher_device, dtype=teacher_dtype, non_blocking=True
                     )
@@ -859,7 +862,7 @@ class CustomCLIP(nn.Module):
             teacher_photo_base,
             teacher_sketch_base,
             _label,
-        ) = x
+        ) = x[:5]
         photo_features = self.encode_student_image(photo_tensor, "photo")
         sketch_features = self.encode_student_image(sk_tensor, "sketch")
         student_photo_text = (
@@ -937,6 +940,10 @@ class ZS_SBIR(pl.LightningModule):
             workers,
             show_progress,
         )
+        if teacher_needed(self.args):
+            from src.structural_runtime import StructuralRuntime
+            object.__setattr__(self, "_structural_runtime",
+                               StructuralRuntime(self.model, train_dataset, self.args))
         
     def configure_optimizers(self):
         student_params = [
@@ -983,8 +990,35 @@ class ZS_SBIR(pl.LightningModule):
         return self.model(data)
     
     def training_step(self, batch, batch_idx):
-        features = self(batch)
+        from src.local_features import FinalPatches
+        from src.structural_losses import new_objectives
+        runtime = getattr(self, "_structural_runtime", None)
+        if teacher_needed(self.args) and runtime is None:
+            raise RuntimeError("Prepare teacher features before structural distillation training.")
+        captures = None
+        if getattr(self.args, "lambda_sfgw", 0) > 0:
+            with FinalPatches(self.model.clip_model.visual) as capture:
+                features = self(batch)
+            captures = capture.values
+        else:
+            features = self(batch)
         loss, loss_dict = loss_fn(self.args, features)
+        extra_logs = {}
+        if any(getattr(self.args, name, 0) > 0 for name in
+               ("lambda_retrieval", "lambda_semantic", "lambda_contract")):
+            sa = ta = None
+            if runtime is not None and runtime.student_anchors is not None:
+                runtime.student_anchors = runtime.student_anchors.to(features[0].device)
+                runtime.teacher_anchors = runtime.teacher_anchors.to(features[0].device)
+                sa, ta = runtime.student_anchors, runtime.teacher_anchors
+            extra, extra_logs = new_objectives(self.args, features, batch[4], sa, ta)
+            loss = loss + extra
+        if captures is not None:
+            extra, parts = runtime.local_loss(self.model, batch, captures)
+            loss = loss + extra
+            extra_logs.update(parts)
+        for key, value in extra_logs.items():
+            self.log(key, value, on_step=False, on_epoch=True)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         bar_names = {
             "domain_kd": "DOMAIN",

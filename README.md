@@ -1,5 +1,11 @@
 # KD-SBIR: Teacher Visual Prompts, Student Visual-Only Prompts
 
+This branch adds [semantic-conditioned structural distillation](docs/semantic_structural.md)
+on top of main. It provides six independently weighted losses, class-balanced
+student sampling, online/cached local teacher targets, transport diagnostics and
+Kaggle ablation commands. All four new weights default to zero; the original main
+training pipeline below remains the reference. No retrieval gain is claimed yet.
+
 This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from
 `experiment/teacher-visual-prompt-tuning`. The teacher has separate photo and
 sketch deep visual prompts, learns only from retrieval triplet loss, and is

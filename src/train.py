@@ -17,6 +17,8 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from src.dataset import TrainDataset, ValidDataset, WorkerInvariantSampler
 from src.data_config import UNSEEN_CLASSES
 from src.model import ZS_SBIR, default_teacher_cache_path
+from src.structural_config import add_arguments, validate
+from src.class_sampler import ClassBatchSampler
 
 
 def seed_everything(seed):
@@ -56,15 +58,21 @@ def get_loaders(args):
         worker_init_fn=seed_worker,
     )
 
-    train_loader = DataLoader(
-        dataset=train_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        sampler=WorkerInvariantSampler(train_dataset, args.seed),
-        drop_last=True,  # RKD requires complete batches with at least two samples.
-        generator=torch.Generator().manual_seed(args.seed),
-        **loader_kwargs,
-    )
+    if getattr(args, "student_sampler", "main") == "class":
+        train_loader = DataLoader(
+            train_dataset, batch_sampler=ClassBatchSampler(
+                train_dataset, args.batch_size, args.samples_per_class, args.seed),
+            generator=torch.Generator().manual_seed(args.seed), **loader_kwargs)
+    else:
+        train_loader = DataLoader(
+            dataset=train_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            sampler=WorkerInvariantSampler(train_dataset, args.seed),
+            drop_last=True,
+            generator=torch.Generator().manual_seed(args.seed),
+            **loader_kwargs,
+        )
     val_sketch_loader = DataLoader(
         dataset=val_sketch,
         batch_size=args.test_batch_size,
@@ -85,6 +93,7 @@ def get_loaders(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    add_arguments(parser)
     parser.add_argument(
         "--root",
         type=str,
@@ -323,6 +332,7 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    validate(args, parser)
     if args.teacher_prompt_seed is None:
         args.teacher_prompt_seed = args.seed
     if args.photo_text_kd_temperature is None:
@@ -370,6 +380,7 @@ if __name__ == "__main__":
     if args.sketch_text_kd_temperature <= 0:
         parser.error("--sketch_text_kd_temperature must be greater than 0.")
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
+    logger.log_hyperparams(vars(args))
 
     checkpoint_callback = ModelCheckpoint(
         monitor="precision",

@@ -48,6 +48,7 @@ def normal_transform(size=224):
 class TrainDataset(torch.utils.data.Dataset):
     def __init__(self, args):
         self.seed = args.seed
+        self.return_local_indices = getattr(args, "lambda_sfgw", 0) > 0
         self.max_size = args.max_size
         self.normal_transform = normal_transform(self.max_size)
 
@@ -89,8 +90,11 @@ class TrainDataset(torch.utils.data.Dataset):
         return len(self.all_sketches_path)
         
     def __getitem__(self, sample_key):
+        photo_index = None
         if isinstance(sample_key, tuple):
-            epoch, index = sample_key
+            epoch, index = sample_key[:2]
+            if len(sample_key) == 3:
+                photo_index = sample_key[2]
         else:
             epoch, index = 0, sample_key
 
@@ -101,6 +105,10 @@ class TrainDataset(torch.utils.data.Dataset):
 
         photo_paths = self.all_photos_path[category]
         img_path = photo_paths[photo_rng.integers(len(photo_paths))]
+        if photo_index is not None:
+            img_path = self.all_photo_paths[photo_index]
+            if os.path.basename(os.path.dirname(img_path)) != category:
+                raise ValueError("Explicit photo index must match the sketch class.")
 
         sk_data = load_image(filepath, self.max_size)
         img_data = load_image(img_path, self.max_size)
@@ -116,13 +124,16 @@ class TrainDataset(torch.utils.data.Dataset):
                 self.photo_path_to_index[img_path]
             ]
 
-        return (
+        batch = (
             img_tensor,
             sk_tensor,
             teacher_photo_feature,
             teacher_sketch_feature,
             self.category_to_label[category],
         )
+        if self.return_local_indices:
+            batch += (torch.tensor([index, self.photo_path_to_index[img_path]]),)
+        return batch
 
 
 class TeacherFeatureDataset(torch.utils.data.Dataset):
