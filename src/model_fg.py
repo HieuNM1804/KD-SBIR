@@ -15,8 +15,11 @@ from src.losses_fg import (
     fine_grained_distillation_loss,
     fine_grained_prompt_infonce_loss,
     fine_grained_teacher_infonce_loss,
+    image_conditioned_text_anchor_loss,
+    teacher_semantic_refinement_loss,
 )
 from src.image_text_prompts import ImageConditionedTextPromptLearner
+from src.teacher_prompts import build_teacher_prompt_controller
 from src.model import (
     DFN5B_OUTPUT_DIM,
     CustomCLIP,
@@ -27,7 +30,7 @@ from src.model import (
 )
 
 
-FG_CACHE_FORMAT_VERSION = 7
+FG_CACHE_FORMAT_VERSION = 8
 
 
 def better_acc1_acc5(acc1, acc5, best_acc1, best_acc5):
@@ -150,7 +153,7 @@ def _fg_teacher_config(args):
             "task": "fine_grained_exact_instance",
             "teacher_negative_scope": "full_100_photo_category_gallery",
             "teacher_objective": (
-                "visual_and_cross_modal_prompt_exact_instance_infonce"
+                "staged_visual_text_semantic_visual_refinement"
             ),
             "teacher_auxiliary_objective": (
                 "sketch_image_to_photo_text_and_sketch_text_to_photo_image"
@@ -171,6 +174,22 @@ def _fg_teacher_config(args):
             ),
             "lambda_teacher_prompt_infonce": (
                 args.lambda_teacher_prompt_infonce
+            ),
+            "teacher_text_pretrain_epochs": args.teacher_text_pretrain_epochs,
+            "teacher_semantic_refine_epochs": (
+                args.teacher_semantic_refine_epochs
+            ),
+            "teacher_semantic_refine_lr": args.teacher_semantic_refine_lr,
+            "teacher_semantic_warmup_epochs": (
+                args.teacher_semantic_warmup_epochs
+            ),
+            "lambda_teacher_semantic_refine": (
+                args.lambda_teacher_semantic_refine
+            ),
+            "lambda_teacher_visual_keep": args.lambda_teacher_visual_keep,
+            "lambda_teacher_text_anchor": args.lambda_teacher_text_anchor,
+            "teacher_training_schedule": (
+                "visual_bootstrap_then_text_bootstrap_then_visual_refine"
             ),
             "checkpoint_selection": "best_unseen_acc1_then_acc5",
         }
@@ -373,8 +392,6 @@ class FineGrainedCustomCLIP(CustomCLIP):
         teacher_parameter = self._teacher.visual.conv1.weight
         teacher_device = teacher_parameter.device
         teacher_dtype = teacher_parameter.dtype
-        self.teacher_prompts.requires_grad_(True)
-        self.teacher_text_prompt_learner.requires_grad_(True)
         sampler = FineGrainedFullGalleryBatchSampler(
             train_dataset,
             batch_size=cfg.teacher_pretrain_batch_size,
@@ -390,26 +407,89 @@ class FineGrainedCustomCLIP(CustomCLIP):
             prefetch_factor=4 if workers > 0 else None,
             generator=torch.Generator().manual_seed(cfg.seed + 10_000),
         )
-        optimizer = torch.optim.SGD(
-            [
+        scaler = torch.amp.GradScaler(
+            "cuda", enabled=teacher_device.type == "cuda"
+        )
+
+        def clone_state(module):
+            return {
+                key: value.detach().cpu().clone()
+                for key, value in module.state_dict().items()
+            }
+
+        def move_batch(batch):
+            photo, sketch, _, _, categories, targets = batch
+            return (
+                photo.to(
+                    teacher_device, dtype=teacher_dtype, non_blocking=True
+                ),
+                sketch.to(
+                    teacher_device, dtype=teacher_dtype, non_blocking=True
+                ),
+                categories.to(teacher_device, non_blocking=True),
+                targets.to(teacher_device, non_blocking=True),
+            )
+
+        def evaluate_visual(phase, epoch):
+            train_acc1, train_acc5 = self._validate_teacher_train(
+                train_dataset,
+                epoch,
+                workers,
+                show_progress,
+            )
+            val_acc1, val_acc5 = self._validate_teacher_unseen(
+                val_sketch_loader,
+                val_photo_loader,
+                epoch,
+                show_progress,
+            )
+            self.teacher_train_metric_history.append(
                 {
-                    "params": self.teacher_prompts.parameters(),
-                    "lr": cfg.teacher_prompt_lr,
-                    "weight_decay": cfg.teacher_weight_decay,
-                    "name": "teacher_visual_prompts",
-                },
+                    "phase": phase,
+                    "epoch": epoch,
+                    "acc1": train_acc1,
+                    "acc5": train_acc5,
+                }
+            )
+            self.teacher_unseen_metric_history.append(
                 {
-                    "params": self.teacher_text_prompt_learner.parameters(),
-                    "lr": cfg.teacher_text_prompt_lr,
-                    "weight_decay": cfg.teacher_text_prompt_weight_decay,
-                    "name": "teacher_text_prompts",
-                },
-            ],
+                    "phase": phase,
+                    "epoch": epoch,
+                    "acc1": val_acc1,
+                    "acc5": val_acc5,
+                }
+            )
+            return val_acc1, val_acc5
+
+        self.teacher_train_metric_history = []
+        self.teacher_unseen_metric_history = []
+        self.teacher_text_metric_history = []
+
+        # The initial state is a real checkpoint candidate. A failed text
+        # experiment must never force the final teacher below this state.
+        self.teacher_prompts.eval().requires_grad_(False)
+        self.teacher_text_prompt_learner.eval().requires_grad_(False)
+        best_acc1, best_acc5 = evaluate_visual("initial", 0)
+        best_epoch = 0
+        best_phase = "initial"
+        best_prompt_state = clone_state(self.teacher_prompts)
+
+        # Phase A: obtain the strongest visual-only teacher before allowing
+        # randomly initialized text prompts to influence visual retrieval.
+        print(
+            "[Teacher Phase A] visual bootstrap; "
+            f"epochs={cfg.teacher_pretrain_epochs}"
+        )
+        self.teacher_prompts.train().requires_grad_(True)
+        self.teacher_text_prompt_learner.eval().requires_grad_(False)
+        visual_optimizer = torch.optim.SGD(
+            self.teacher_prompts.parameters(),
             lr=cfg.teacher_prompt_lr,
             momentum=cfg.teacher_momentum,
+            weight_decay=cfg.teacher_weight_decay,
         )
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
+        visual_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            visual_optimizer,
             mode="max",
             factor=cfg.teacher_scheduler_gamma,
             patience=_reduce_on_plateau_patience(
@@ -418,209 +498,344 @@ class FineGrainedCustomCLIP(CustomCLIP):
             threshold=0.0,
             threshold_mode="abs",
         )
-        scaler = torch.amp.GradScaler(
-            "cuda", enabled=teacher_device.type == "cuda"
-        )
-        best_acc1 = -float("inf")
-        best_acc5 = -float("inf")
-        best_epoch = 0
-        best_prompt_state = None
-        best_text_prompt_state = None
-        self.teacher_train_metric_history = []
-        self.teacher_unseen_metric_history = []
-
-        train_acc1, train_acc5 = self._validate_teacher_train(
-            train_dataset,
-            epoch=0,
-            workers=workers,
-            show_progress=show_progress,
-        )
-        self.teacher_train_metric_history.append(
-            {
-                "epoch": 0,
-                "acc1": train_acc1,
-                "acc5": train_acc5,
-            }
-        )
-
         for epoch in range(cfg.teacher_pretrain_epochs):
             retrieval_total = 0.0
-            sketch_to_photo_text_total = 0.0
-            sketch_text_to_photo_total = 0.0
             steps = 0
-            self.teacher_text_prompt_learner.train()
             batches = tqdm(
                 loader,
-                desc=f"Teacher FG pretrain {epoch + 1}/{cfg.teacher_pretrain_epochs}",
+                desc=(
+                    "Teacher visual bootstrap "
+                    f"{epoch + 1}/{cfg.teacher_pretrain_epochs}"
+                ),
                 disable=not show_progress,
             )
-            with torch.enable_grad():
-                for batch in batches:
-                    photo, sketch, _, _, categories, targets = batch
-                    photo = photo.to(
-                        teacher_device, dtype=teacher_dtype, non_blocking=True
+            for batch in batches:
+                photo, sketch, _, targets = move_batch(batch)
+                with torch.amp.autocast(
+                    "cuda",
+                    dtype=torch.float16,
+                    enabled=teacher_device.type == "cuda",
+                ):
+                    photo_features = self._encode_teacher_image(photo, "photo")
+                    sketch_features = self._encode_teacher_image(
+                        sketch, "sketch"
                     )
-                    sketch = sketch.to(
-                        teacher_device, dtype=teacher_dtype, non_blocking=True
+                    retrieval = fine_grained_teacher_infonce_loss(
+                        sketch_features,
+                        photo_features,
+                        targets,
+                        cfg.teacher_instance_temperature,
                     )
-                    categories = categories.to(
-                        teacher_device, non_blocking=True
-                    )
-                    targets = targets.to(teacher_device, non_blocking=True)
-                    photo_categories = categories[:1].expand(len(photo))
-                    with torch.amp.autocast(
-                        "cuda",
-                        dtype=torch.float16,
-                        enabled=teacher_device.type == "cuda",
-                    ):
-                        photo_features, photo_patches = (
-                            self._encode_teacher_image(
-                                photo,
-                                "photo",
-                                return_patch_tokens=True,
-                            )
-                        )
-                        sketch_features, sketch_patches = (
-                            self._encode_teacher_image(
-                                sketch,
-                                "sketch",
-                                return_patch_tokens=True,
-                            )
-                        )
-                        retrieval = fine_grained_teacher_infonce_loss(
-                            sketch_features,
-                            photo_features,
-                            targets,
-                            cfg.teacher_instance_temperature,
-                        )
-                        photo_prompt_text, _ = (
-                            self.teacher_text_prompt_learner(
-                                self._teacher,
-                                photo_patches,
-                                photo_categories,
-                                "photo",
-                            )
-                        )
-                        sketch_prompt_text, _ = (
-                            self.teacher_text_prompt_learner(
-                                self._teacher,
-                                sketch_patches,
-                                categories,
-                                "sketch",
-                            )
-                        )
-                        prompt_infonce, prompt_parts = (
-                            fine_grained_prompt_infonce_loss(
-                                sketch_features,
-                                photo_features,
-                                sketch_prompt_text,
-                                photo_prompt_text,
-                                targets,
-                                cfg.teacher_prompt_infonce_temperature,
-                            )
-                        )
-                        loss = (
-                            cfg.lambda_teacher_retrieval * retrieval
-                            + cfg.lambda_teacher_prompt_infonce
-                            * prompt_infonce
-                        )
-                    optimizer.zero_grad(set_to_none=True)
-                    scaler.scale(loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
-                    retrieval_total += retrieval.detach().item()
-                    sketch_to_photo_text_total += prompt_parts[
-                        "sketch_to_photo_text"
-                    ].detach().item()
-                    sketch_text_to_photo_total += prompt_parts[
-                        "sketch_text_to_photo"
-                    ].detach().item()
-                    steps += 1
-                    if show_progress:
-                        batches.set_postfix(
-                            T_VIS=f"{retrieval.item():.3f}",
-                            T_PROMPT=f"{prompt_infonce.item():.3f}",
-                        )
-
+                    loss = cfg.lambda_teacher_retrieval * retrieval
+                visual_optimizer.zero_grad(set_to_none=True)
+                scaler.scale(loss).backward()
+                scaler.step(visual_optimizer)
+                scaler.update()
+                retrieval_total += retrieval.detach().item()
+                steps += 1
+                if show_progress:
+                    batches.set_postfix(T_VIS=f"{retrieval.item():.3f}")
             if steps == 0:
-                raise RuntimeError("Teacher pretraining produced no batches.")
+                raise RuntimeError("Teacher visual bootstrap produced no batches.")
             print(
-                f"[Teacher Pretrain] epoch={epoch + 1}, "
-                f"visual_instance_nce={retrieval_total / steps:.6f}, "
-                "sketch_to_photo_text_nce="
-                f"{sketch_to_photo_text_total / steps:.6f}, "
-                "sketch_text_to_photo_nce="
-                f"{sketch_text_to_photo_total / steps:.6f}"
+                f"[Teacher Phase A] epoch={epoch + 1}, "
+                f"visual_instance_nce={retrieval_total / steps:.6f}"
             )
-            train_acc1, train_acc5 = self._validate_teacher_train(
-                train_dataset,
-                epoch + 1,
-                workers,
-                show_progress,
-            )
-            self.teacher_train_metric_history.append(
-                {
-                    "epoch": epoch + 1,
-                    "acc1": train_acc1,
-                    "acc5": train_acc5,
-                }
-            )
-            acc1, acc5 = self._validate_teacher_unseen(
-                val_sketch_loader,
-                val_photo_loader,
-                epoch + 1,
-                show_progress,
-            )
-            previous_lr = optimizer.param_groups[0]["lr"]
-            scheduler.step(acc1 + acc5 * 1e-6)
-            current_lr = optimizer.param_groups[0]["lr"]
-            if current_lr != previous_lr:
-                print(
-                    "[Teacher LR] validation did not improve for "
-                    f"{cfg.teacher_scheduler_patience} epochs; "
-                    f"prompt_lr={current_lr:.3e}"
-                )
-            self.teacher_unseen_metric_history.append(
-                {
-                    "epoch": epoch + 1,
-                    "acc1": acc1,
-                    "acc5": acc5,
-                }
-            )
-            improved = better_acc1_acc5(
-                acc1, acc5, best_acc1, best_acc5
-            )
-            if improved:
-                best_acc1 = acc1
-                best_acc5 = acc5
-                best_epoch = epoch + 1
-                best_prompt_state = {
-                    key: value.detach().cpu().clone()
-                    for key, value in self.teacher_prompts.state_dict().items()
-                }
-                best_text_prompt_state = {
-                    key: value.detach().cpu().clone()
-                    for key, value in (
-                        self.teacher_text_prompt_learner.state_dict().items()
-                    )
-                }
+            metric_epoch = epoch + 1
+            acc1, acc5 = evaluate_visual("visual_bootstrap", metric_epoch)
+            visual_scheduler.step(acc1 + acc5 * 1e-6)
+            if better_acc1_acc5(acc1, acc5, best_acc1, best_acc5):
+                best_acc1, best_acc5 = acc1, acc5
+                best_epoch = metric_epoch
+                best_phase = "visual_bootstrap"
+                best_prompt_state = clone_state(self.teacher_prompts)
 
-        if best_prompt_state is None or best_text_prompt_state is None:
-            raise RuntimeError("Teacher best-Acc@1 state was not created.")
         self.teacher_prompts.load_state_dict(best_prompt_state, strict=True)
-        self.teacher_text_prompt_learner.load_state_dict(
-            best_text_prompt_state,
-            strict=True,
+        visual_source_state = clone_state(self.teacher_prompts)
+        visual_source_acc1, visual_source_acc5 = best_acc1, best_acc5
+        visual_source_phase = best_phase
+        visual_source_epoch = best_epoch
+        print(
+            "[Teacher Phase A Best] "
+            f"epoch={best_epoch}, Acc@1={best_acc1:.4f}, "
+            f"Acc@5={best_acc5:.4f}"
         )
+
+        # Phase B: train only the text prompt learner. Detaching teacher
+        # image/patch features prevents the semantic branch from corrupting
+        # the visual teacher while it is still learning its language bridge.
+        print(
+            "[Teacher Phase B] frozen-visual text bootstrap; "
+            f"epochs={cfg.teacher_text_pretrain_epochs}"
+        )
+        self.teacher_prompts.eval().requires_grad_(False)
+        self.teacher_text_prompt_learner.train().requires_grad_(True)
+        text_optimizer = torch.optim.AdamW(
+            self.teacher_text_prompt_learner.parameters(),
+            lr=cfg.teacher_text_prompt_lr,
+            weight_decay=cfg.teacher_text_prompt_weight_decay,
+        )
+        teacher_sketch_anchors, teacher_photo_anchors = (
+            self.get_teacher_text_features()
+        )
+        best_text_loss = float("inf")
+        best_text_prompt_state = clone_state(self.teacher_text_prompt_learner)
+        for epoch in range(cfg.teacher_text_pretrain_epochs):
+            prompt_total = 0.0
+            anchor_total = 0.0
+            steps = 0
+            batches = tqdm(
+                loader,
+                desc=(
+                    "Teacher text bootstrap "
+                    f"{epoch + 1}/{cfg.teacher_text_pretrain_epochs}"
+                ),
+                disable=not show_progress,
+            )
+            for batch in batches:
+                photo, sketch, categories, targets = move_batch(batch)
+                photo_categories = categories[:1].expand(len(photo))
+                with torch.no_grad(), torch.amp.autocast(
+                    "cuda",
+                    dtype=torch.float16,
+                    enabled=teacher_device.type == "cuda",
+                ):
+                    photo_features, photo_patches = self._encode_teacher_image(
+                        photo, "photo", return_patch_tokens=True
+                    )
+                    sketch_features, sketch_patches = self._encode_teacher_image(
+                        sketch, "sketch", return_patch_tokens=True
+                    )
+                with torch.amp.autocast(
+                    "cuda",
+                    dtype=torch.float16,
+                    enabled=teacher_device.type == "cuda",
+                ):
+                    photo_prompt_text, _ = self.teacher_text_prompt_learner(
+                        self._teacher,
+                        photo_patches.detach(),
+                        photo_categories,
+                        "photo",
+                    )
+                    sketch_prompt_text, _ = self.teacher_text_prompt_learner(
+                        self._teacher,
+                        sketch_patches.detach(),
+                        categories,
+                        "sketch",
+                    )
+                    prompt_infonce, _ = fine_grained_prompt_infonce_loss(
+                        sketch_features.detach(),
+                        photo_features.detach(),
+                        sketch_prompt_text,
+                        photo_prompt_text,
+                        targets,
+                        cfg.teacher_prompt_infonce_temperature,
+                    )
+                    anchor = image_conditioned_text_anchor_loss(
+                        sketch_prompt_text,
+                        photo_prompt_text,
+                        teacher_sketch_anchors[categories],
+                        teacher_photo_anchors[photo_categories],
+                    )
+                    loss = (
+                        cfg.lambda_teacher_prompt_infonce * prompt_infonce
+                        + cfg.lambda_teacher_text_anchor * anchor
+                    )
+                text_optimizer.zero_grad(set_to_none=True)
+                scaler.scale(loss).backward()
+                scaler.step(text_optimizer)
+                scaler.update()
+                prompt_total += prompt_infonce.detach().item()
+                anchor_total += anchor.detach().item()
+                steps += 1
+                if show_progress:
+                    batches.set_postfix(
+                        T_PROMPT=f"{prompt_infonce.item():.3f}",
+                        T_ANCHOR=f"{anchor.item():.3f}",
+                    )
+            if steps == 0:
+                raise RuntimeError("Teacher text bootstrap produced no batches.")
+            average_prompt = prompt_total / steps
+            average_anchor = anchor_total / steps
+            average_total = (
+                cfg.lambda_teacher_prompt_infonce * average_prompt
+                + cfg.lambda_teacher_text_anchor * average_anchor
+            )
+            self.teacher_text_metric_history.append(
+                {
+                    "epoch": epoch + 1,
+                    "prompt_infonce": average_prompt,
+                    "anchor": average_anchor,
+                    "total": average_total,
+                }
+            )
+            print(
+                f"[Teacher Phase B] epoch={epoch + 1}, "
+                f"prompt_infonce={average_prompt:.6f}, "
+                f"semantic_anchor={average_anchor:.6f}"
+            )
+            if average_total < best_text_loss:
+                best_text_loss = average_total
+                best_text_prompt_state = clone_state(
+                    self.teacher_text_prompt_learner
+                )
+
+        self.teacher_text_prompt_learner.load_state_dict(
+            best_text_prompt_state, strict=True
+        )
+        self.teacher_text_prompt_learner.eval().requires_grad_(False)
+
+        # Phase C: use the frozen text learner and a frozen copy of the Phase-A
+        # visual prompts as semantic targets. Only current visual prompts move.
+        print(
+            "[Teacher Phase C] frozen-text semantic visual refinement; "
+            f"epochs={cfg.teacher_semantic_refine_epochs}"
+        )
+        semantic_source = build_teacher_prompt_controller(
+            teacher=self._teacher,
+            n_ctx=cfg.teacher_n_ctx_visual,
+            depth=cfg.teacher_prompt_depth,
+            std=cfg.teacher_prompt_std,
+            seed=cfg.teacher_prompt_seed,
+        ).to(teacher_device)
+        semantic_source.load_state_dict(visual_source_state, strict=True)
+        semantic_source.eval().requires_grad_(False)
+        self.teacher_prompts.load_state_dict(visual_source_state, strict=True)
+        self.teacher_prompts.train().requires_grad_(True)
+        refine_optimizer = torch.optim.SGD(
+            self.teacher_prompts.parameters(),
+            lr=cfg.teacher_semantic_refine_lr,
+            momentum=cfg.teacher_momentum,
+            weight_decay=cfg.teacher_weight_decay,
+        )
+        refine_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            refine_optimizer,
+            mode="max",
+            factor=cfg.teacher_scheduler_gamma,
+            patience=_reduce_on_plateau_patience(
+                cfg.teacher_scheduler_patience
+            ),
+            threshold=0.0,
+            threshold_mode="abs",
+        )
+        # Phase A is the fallback candidate. Semantic refinement is accepted
+        # only when its retrieval validation is strictly better.
+        best_acc1, best_acc5 = visual_source_acc1, visual_source_acc5
+        best_prompt_state = visual_source_state
+        best_phase = visual_source_phase
+        best_epoch = visual_source_epoch
+        for epoch in range(cfg.teacher_semantic_refine_epochs):
+            semantic_weight = cfg.lambda_teacher_semantic_refine * min(
+                1.0,
+                (epoch + 1) / cfg.teacher_semantic_warmup_epochs,
+            )
+            totals = {
+                "retrieval": 0.0,
+                "semantic": 0.0,
+                "keep": 0.0,
+            }
+            steps = 0
+            batches = tqdm(
+                loader,
+                desc=(
+                    "Teacher semantic refine "
+                    f"{epoch + 1}/{cfg.teacher_semantic_refine_epochs}"
+                ),
+                disable=not show_progress,
+            )
+            for batch in batches:
+                photo, sketch, categories, targets = move_batch(batch)
+                photo_categories = categories[:1].expand(len(photo))
+                with torch.no_grad(), torch.amp.autocast(
+                    "cuda",
+                    dtype=torch.float16,
+                    enabled=teacher_device.type == "cuda",
+                ):
+                    source_photo, source_photo_patches = semantic_source(
+                        photo, "photo", return_patch_tokens=True
+                    )
+                    source_sketch, source_sketch_patches = semantic_source(
+                        sketch, "sketch", return_patch_tokens=True
+                    )
+                    fixed_photo_text, _ = self.teacher_text_prompt_learner(
+                        self._teacher,
+                        source_photo_patches,
+                        photo_categories,
+                        "photo",
+                    )
+                    fixed_sketch_text, _ = self.teacher_text_prompt_learner(
+                        self._teacher,
+                        source_sketch_patches,
+                        categories,
+                        "sketch",
+                    )
+                with torch.amp.autocast(
+                    "cuda",
+                    dtype=torch.float16,
+                    enabled=teacher_device.type == "cuda",
+                ):
+                    photo_features = self._encode_teacher_image(photo, "photo")
+                    sketch_features = self._encode_teacher_image(
+                        sketch, "sketch"
+                    )
+                    loss, parts = teacher_semantic_refinement_loss(
+                        sketch_features,
+                        photo_features,
+                        source_sketch,
+                        source_photo,
+                        fixed_sketch_text,
+                        fixed_photo_text,
+                        targets,
+                        cfg.teacher_instance_temperature,
+                        cfg.teacher_prompt_infonce_temperature,
+                        cfg.lambda_teacher_retrieval,
+                        semantic_weight,
+                        cfg.lambda_teacher_visual_keep,
+                    )
+                refine_optimizer.zero_grad(set_to_none=True)
+                scaler.scale(loss).backward()
+                scaler.step(refine_optimizer)
+                scaler.update()
+                for name in totals:
+                    totals[name] += parts[name].detach().item()
+                steps += 1
+                if show_progress:
+                    batches.set_postfix(
+                        T_VIS=f"{parts['retrieval'].item():.3f}",
+                        T_SEM=f"{parts['semantic'].item():.3f}",
+                        T_KEEP=f"{parts['keep'].item():.3f}",
+                    )
+            if steps == 0:
+                raise RuntimeError("Teacher semantic refinement produced no batches.")
+            print(
+                f"[Teacher Phase C] epoch={epoch + 1}, "
+                f"visual_instance_nce={totals['retrieval'] / steps:.6f}, "
+                f"semantic_infonce={totals['semantic'] / steps:.6f}, "
+                f"visual_keep={totals['keep'] / steps:.6f}, "
+                f"semantic_weight={semantic_weight:.6f}"
+            )
+            metric_epoch = cfg.teacher_pretrain_epochs + epoch + 1
+            acc1, acc5 = evaluate_visual("semantic_refine", metric_epoch)
+            refine_scheduler.step(acc1 + acc5 * 1e-6)
+            if better_acc1_acc5(acc1, acc5, best_acc1, best_acc5):
+                best_acc1, best_acc5 = acc1, acc5
+                best_epoch = metric_epoch
+                best_phase = "semantic_refine"
+                best_prompt_state = clone_state(self.teacher_prompts)
+
+        self.teacher_prompts.load_state_dict(best_prompt_state, strict=True)
         self.teacher_best_epoch = best_epoch
+        self.teacher_best_phase = best_phase
         self.teacher_best_acc1 = best_acc1
         self.teacher_best_acc5 = best_acc5
         print(
             "[Teacher Best] restored visual prompts from "
-            f"epoch={best_epoch}, Acc@1={best_acc1:.4f}, Acc@5={best_acc5:.4f}"
+            f"phase={best_phase}, epoch={best_epoch}, "
+            f"Acc@1={best_acc1:.4f}, Acc@5={best_acc5:.4f}"
         )
-        self.teacher_prompts.requires_grad_(False)
+        self.teacher_prompts.eval().requires_grad_(False)
         self.teacher_text_prompt_learner.eval().requires_grad_(False)
+        del semantic_source
 
     @torch.no_grad()
     def _validate_teacher_train(
@@ -753,6 +968,7 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 else None
             ),
             "teacher_best_epoch": getattr(self, "teacher_best_epoch", None),
+            "teacher_best_phase": getattr(self, "teacher_best_phase", None),
             "teacher_best_acc1": getattr(self, "teacher_best_acc1", None),
             "teacher_best_acc5": getattr(self, "teacher_best_acc5", None),
             "teacher_train_metric_history": getattr(
@@ -763,6 +979,11 @@ class FineGrainedCustomCLIP(CustomCLIP):
             "teacher_unseen_metric_history": getattr(
                 self,
                 "teacher_unseen_metric_history",
+                [],
+            ),
+            "teacher_text_metric_history": getattr(
+                self,
+                "teacher_text_metric_history",
                 [],
             ),
         }

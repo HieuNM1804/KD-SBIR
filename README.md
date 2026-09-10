@@ -1,17 +1,15 @@
-# Fine-grained SBIR with exact-instance text-prompt InfoNCE
+# Staged teacher semantic refinement for fine-grained SBIR
 
 This experiment is based directly on
 `experiment/fine-grained-teacher-train-metrics`. It preserves exact-instance
 fine-grained training, the 100-photo category gallery, teacher/student visual
 prompts, Domain KD, Modality KD, and Acc@1/Acc@5 model selection.
 
-The new branch adds a text prompt learner to both the frozen CLIP ViT-B/32
-student and the frozen DFN5B ViT-H/14 teacher. Unlike the preceding category
-classification experiment, every new prompt objective targets the exact paired
-photo among the category's 100-photo gallery. Soft-token counts are
-controlled independently by `--student_n_ctx_text` and
-`--teacher_n_ctx_text`. The legacy `--n_ctx_text` and `--text_prompt_tokens`
-aliases set only the student count.
+This branch fixes the unstable joint teacher optimization observed when visual
+and randomly initialized text prompts were updated together. Teacher training
+is now staged so text semantics must first become a stable target and can then
+refine the visual representation used for retrieval. Every contrastive target
+is the exact paired photo among the category's 100-photo gallery.
 
 ## Image-to-text prompt path
 
@@ -54,12 +52,27 @@ photo. The second makes the text conditioned by each sketch select its paired
 photo image. This retains both photo and sketch prompt learners without the
 same-image/category-classification shortcut.
 
-Teacher pretraining uses
+Teacher training uses three phases:
 
 ```text
-L_teacher = lambda_teacher_retrieval * L_visual_exact_instance_InfoNCE
-          + lambda_teacher_prompt_infonce * L_prompt
+Phase A: update visual prompts only with exact-instance visual InfoNCE.
+
+Phase B: freeze visual prompts and train text prompts with
+         L_text = lambda_prompt * L_prompt
+                + lambda_anchor * L_class_semantic_anchor.
+
+Phase C: freeze text prompts and the best Phase-A visual source; update only
+         current visual prompts with
+         L_refine = lambda_retrieval * L_visual
+                  + warmup(lambda_semantic) * L_prompt_to_visual
+                  + lambda_keep * L_visual_preservation.
 ```
+
+All Phase-B image and patch tensors are detached. In Phase C the semantic text
+features come from a frozen Phase-A visual source and are detached inside the
+loss, so gradients flow in one direction: stable text target -> current teacher
+visual prompts. The best Phase-A checkpoint remains a fallback candidate;
+semantic refinement is accepted only if retrieval Acc@1 (then Acc@5) improves.
 
 Student training uses
 
@@ -70,11 +83,11 @@ L_student = lambda_domain * L_domain_KD
           + lambda_prompt_infonce * L_prompt
 ```
 
-The CLIP/DFN backbones stay frozen. Teacher visual prompts and teacher text
-prompts are optimized jointly during teacher pretraining. Student visual
-prompts and student text prompts are optimized jointly during student
-training, with separate learning rates. Retrieval inference is unchanged and
-uses the student visual features only.
+The CLIP/DFN backbones stay frozen. Retrieval inference uses visual features
+only. `--teacher_only` runs the three teacher phases, writes the persistent
+cache, reports the selected phase/checkpoint, and stops before student
+training. This is the recommended first experiment; train the student only
+after Phase C demonstrates a repeatable teacher gain.
 
 ## Kaggle command
 
@@ -93,7 +106,7 @@ Run `src.train_fg`, not the category-level `src.train` entry point:
   --n_ctx_visual 3 \
   --prompt_depth 12 \
   --student_n_ctx_text 8 \
-  --teacher_n_ctx_text 12 \
+  --teacher_n_ctx_text 8 \
   --text_prompt_gate_init 0.1 \
   --text_prompt_lr 1e-3 \
   --text_prompt_weight_decay 1e-4 \
@@ -101,7 +114,9 @@ Run `src.train_fg`, not the category-level `src.train` entry point:
   --lambda_student_retrieval 1.0 \
   --prompt_infonce_temperature 0.07 \
   --lambda_prompt_infonce 1.0 \
-  --teacher_pretrain_epochs 2 \
+  --teacher_pretrain_epochs 8 \
+  --teacher_text_pretrain_epochs 3 \
+  --teacher_semantic_refine_epochs 3 \
   --teacher_pretrain_batch_size 64 \
   --teacher_n_ctx_visual 10 \
   --teacher_prompt_depth 12 \
@@ -112,6 +127,11 @@ Run `src.train_fg`, not the category-level `src.train` entry point:
   --lambda_teacher_retrieval 1.5 \
   --teacher_prompt_infonce_temperature 0.07 \
   --lambda_teacher_prompt_infonce 1.0 \
+  --lambda_teacher_text_anchor 0.05 \
+  --teacher_semantic_refine_lr 1e-2 \
+  --teacher_semantic_warmup_epochs 2 \
+  --lambda_teacher_semantic_refine 0.25 \
+  --lambda_teacher_visual_keep 0.1 \
   --teacher_momentum 0.9 \
   --teacher_weight_decay 1e-3 \
   --lambda_domain 3.0 \
@@ -122,9 +142,14 @@ Run `src.train_fg`, not the category-level `src.train` entry point:
   --momentum 0.9 \
   --weight_decay 1e-3 \
   --seed 42 \
-  --exp_name fg_exact_instance_text_infonce_m8_m12 \
+  --exp_name fg_teacher_staged_semantic_m8 \
+  --teacher_only \
   --progress
 ```
+
+After a teacher-only run improves over Phase A across the required seeds,
+remove `--teacher_only` and reuse the same automatic cache path to train the
+student without reloading DFN5B.
 
 Changing `--teacher_n_ctx_text` or another teacher text-prompt setting produces
 a different automatic teacher-cache key. Changing only

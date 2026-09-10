@@ -24,6 +24,8 @@ from src.losses_fg import (
     fine_grained_prompt_infonce_loss,
     fine_grained_teacher_infonce_loss,
     full_gallery_relational_kd_loss,
+    image_conditioned_text_anchor_loss,
+    teacher_semantic_refinement_loss,
 )
 from src.image_text_prompts import (
     ImageConditionedTextPromptLearner,
@@ -151,8 +153,15 @@ class FineGrainedCacheTests(unittest.TestCase):
                 teacher_text_prompt_seed=50042,
                 teacher_text_prompt_lr=1e-3,
                 teacher_text_prompt_weight_decay=1e-4,
+                teacher_text_pretrain_epochs=3,
+                lambda_teacher_text_anchor=0.05,
                 teacher_prompt_infonce_temperature=0.07,
                 lambda_teacher_prompt_infonce=1.0,
+                teacher_semantic_refine_epochs=3,
+                teacher_semantic_refine_lr=1e-2,
+                teacher_semantic_warmup_epochs=2,
+                lambda_teacher_semantic_refine=0.25,
+                lambda_teacher_visual_keep=0.1,
                 teacher_scheduler_patience=3,
                 teacher_scheduler_gamma=0.1,
                 seed=42,
@@ -188,6 +197,12 @@ class FineGrainedCacheTests(unittest.TestCase):
             self.assertNotEqual(
                 original,
                 default_teacher_cache_path(teacher_prompt_loss_change, dataset),
+            )
+            semantic_refine_change = copy(args)
+            semantic_refine_change.lambda_teacher_semantic_refine = 0.5
+            self.assertNotEqual(
+                original,
+                default_teacher_cache_path(semantic_refine_change, dataset),
             )
             student_prompt_loss_change = copy(args)
             student_prompt_loss_change.lambda_prompt_infonce = 0.5
@@ -409,6 +424,142 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         self.assertGreater(visual_grad, 0.0)
         self.assertGreater(text_grad, 0.0)
 
+    def test_staged_teacher_keeps_visual_bootstrap_when_refinement_is_worse(self):
+        teacher = OpenCLIP(
+            embed_dim=4,
+            vision_cfg=CLIPVisionCfg(
+                layers=1,
+                width=64,
+                head_width=64,
+                patch_size=4,
+                image_size=8,
+            ),
+            text_cfg=CLIPTextCfg(
+                context_length=6,
+                vocab_size=128,
+                width=8,
+                heads=1,
+                layers=1,
+            ),
+        ).eval().requires_grad_(False)
+
+        def tokenizer(prompts):
+            tokens = torch.tensor([1, 2, 2, 3, 4, 99])
+            return tokens.unsqueeze(0).expand(len(prompts), -1).clone()
+
+        setattr(teacher, "text_tokenizer", tokenizer)
+        cfg = SimpleNamespace(
+            seed=42,
+            teacher_pretrain_batch_size=2,
+            teacher_pretrain_epochs=1,
+            teacher_text_pretrain_epochs=1,
+            teacher_semantic_refine_epochs=1,
+            teacher_n_ctx_visual=2,
+            teacher_prompt_depth=1,
+            teacher_prompt_std=0.02,
+            teacher_prompt_seed=42,
+            teacher_prompt_lr=1e-2,
+            teacher_semantic_refine_lr=1e-2,
+            teacher_momentum=0.0,
+            teacher_weight_decay=0.0,
+            teacher_scheduler_gamma=0.1,
+            teacher_scheduler_patience=2,
+            teacher_prompt_gradient_checkpointing=False,
+            teacher_instance_temperature=0.07,
+            lambda_teacher_retrieval=1.0,
+            teacher_text_prompt_lr=1e-3,
+            teacher_text_prompt_weight_decay=0.0,
+            teacher_prompt_infonce_temperature=0.07,
+            lambda_teacher_prompt_infonce=1.0,
+            lambda_teacher_text_anchor=0.05,
+            lambda_teacher_semantic_refine=0.25,
+            lambda_teacher_visual_keep=0.1,
+            teacher_semantic_warmup_epochs=1,
+        )
+        model = FineGrainedCustomCLIP.__new__(FineGrainedCustomCLIP)
+        torch.nn.Module.__init__(model)
+        model.cfg = cfg
+        model.classnames = ("cat",)
+        object.__setattr__(model, "_teacher", teacher)
+        model.teacher_prompts = build_teacher_prompt_controller(
+            teacher,
+            n_ctx=2,
+            depth=1,
+            seed=42,
+        )
+        model.teacher_text_prompt_learner = (
+            ImageConditionedTextPromptLearner(
+                text_model=teacher,
+                tokenizer=tokenizer,
+                classnames=model.classnames,
+                visual_width=64,
+                context_tokens=2,
+                seed=43,
+                text_backend="open_clip",
+                gradient_checkpointing=False,
+            )
+        )
+        model.get_teacher_text_features = lambda: (
+            torch.nn.functional.normalize(torch.randn(1, 4), dim=-1),
+            torch.nn.functional.normalize(torch.randn(1, 4), dim=-1),
+        )
+        model._validate_teacher_train = lambda *args, **kwargs: (0.1, 0.2)
+        validation = iter(((0.1, 0.2), (0.2, 0.3), (0.15, 0.25)))
+        model._validate_teacher_unseen = (
+            lambda *args, **kwargs: next(validation)
+        )
+
+        class TinyFullGalleryDataset(torch.utils.data.Dataset):
+            sample_category_ids = [0, 0]
+
+            def __init__(self):
+                generator = torch.Generator().manual_seed(44)
+                self.sketches = torch.randn(2, 3, 8, 8, generator=generator)
+                self.photos = torch.randn(100, 3, 8, 8, generator=generator)
+
+            def __len__(self):
+                return 2
+
+            def __getitem__(self, index):
+                return self.sketches[index], torch.empty(0), 0, index
+
+            def collate_full_gallery(self, samples):
+                sketches, _, categories, targets = zip(*samples)
+                return (
+                    self.photos,
+                    torch.stack(sketches),
+                    torch.empty(0),
+                    torch.empty(len(sketches), 0),
+                    torch.as_tensor(categories),
+                    torch.as_tensor(targets),
+                )
+
+        model._pretrain_teacher_prompts(
+            TinyFullGalleryDataset(),
+            val_sketch_loader=None,
+            val_photo_loader=None,
+            workers=0,
+            show_progress=False,
+        )
+        self.assertEqual(model.teacher_best_phase, "visual_bootstrap")
+        self.assertEqual(model.teacher_best_acc1, 0.2)
+        self.assertEqual(
+            [entry["phase"] for entry in model.teacher_unseen_metric_history],
+            ["initial", "visual_bootstrap", "semantic_refine"],
+        )
+        self.assertTrue(
+            all(
+                not parameter.requires_grad
+                for parameter in model.teacher_prompts.parameters()
+            )
+        )
+        self.assertTrue(
+            all(
+                not parameter.requires_grad
+                for parameter in model.teacher_text_prompt_learner.parameters()
+            )
+        )
+
     def test_deterministic_patch_pool_matches_adaptive_average(self):
         generator = torch.Generator().manual_seed(42)
         for patch_count, context_count in ((49, 8), (256, 12), (16, 16)):
@@ -610,6 +761,69 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
             self.assertIsNotNone(features.grad)
             self.assertGreater(features.grad.abs().sum().item(), 0.0)
 
+    def test_text_anchor_preserves_matching_class_semantics(self):
+        sketch_anchor = torch.randn(3, 16)
+        photo_anchor = torch.randn(100, 16)
+        zero = image_conditioned_text_anchor_loss(
+            sketch_anchor.clone(),
+            photo_anchor.clone(),
+            sketch_anchor,
+            photo_anchor,
+        )
+        self.assertLess(abs(zero.item()), 1e-6)
+
+    def test_semantic_refinement_updates_only_current_visual_features(self):
+        generator = torch.Generator().manual_seed(42)
+        current_sketch = torch.randn(
+            3, 16, generator=generator, requires_grad=True
+        )
+        current_photo = torch.randn(
+            100, 16, generator=generator, requires_grad=True
+        )
+        source_sketch = torch.randn(
+            3, 16, generator=generator, requires_grad=True
+        )
+        source_photo = torch.randn(
+            100, 16, generator=generator, requires_grad=True
+        )
+        fixed_sketch_text = torch.randn(
+            3, 16, generator=generator, requires_grad=True
+        )
+        fixed_photo_text = torch.randn(
+            100, 16, generator=generator, requires_grad=True
+        )
+        loss, parts = teacher_semantic_refinement_loss(
+            current_sketch,
+            current_photo,
+            source_sketch,
+            source_photo,
+            fixed_sketch_text,
+            fixed_photo_text,
+            torch.tensor([0, 1, 2]),
+            visual_temperature=0.07,
+            semantic_temperature=0.07,
+            lambda_retrieval=1.0,
+            lambda_semantic=0.25,
+            lambda_keep=0.1,
+        )
+        loss.backward()
+        self.assertEqual(
+            set(parts),
+            {
+                "retrieval",
+                "semantic",
+                "keep",
+                "sketch_to_photo_text",
+                "sketch_text_to_photo",
+            },
+        )
+        self.assertGreater(current_sketch.grad.abs().sum().item(), 0.0)
+        self.assertGreater(current_photo.grad.abs().sum().item(), 0.0)
+        self.assertIsNone(source_sketch.grad)
+        self.assertIsNone(source_photo.grad)
+        self.assertIsNone(fixed_sketch_text.grad)
+        self.assertIsNone(fixed_photo_text.grad)
+
     def test_acc1_primary_acc5_tie_break(self):
         self.assertTrue(better_acc1_acc5(0.2, 0.4, 0.1, 0.9))
         self.assertTrue(better_acc1_acc5(0.2, 0.5, 0.2, 0.4))
@@ -802,6 +1016,20 @@ class FineGrainedCliTests(unittest.TestCase):
                 "0.09",
                 "--teacher_prompt_infonce_temperature",
                 "0.1",
+                "--teacher_text_pretrain_epochs",
+                "4",
+                "--lambda_teacher_text_anchor",
+                "0.06",
+                "--teacher_semantic_refine_epochs",
+                "5",
+                "--teacher_semantic_refine_lr",
+                "0.004",
+                "--teacher_semantic_warmup_epochs",
+                "2",
+                "--lambda_teacher_semantic_refine",
+                "0.2",
+                "--lambda_teacher_visual_keep",
+                "0.15",
             ]
         )
         self.assertEqual(args.lambda_student_retrieval, 0.5)
@@ -810,6 +1038,13 @@ class FineGrainedCliTests(unittest.TestCase):
         self.assertEqual(args.student_instance_temperature, 0.08)
         self.assertEqual(args.prompt_infonce_temperature, 0.09)
         self.assertEqual(args.teacher_prompt_infonce_temperature, 0.1)
+        self.assertEqual(args.teacher_text_pretrain_epochs, 4)
+        self.assertEqual(args.lambda_teacher_text_anchor, 0.06)
+        self.assertEqual(args.teacher_semantic_refine_epochs, 5)
+        self.assertEqual(args.teacher_semantic_refine_lr, 0.004)
+        self.assertEqual(args.teacher_semantic_warmup_epochs, 2)
+        self.assertEqual(args.lambda_teacher_semantic_refine, 0.2)
+        self.assertEqual(args.lambda_teacher_visual_keep, 0.15)
 
     def test_student_and_teacher_text_prompt_counts_are_independent(self):
         args = build_parser().parse_args(

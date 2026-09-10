@@ -85,6 +85,88 @@ def fine_grained_prompt_infonce_loss(
     }
 
 
+def image_conditioned_text_anchor_loss(
+    sketch_text_features,
+    photo_text_features,
+    sketch_class_anchors,
+    photo_class_anchors,
+):
+    """Keep dynamic prompts close to frozen CLIP class semantics."""
+    pairs = (
+        (sketch_text_features, sketch_class_anchors),
+        (photo_text_features, photo_class_anchors),
+    )
+    losses = []
+    for conditioned, anchor in pairs:
+        if conditioned.shape != anchor.shape:
+            raise ValueError(
+                "Conditioned text features and class anchors must match."
+            )
+        conditioned = F.normalize(conditioned.float(), dim=-1)
+        anchor = F.normalize(anchor.detach().float(), dim=-1)
+        losses.append(1.0 - (conditioned * anchor).sum(dim=-1).mean())
+    return 0.5 * (losses[0] + losses[1])
+
+
+def teacher_semantic_refinement_loss(
+    sketch_features,
+    photo_features,
+    source_sketch_features,
+    source_photo_features,
+    fixed_sketch_text_features,
+    fixed_photo_text_features,
+    target_photo_indices,
+    visual_temperature,
+    semantic_temperature,
+    lambda_retrieval,
+    lambda_semantic,
+    lambda_keep,
+):
+    """Refine teacher visual prompts against frozen semantic targets.
+
+    Text and source-visual tensors are detached here by construction. This
+    makes the optimization direction explicit: semantic targets supervise
+    current visual prompts, while the text prompt learner cannot move.
+    """
+    retrieval = fine_grained_teacher_infonce_loss(
+        sketch_features,
+        photo_features,
+        target_photo_indices,
+        visual_temperature,
+    )
+    semantic, semantic_parts = fine_grained_prompt_infonce_loss(
+        sketch_features,
+        photo_features,
+        fixed_sketch_text_features.detach(),
+        fixed_photo_text_features.detach(),
+        target_photo_indices,
+        semantic_temperature,
+    )
+    current_sketch = F.normalize(sketch_features.float(), dim=-1)
+    current_photo = F.normalize(photo_features.float(), dim=-1)
+    source_sketch = F.normalize(
+        source_sketch_features.detach().float(), dim=-1
+    )
+    source_photo = F.normalize(
+        source_photo_features.detach().float(), dim=-1
+    )
+    keep = 0.5 * (
+        (1.0 - (current_sketch * source_sketch).sum(dim=-1)).mean()
+        + (1.0 - (current_photo * source_photo).sum(dim=-1)).mean()
+    )
+    total = (
+        lambda_retrieval * retrieval
+        + lambda_semantic * semantic
+        + lambda_keep * keep
+    )
+    return total, {
+        "retrieval": retrieval,
+        "semantic": semantic,
+        "keep": keep,
+        **semantic_parts,
+    }
+
+
 def full_gallery_relational_kd_loss(
     student_sketch,
     student_photo,

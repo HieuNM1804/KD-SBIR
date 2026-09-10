@@ -98,7 +98,10 @@ def get_loaders(args):
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="Exact-instance fine-grained ZS-SBIR distillation."
+        description=(
+            "Staged teacher semantic refinement for exact-instance "
+            "fine-grained ZS-SBIR distillation."
+        )
     )
     parser.add_argument(
         "--root",
@@ -153,6 +156,21 @@ def build_parser():
         default=1e-4,
     )
     parser.add_argument(
+        "--teacher_text_pretrain_epochs",
+        type=int,
+        default=3,
+        help=(
+            "Frozen-visual epochs used to bootstrap stable teacher text "
+            "semantic targets after visual-only pretraining."
+        ),
+    )
+    parser.add_argument(
+        "--lambda_teacher_text_anchor",
+        type=float,
+        default=0.05,
+        help="Keep dynamic teacher text prompts near frozen class semantics.",
+    )
+    parser.add_argument(
         "--text_prompt_gradient_checkpointing",
         action="store_true",
         default=True,
@@ -175,6 +193,36 @@ def build_parser():
         "--teacher_prompt_infonce_temperature",
         type=float,
         default=0.07,
+    )
+    parser.add_argument(
+        "--teacher_semantic_refine_epochs",
+        type=int,
+        default=3,
+        help=(
+            "Visual-only refinement epochs against frozen teacher text "
+            "semantic targets."
+        ),
+    )
+    parser.add_argument(
+        "--teacher_semantic_refine_lr",
+        type=float,
+        default=1e-2,
+    )
+    parser.add_argument(
+        "--teacher_semantic_warmup_epochs",
+        type=int,
+        default=2,
+    )
+    parser.add_argument(
+        "--lambda_teacher_semantic_refine",
+        type=float,
+        default=0.25,
+    )
+    parser.add_argument(
+        "--lambda_teacher_visual_keep",
+        type=float,
+        default=0.1,
+        help="Preserve the best visual-bootstrap teacher during refinement.",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--lr", type=float, default=1e-2)
@@ -215,6 +263,14 @@ def build_parser():
     parser.add_argument("--teacher_cache_path", default="")
     parser.add_argument("--teacher_cache_dir", default="")
     parser.add_argument("--rebuild_teacher_cache", action="store_true")
+    parser.add_argument(
+        "--teacher_only",
+        action="store_true",
+        help=(
+            "Build/evaluate the staged teacher cache and stop before student "
+            "training."
+        ),
+    )
     parser.add_argument("--lambda_teacher_retrieval", type=float, default=1.5)
     parser.add_argument(
         "--teacher_instance_temperature",
@@ -237,7 +293,7 @@ def build_parser():
     parser.add_argument("--sketch_text_kd_temperature", type=float, default=None)
     parser.add_argument(
         "--exp_name",
-        default="fine_grained_image_conditioned_text_infonce",
+        default="fine_grained_teacher_semantic_refinement",
     )
     return parser
 
@@ -274,6 +330,12 @@ def validate_args(parser, args):
         parser.error("--teacher_pretrain_batch_size must be positive.")
     if args.teacher_pretrain_epochs < 0:
         parser.error("--teacher_pretrain_epochs must be non-negative.")
+    if args.teacher_text_pretrain_epochs < 0:
+        parser.error("--teacher_text_pretrain_epochs must be non-negative.")
+    if args.teacher_semantic_refine_epochs < 0:
+        parser.error("--teacher_semantic_refine_epochs must be non-negative.")
+    if args.teacher_semantic_warmup_epochs < 1:
+        parser.error("--teacher_semantic_warmup_epochs must be at least 1.")
     if args.teacher_pretrain_epochs > 0 and args.teacher_n_ctx_visual < 1:
         parser.error("Teacher prompt pretraining requires visual prompts.")
     if args.teacher_prompt_depth == 0 or args.teacher_prompt_depth < -1:
@@ -288,6 +350,7 @@ def validate_args(parser, args):
         "--text_prompt_gate_init": args.text_prompt_gate_init,
         "--text_prompt_lr": args.text_prompt_lr,
         "--teacher_text_prompt_lr": args.teacher_text_prompt_lr,
+        "--teacher_semantic_refine_lr": args.teacher_semantic_refine_lr,
         "--student_instance_temperature": args.student_instance_temperature,
         "--prompt_infonce_temperature": args.prompt_infonce_temperature,
         "--teacher_prompt_infonce_temperature": (
@@ -316,6 +379,11 @@ def validate_args(parser, args):
         "--lambda_teacher_prompt_infonce": (
             args.lambda_teacher_prompt_infonce
         ),
+        "--lambda_teacher_text_anchor": args.lambda_teacher_text_anchor,
+        "--lambda_teacher_semantic_refine": (
+            args.lambda_teacher_semantic_refine
+        ),
+        "--lambda_teacher_visual_keep": args.lambda_teacher_visual_keep,
         "--lambda_domain": args.lambda_domain,
         "--lambda_modality": args.lambda_modality,
     }
@@ -340,9 +408,22 @@ def validate_args(parser, args):
     if (
         args.teacher_pretrain_epochs > 0
         and args.lambda_teacher_retrieval == 0
-        and args.lambda_teacher_prompt_infonce == 0
     ):
-        parser.error("At least one teacher pretraining loss must be active.")
+        parser.error("Teacher visual bootstrap requires retrieval loss.")
+    if (
+        args.teacher_pretrain_epochs > 0
+        and args.teacher_semantic_refine_epochs > 0
+        and args.teacher_text_pretrain_epochs == 0
+    ):
+        parser.error(
+            "Teacher semantic refinement requires text bootstrap epochs."
+        )
+    if (
+        args.teacher_text_pretrain_epochs > 0
+        and args.lambda_teacher_prompt_infonce == 0
+        and args.lambda_teacher_text_anchor == 0
+    ):
+        parser.error("At least one teacher text-bootstrap loss must be active.")
 
 
 def main():
@@ -409,6 +490,12 @@ def main():
         workers=args.workers,
         show_progress=args.progress,
     )
+    if args.teacher_only:
+        print(
+            "[Teacher Only] staged teacher cache is ready; "
+            "student training skipped."
+        )
+        return
     trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])
 
 
