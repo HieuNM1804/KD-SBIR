@@ -22,6 +22,7 @@ from src.dataset_fg import (
 )
 from src.losses_fg import (
     fine_grained_prompt_infonce_loss,
+    fine_grained_prompt_retrieval_accuracy,
     fine_grained_teacher_infonce_loss,
     full_gallery_relational_kd_loss,
     image_conditioned_text_anchor_loss,
@@ -543,6 +544,8 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         )
         self.assertEqual(model.teacher_best_phase, "visual_bootstrap")
         self.assertEqual(model.teacher_best_acc1, 0.2)
+        self.assertEqual(model.teacher_semantic_gain_acc1, 0.0)
+        self.assertEqual(model.teacher_semantic_gain_acc5, 0.0)
         self.assertEqual(
             [entry["phase"] for entry in model.teacher_unseen_metric_history],
             ["initial", "visual_bootstrap", "semantic_refine"],
@@ -731,6 +734,29 @@ class FineGrainedLossAndMetricTests(unittest.TestCase):
         self.assertLess(loss.item(), 1e-3)
         self.assertLess(parts["sketch_to_photo_text"].item(), 1e-3)
         self.assertLess(parts["sketch_text_to_photo"].item(), 1e-3)
+
+    def test_prompt_retrieval_metrics_use_exact_photo_targets(self):
+        photo_images = torch.eye(100)
+        photo_text = photo_images.clone()
+        targets = torch.tensor([7, 31, 99])
+        metrics = fine_grained_prompt_retrieval_accuracy(
+            photo_images[targets],
+            photo_images,
+            photo_text[targets],
+            photo_text,
+            targets,
+        )
+        self.assertEqual(
+            set(metrics),
+            {
+                "sketch_to_photo_text_acc1",
+                "sketch_to_photo_text_acc5",
+                "sketch_text_to_photo_acc1",
+                "sketch_text_to_photo_acc5",
+            },
+        )
+        for value in metrics.values():
+            self.assertEqual(value.item(), 1.0)
 
     def test_prompt_infonce_is_autocast_safe_and_backpropagates(self):
         sketch_images = torch.randn(3, 16, requires_grad=True)

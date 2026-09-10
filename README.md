@@ -106,7 +106,7 @@ Run `src.train_fg`, not the category-level `src.train` entry point:
   --n_ctx_visual 3 \
   --prompt_depth 12 \
   --student_n_ctx_text 8 \
-  --teacher_n_ctx_text 8 \
+  --teacher_n_ctx_text 15 \
   --text_prompt_gate_init 0.1 \
   --text_prompt_lr 1e-3 \
   --text_prompt_weight_decay 1e-4 \
@@ -142,7 +142,7 @@ Run `src.train_fg`, not the category-level `src.train` entry point:
   --momentum 0.9 \
   --weight_decay 1e-3 \
   --seed 42 \
-  --exp_name fg_teacher_staged_semantic_m8 \
+  --exp_name fg_teacher_staged_semantic_m15 \
   --teacher_only \
   --progress
 ```
@@ -150,6 +150,13 @@ Run `src.train_fg`, not the category-level `src.train` entry point:
 After a teacher-only run improves over Phase A across the required seeds,
 remove `--teacher_only` and reuse the same automatic cache path to train the
 student without reloading DFN5B.
+
+The first staged experiment deliberately keeps `teacher_n_ctx_text=15`, the
+best token count in the preceding joint-training runs. This isolates the
+training schedule as the changed variable. Phase B reports exact-instance
+Acc@1/Acc@5 in both prompt directions, and the final
+`[Teacher Semantic Gain]` line reports the Phase-C improvement over the best
+Phase-A visual teacher.
 
 Changing `--teacher_n_ctx_text` or another teacher text-prompt setting produces
 a different automatic teacher-cache key. Changing only

@@ -14,6 +14,7 @@ from src.dataset_fg import FineGrainedFullGalleryBatchSampler
 from src.losses_fg import (
     fine_grained_distillation_loss,
     fine_grained_prompt_infonce_loss,
+    fine_grained_prompt_retrieval_accuracy,
     fine_grained_teacher_infonce_loss,
     image_conditioned_text_anchor_loss,
     teacher_semantic_refinement_loss,
@@ -583,6 +584,13 @@ class FineGrainedCustomCLIP(CustomCLIP):
         for epoch in range(cfg.teacher_text_pretrain_epochs):
             prompt_total = 0.0
             anchor_total = 0.0
+            metric_totals = {
+                "sketch_to_photo_text_acc1": 0.0,
+                "sketch_to_photo_text_acc5": 0.0,
+                "sketch_text_to_photo_acc1": 0.0,
+                "sketch_text_to_photo_acc5": 0.0,
+            }
+            query_count = 0
             steps = 0
             batches = tqdm(
                 loader,
@@ -641,12 +649,23 @@ class FineGrainedCustomCLIP(CustomCLIP):
                         cfg.lambda_teacher_prompt_infonce * prompt_infonce
                         + cfg.lambda_teacher_text_anchor * anchor
                     )
+                prompt_metrics = fine_grained_prompt_retrieval_accuracy(
+                    sketch_features,
+                    photo_features,
+                    sketch_prompt_text,
+                    photo_prompt_text,
+                    targets,
+                )
                 text_optimizer.zero_grad(set_to_none=True)
                 scaler.scale(loss).backward()
                 scaler.step(text_optimizer)
                 scaler.update()
                 prompt_total += prompt_infonce.detach().item()
                 anchor_total += anchor.detach().item()
+                current_queries = len(targets)
+                for name, value in prompt_metrics.items():
+                    metric_totals[name] += value.item() * current_queries
+                query_count += current_queries
                 steps += 1
                 if show_progress:
                     batches.set_postfix(
@@ -661,18 +680,31 @@ class FineGrainedCustomCLIP(CustomCLIP):
                 cfg.lambda_teacher_prompt_infonce * average_prompt
                 + cfg.lambda_teacher_text_anchor * average_anchor
             )
+            average_metrics = {
+                name: total / query_count
+                for name, total in metric_totals.items()
+            }
             self.teacher_text_metric_history.append(
                 {
                     "epoch": epoch + 1,
                     "prompt_infonce": average_prompt,
                     "anchor": average_anchor,
                     "total": average_total,
+                    **average_metrics,
                 }
             )
             print(
                 f"[Teacher Phase B] epoch={epoch + 1}, "
                 f"prompt_infonce={average_prompt:.6f}, "
-                f"semantic_anchor={average_anchor:.6f}"
+                f"semantic_anchor={average_anchor:.6f}, "
+                "image_to_text_Acc@1="
+                f"{average_metrics['sketch_to_photo_text_acc1']:.4f}, "
+                "image_to_text_Acc@5="
+                f"{average_metrics['sketch_to_photo_text_acc5']:.4f}, "
+                "text_to_image_Acc@1="
+                f"{average_metrics['sketch_text_to_photo_acc1']:.4f}, "
+                "text_to_image_Acc@5="
+                f"{average_metrics['sketch_text_to_photo_acc5']:.4f}"
             )
             if average_total < best_text_loss:
                 best_text_loss = average_total
@@ -828,10 +860,17 @@ class FineGrainedCustomCLIP(CustomCLIP):
         self.teacher_best_phase = best_phase
         self.teacher_best_acc1 = best_acc1
         self.teacher_best_acc5 = best_acc5
+        self.teacher_semantic_gain_acc1 = best_acc1 - visual_source_acc1
+        self.teacher_semantic_gain_acc5 = best_acc5 - visual_source_acc5
         print(
             "[Teacher Best] restored visual prompts from "
             f"phase={best_phase}, epoch={best_epoch}, "
             f"Acc@1={best_acc1:.4f}, Acc@5={best_acc5:.4f}"
+        )
+        print(
+            "[Teacher Semantic Gain] versus Phase-A best: "
+            f"delta_Acc@1={self.teacher_semantic_gain_acc1:+.4f}, "
+            f"delta_Acc@5={self.teacher_semantic_gain_acc5:+.4f}"
         )
         self.teacher_prompts.eval().requires_grad_(False)
         self.teacher_text_prompt_learner.eval().requires_grad_(False)
@@ -971,6 +1010,12 @@ class FineGrainedCustomCLIP(CustomCLIP):
             "teacher_best_phase": getattr(self, "teacher_best_phase", None),
             "teacher_best_acc1": getattr(self, "teacher_best_acc1", None),
             "teacher_best_acc5": getattr(self, "teacher_best_acc5", None),
+            "teacher_semantic_gain_acc1": getattr(
+                self, "teacher_semantic_gain_acc1", None
+            ),
+            "teacher_semantic_gain_acc5": getattr(
+                self, "teacher_semantic_gain_acc5", None
+            ),
             "teacher_train_metric_history": getattr(
                 self,
                 "teacher_train_metric_history",

@@ -85,6 +85,40 @@ def fine_grained_prompt_infonce_loss(
     }
 
 
+@torch.no_grad()
+def fine_grained_prompt_retrieval_accuracy(
+    sketch_image_features,
+    photo_image_features,
+    sketch_prompt_text_features,
+    photo_prompt_text_features,
+    target_photo_indices,
+):
+    """Acc@1/Acc@5 for both exact-instance prompt retrieval directions."""
+    sketch_images = F.normalize(sketch_image_features.float(), dim=-1)
+    photo_images = F.normalize(photo_image_features.float(), dim=-1)
+    sketch_text = F.normalize(sketch_prompt_text_features.float(), dim=-1)
+    photo_text = F.normalize(photo_prompt_text_features.float(), dim=-1)
+    targets = target_photo_indices.to(sketch_images.device).long().reshape(-1)
+    if photo_images.shape[0] != 100 or photo_text.shape[0] != 100:
+        raise RuntimeError("Prompt retrieval metrics require 100 photos.")
+    if len(targets) != len(sketch_images) or len(targets) != len(sketch_text):
+        raise ValueError("Every sketch query needs one exact photo target.")
+
+    def accuracy(logits):
+        ranking = logits.topk(k=5, dim=-1, largest=True, sorted=True).indices
+        matches = ranking.eq(targets[:, None])
+        return matches[:, 0].float().mean(), matches.any(dim=-1).float().mean()
+
+    image_to_text = accuracy(sketch_images @ photo_text.t())
+    text_to_image = accuracy(sketch_text @ photo_images.t())
+    return {
+        "sketch_to_photo_text_acc1": image_to_text[0],
+        "sketch_to_photo_text_acc5": image_to_text[1],
+        "sketch_text_to_photo_acc1": text_to_image[0],
+        "sketch_text_to_photo_acc5": text_to_image[1],
+    }
+
+
 def image_conditioned_text_anchor_loss(
     sketch_text_features,
     photo_text_features,
