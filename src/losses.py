@@ -2,6 +2,7 @@
 
 import torch
 from torch.nn import functional as F
+from src.joint_geometry import joint_geometry_loss
 
 
 def relational_kd_loss(
@@ -155,7 +156,18 @@ def loss_fn(args, features):
         args.lambda_domain * domain_loss
         + args.lambda_modality * modality_loss
     )
-    return total_loss, {
+    loss_dict = {
         "domain_kd": domain_loss,
         "modality_kd": modality_loss,
     }
+    joint_weight = getattr(args, "lambda_joint_geometry", 0.0)
+    if joint_weight > 0:
+        if not teacher_active:
+            raise RuntimeError("Joint geometry KD needs teacher global feature targets.")
+        joint, parts = joint_geometry_loss(
+            sketch_features, photo_features, teacher_sketch_features,
+            teacher_photo_features, getattr(args, "joint_cross_weight", 0.5),
+        )
+        total_loss = total_loss + joint_weight * joint
+        loss_dict.update(joint_geometry=joint, **parts)
+    return total_loss, loss_dict

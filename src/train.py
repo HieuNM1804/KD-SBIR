@@ -322,7 +322,23 @@ if __name__ == "__main__":
         default="teacher_visual_student_visual_only",
     )
 
+    parser.add_argument("--lambda_joint_geometry", type=float, default=0.0,
+                        help="Final-embedding joint geometry KD weight; 0 preserves main.")
+    parser.add_argument("--joint_cross_weight", type=float, default=0.5,
+                        help="SP fraction in joint loss; remaining weight split equally over SS/PP.")
+    parser.add_argument("--geometry_diagnostics", action="store_true",
+                        help="Log batch feature variance, modality gap, and class-wise SP similarities.")
     args = parser.parse_args()
+    if not np.isfinite(args.lambda_joint_geometry) or args.lambda_joint_geometry < 0:
+        parser.error("--lambda_joint_geometry must be finite and non-negative.")
+    if not np.isfinite(args.joint_cross_weight) or not 0 <= args.joint_cross_weight <= 1:
+        parser.error("--joint_cross_weight must be finite and in [0, 1].")
+    if args.lambda_joint_geometry > 0 and args.batch_size < 2:
+        parser.error("Joint geometry requires --batch_size >= 2.")
+    if args.lambda_joint_geometry > 0 and args.n_ctx_visual < 1:
+        parser.error("Joint geometry training requires --n_ctx_visual >= 1.")
+    if args.lambda_joint_geometry == args.lambda_domain == args.lambda_modality == 0:
+        parser.error("Enable at least one student objective.")
     if args.teacher_prompt_seed is None:
         args.teacher_prompt_seed = args.seed
     if args.photo_text_kd_temperature is None:

@@ -27,6 +27,7 @@ from src.losses import (
     loss_fn,
 )
 from src.teacher_prompts import build_teacher_prompt_controller
+from src.joint_geometry import geometry_diagnostics
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -203,6 +204,7 @@ def _load_teacher(args):
 
     if (
         args.lambda_domain <= 0
+        and getattr(args, "lambda_joint_geometry", 0.0) <= 0
         and not _image_text_kd_active(args)
         and args.teacher_pretrain_epochs == 0
     ):
@@ -916,6 +918,13 @@ class ZS_SBIR(pl.LightningModule):
             classnames=classnames,
             teacher=teacher,
         )
+        if getattr(args, "lambda_joint_geometry", 0.0) > 0:
+            print(
+                "[Joint Geometry KD] final normalized embeddings; "
+                f"lambda={args.lambda_joint_geometry}, "
+                f"cross_weight={args.joint_cross_weight}; "
+                "SP plus off-diagonal SS/PP; no new student parameters."
+            )
 
         self.val_step_outputs_sk = []
         self.val_step_outputs_ph = []
@@ -985,6 +994,16 @@ class ZS_SBIR(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         features = self(batch)
         loss, loss_dict = loss_fn(self.args, features)
+        if "joint_geometry" in loss_dict:
+            self.log("JOINT", loss_dict["joint_geometry"], on_step=True,
+                     on_epoch=False, prog_bar=True)
+            for key in ("joint_geometry", "joint_sp", "joint_ss", "joint_pp"):
+                self.log(key, loss_dict[key], on_step=False, on_epoch=True)
+            if getattr(self.args, "geometry_diagnostics", False):
+                stats = geometry_diagnostics(features[1], features[0], features[3],
+                                             features[2], batch[4])
+                for key, value in stats.items():
+                    self.log(f"geometry/{key}", value, on_step=False, on_epoch=True)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         bar_names = {
             "domain_kd": "DOMAIN",
