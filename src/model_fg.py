@@ -21,6 +21,7 @@ from src.losses_fg import (
 )
 from src.image_text_prompts import ImageConditionedTextPromptLearner
 from src.teacher_prompts import build_teacher_prompt_controller
+from src.teacher_refinement_report import write_teacher_refinement_report
 from src.model import (
     DFN5B_OUTPUT_DIM,
     CustomCLIP,
@@ -556,6 +557,9 @@ class FineGrainedCustomCLIP(CustomCLIP):
         visual_source_acc1, visual_source_acc5 = best_acc1, best_acc5
         visual_source_phase = best_phase
         visual_source_epoch = best_epoch
+        self.teacher_phase_a_acc1 = visual_source_acc1
+        self.teacher_phase_a_acc5 = visual_source_acc5
+        self.teacher_phase_a_epoch = visual_source_epoch
         print(
             "[Teacher Phase A Best] "
             f"epoch={best_epoch}, Acc@1={best_acc1:.4f}, "
@@ -1008,6 +1012,15 @@ class FineGrainedCustomCLIP(CustomCLIP):
             ),
             "teacher_best_epoch": getattr(self, "teacher_best_epoch", None),
             "teacher_best_phase": getattr(self, "teacher_best_phase", None),
+            "teacher_phase_a_epoch": getattr(
+                self, "teacher_phase_a_epoch", None
+            ),
+            "teacher_phase_a_acc1": getattr(
+                self, "teacher_phase_a_acc1", None
+            ),
+            "teacher_phase_a_acc5": getattr(
+                self, "teacher_phase_a_acc5", None
+            ),
             "teacher_best_acc1": getattr(self, "teacher_best_acc1", None),
             "teacher_best_acc5": getattr(self, "teacher_best_acc5", None),
             "teacher_semantic_gain_acc1": getattr(
@@ -1034,10 +1047,34 @@ class FineGrainedCustomCLIP(CustomCLIP):
         }
         torch.save(payload, temporary_path)
         os.replace(temporary_path, cache_path)
+        report_path = write_teacher_refinement_report(
+            cache_path,
+            payload["metadata"],
+            {
+                "best_phase": getattr(self, "teacher_best_phase", None),
+                "best_epoch": getattr(self, "teacher_best_epoch", None),
+                "phase_a_epoch": getattr(self, "teacher_phase_a_epoch", None),
+                "phase_a_acc1": getattr(self, "teacher_phase_a_acc1", None),
+                "phase_a_acc5": getattr(self, "teacher_phase_a_acc5", None),
+                "best_acc1": getattr(self, "teacher_best_acc1", None),
+                "best_acc5": getattr(self, "teacher_best_acc5", None),
+                "delta_acc1": getattr(
+                    self, "teacher_semantic_gain_acc1", None
+                ),
+                "delta_acc5": getattr(
+                    self, "teacher_semantic_gain_acc5", None
+                ),
+            },
+            {
+                "visual": payload["teacher_unseen_metric_history"],
+                "text": payload["teacher_text_metric_history"],
+            },
+        )
         print(
             f"[Teacher Cache] saved {cache_path} "
             f"({cache_path.stat().st_size / 1024**2:.1f} MB)."
         )
+        print(f"[Teacher Report] saved {report_path}")
 
     def cache_teacher_features(
         self,

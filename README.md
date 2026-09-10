@@ -158,6 +158,23 @@ Acc@1/Acc@5 in both prompt directions, and the final
 `[Teacher Semantic Gain]` line reports the Phase-C improvement over the best
 Phase-A visual teacher.
 
+Every teacher cache also writes a lightweight sibling report named
+`<cache>.metrics.json`. After repeating the same command with seeds 42, 43,
+and 44, aggregate compatible reports without loading the 140 MB feature
+caches:
+
+```python
+!python -m src.teacher_refinement_report \
+  /kaggle/working/teacher_cache/*.pt.metrics.json \
+  --minimum_runs 3 \
+  --require_all_positive
+```
+
+The command rejects reports whose non-seed teacher configuration differs. It
+returns exit code 2 when any seed has non-positive Acc@1 gain, preventing a
+single favorable run from being treated as evidence that text improves the
+teacher.
+
 Changing `--teacher_n_ctx_text` or another teacher text-prompt setting produces
 a different automatic teacher-cache key. Changing only
 `--student_n_ctx_text` reuses the same compatible teacher cache. Old caches
