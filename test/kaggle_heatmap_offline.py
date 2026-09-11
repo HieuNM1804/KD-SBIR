@@ -23,7 +23,7 @@ import sys
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/attention-heatmap-visualization"
-EXPECTED_COMMIT = "18488dc0884dc2c8bcd95e54c403e4d5a492dae0"
+EXPECTED_COMMIT = "5f30aa162a043428b9041c45d972274471e9c131"
 EXPECTED_TASK = "attention_heatmap_visualization"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"

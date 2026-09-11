@@ -29,7 +29,7 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/attention-heatmap-visualization"
 # Pin after the final commit to this branch.
-COMMIT = "18488dc0884dc2c8bcd95e54c403e4d5a492dae0"
+COMMIT = "5f30aa162a043428b9041c45d972274471e9c131"
 TASK = "attention_heatmap_visualization"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
