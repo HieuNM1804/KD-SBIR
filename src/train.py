@@ -322,7 +322,13 @@ if __name__ == "__main__":
         default="teacher_visual_student_visual_only",
     )
 
+    from src.evidence_config import add_arguments, validate, active
+    add_arguments(parser)
     args = parser.parse_args()
+    try:
+        validate(args)
+    except ValueError as error:
+        parser.error(str(error))
     if args.teacher_prompt_seed is None:
         args.teacher_prompt_seed = args.seed
     if args.photo_text_kd_temperature is None:
@@ -435,4 +441,15 @@ if __name__ == "__main__":
         show_progress=args.progress,
     )
 
+    if active(args):
+        from src.evidence_runtime import EvidenceRuntime
+        # Target preparation must not perturb the student's baseline RNG stream.
+        with torch.random.fork_rng(devices=list(range(torch.cuda.device_count()))):
+            runtime = EvidenceRuntime.prepare(args, model.model, train_loader.dataset)
+        if args.evidence_prepare_only:
+            print("Evidence preparation complete. Run training with the same cache settings.")
+            raise SystemExit(0)
+        train_loader.dataset.return_evidence_index = True
+        object.__setattr__(model, "_evidence_runtime", runtime)
+    logger.log_hyperparams(vars(args))
     trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])

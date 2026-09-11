@@ -1,3 +1,7 @@
+# Cross-modal evidence perturbation experiment
+
+See [method, audit and Kaggle commands](docs/evidence_perturbation.md). This branch preserves both main losses and adds an optional photo-only evidence objective.
+
 # KD-SBIR: Teacher Visual Prompts, Student Visual-Only Prompts
 
 This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from

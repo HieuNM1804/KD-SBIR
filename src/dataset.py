@@ -116,13 +116,17 @@ class TrainDataset(torch.utils.data.Dataset):
                 self.photo_path_to_index[img_path]
             ]
 
-        return (
+        result = (
             img_tensor,
             sk_tensor,
             teacher_photo_feature,
             teacher_sketch_feature,
             self.category_to_label[category],
         )
+
+        if getattr(self, "return_evidence_index", False):
+            return result + (self.photo_path_to_index[img_path],)
+        return result
 
 
 class TeacherFeatureDataset(torch.utils.data.Dataset):

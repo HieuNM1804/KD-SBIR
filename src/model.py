@@ -859,7 +859,7 @@ class CustomCLIP(nn.Module):
             teacher_photo_base,
             teacher_sketch_base,
             _label,
-        ) = x
+        ) = x[:5]
         photo_features = self.encode_student_image(photo_tensor, "photo")
         sketch_features = self.encode_student_image(sk_tensor, "sketch")
         student_photo_text = (
@@ -938,6 +938,10 @@ class ZS_SBIR(pl.LightningModule):
             show_progress,
         )
         
+    def on_train_epoch_start(self):
+        if getattr(self.args, "lambda_evidence", 0) > 0:
+            self._evidence_runtime.refresh(self.model, self.current_epoch)
+
     def configure_optimizers(self):
         student_params = [
             parameter
@@ -985,6 +989,14 @@ class ZS_SBIR(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         features = self(batch)
         loss, loss_dict = loss_fn(self.args, features)
+        if getattr(self.args, "lambda_evidence", 0) > 0:
+            runtime = getattr(self, "_evidence_runtime", None)
+            if runtime is None:
+                raise RuntimeError("Evidence targets have not been prepared")
+            auxiliary, diagnostics = runtime.loss(self.model, batch, features, batch_idx)
+            loss = loss + self.args.lambda_evidence * auxiliary
+            for name, value in diagnostics.items():
+                self.log(name, value, on_step=False, on_epoch=True, batch_size=len(batch[0]))
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         bar_names = {
             "domain_kd": "DOMAIN",
