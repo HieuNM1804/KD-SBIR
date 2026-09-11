@@ -9,3 +9,4 @@ ftfy
 regex
 tqdm
 tensorboard
+matplotlib
