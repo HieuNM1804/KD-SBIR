@@ -133,8 +133,10 @@ building; choose online or a smaller grid if this check fails.
 
 ## Kaggle run: new method without either original loss
 
-Run the existing offline setup first. Copy this branch's code using the source ZIP
-instructions below. This command reuses the one-epoch teacher cache from the audit
+Use the local Kaggle online/offline scripts pinned to this branch to build and
+restore the bundle. The source ZIP below is an optional alternative for an older
+bundle; it is not needed with the new pinned bundle. This command reuses the
+one-epoch teacher cache from the audit
 when present, or builds it using the same teacher settings. Starting weights below
 are an ablation starting point, not tuned optimal values.
 
@@ -213,6 +215,8 @@ online/cache consistency and restored teacher prompts. They use small models and
 synthetic data; full DFN/Sketchy retrieval has not been benchmarked locally.
 
 ## Install source ZIP after the existing Kaggle setup
+
+Skip this section when using the semantic-structural online/offline bundle.
 
 The delivery ZIP is a complete code snapshot of this branch, without .git,
 weights or training data. This lets the current offline checkpoint bundle be
