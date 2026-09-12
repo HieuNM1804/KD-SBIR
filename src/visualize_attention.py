@@ -1,611 +1,324 @@
-"""Attention heatmap visualization for KD-SBIR retrieval.
+"""Compare base/student/teacher on identical retrieval pairs, with provenance."""
 
-Extracts CLS→patch attention from the student (CLIP ViT-B/32) and
-optionally the teacher (DFN5B ViT-H/14) using forward hooks on
-``nn.MultiheadAttention``.  No model code is modified.
-
-The retrieval pipeline encodes all unseen sketches and photos, ranks
-photos by cosine similarity for each query sketch, and renders
-composite heatmap images comparing *base CLIP* (no prompts) against
-the *KD-prompted student*.
-
-Usage on Kaggle (after training)::
-
-    python -m src.visualize_attention \\
-        --root /kaggle/input/datasets/.../Sketchy \\
-        --dataset sketchy_2 \\
-        --ckpt_path saved_models/.../last.ckpt \\
-        --output_dir /kaggle/working/heatmaps \\
-        --sketches_per_class 5 \\
-        --top_k 10
-"""
-
-import argparse
 import os
-import shutil
-import zipfile
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-
-import glob
-import torch
-import torch.nn.functional as F
-import numpy as np
+import argparse
+import json
+import textwrap
 from pathlib import Path
+import zipfile
+import numpy as np
 from PIL import Image
-
+import torch
+from torch.nn import functional as F
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-from matplotlib.gridspec import GridSpec
-
-from clip import clip
-from clip.model import build_model
 from src.dataset import normal_transform
 from src.data_config import UNSEEN_CLASSES
-from src.model import (
-    _load_clip_model,
-    IndependentVisualPromptLearner,
-    freeze_clip,
+from src.model import _load_clip_model
+from src.attention_diagnostics import (
+    student_encoders,
+    teacher_encoder,
+    pair_attribution,
+    native_attention,
+    normalize_map,
 )
 
-# ── Attention extraction ──────────────────────────────────────────────
+
+def load_image(path, transform):
+    with Image.open(path) as image:
+        tensor = transform(image.convert("RGB"))
+    # Display the actual resized input, not a second Lanczos preprocessing.
+    from src.dataset import CLIP_MEAN, CLIP_STD
+
+    pixels = (
+        tensor * torch.tensor(CLIP_STD)[:, None, None]
+        + torch.tensor(CLIP_MEAN)[:, None, None]
+    )
+    display = Image.fromarray(
+        (pixels.permute(1, 2, 0).clamp(0, 1).numpy() * 255).round().astype(np.uint8)
+    )
+    return display, tensor[None]
 
 
-class AttentionCapture:
-    """Context manager that captures attention weights from ViT blocks.
-
-    Uses PyTorch forward hooks on ``nn.MultiheadAttention`` to force
-    ``need_weights=True`` and collect the resulting weight matrices
-    without touching any model source code.
-
-    Requires PyTorch ≥ 2.0 for ``register_forward_pre_hook(with_kwargs=True)``.
-    """
-
-    def __init__(self, blocks):
-        self.blocks = list(blocks)
-        self.attentions = []
-        self._hooks = []
-
-    def __enter__(self):
-        self.attentions.clear()
-        self._hooks.clear()
-
-        for block in self.blocks:
-            attn_module = block.attn
-            attn_store = self.attentions
-
-            def _make_pre_hook():
-                def pre_hook(_module, args, kwargs):
-                    kwargs["need_weights"] = True
-                    return args, kwargs
-
-                return pre_hook
-
-            def _make_post_hook(store):
-                def post_hook(_module, _input, output):
-                    if isinstance(output, tuple) and len(output) > 1:
-                        weights = output[1]
-                        if weights is not None:
-                            store.append(weights.detach().cpu())
-
-                return post_hook
-
-            h1 = attn_module.register_forward_pre_hook(
-                _make_pre_hook(), with_kwargs=True
-            )
-            h2 = attn_module.register_forward_hook(
-                _make_post_hook(attn_store)
-            )
-            self._hooks.extend([h1, h2])
-
-        return self
-
-    def __exit__(self, *exc):
-        for h in self._hooks:
-            h.remove()
-        self._hooks.clear()
-        return False
-
-    def spatial_attention(self, grid_size, method="rollout"):
-        """Extract CLS→patch spatial attention map.
-
-        Args:
-            grid_size: spatial grid side length (e.g. 7 for ViT-B/32).
-            method: ``'last'`` (last-layer only) or ``'rollout'``
-                (attention rollout across all layers).
-
-        Returns:
-            numpy array of shape ``[grid_size, grid_size]`` in ``[0, 1]``.
-        """
-        patch_count = grid_size * grid_size
-
-        if method == "last":
-            attn = self.attentions[-1]  # [batch, tgt_seq, src_seq]
-            cls_attn = attn[0, 0, 1 : 1 + patch_count].float()
-
-        elif method == "rollout":
-            result = None
-            for attn in self.attentions:
-                a = attn[0].float()  # [tgt_seq, src_seq]
-                identity = torch.eye(a.shape[0])
-                a = 0.5 * a + 0.5 * identity
-                a = a / a.sum(dim=-1, keepdim=True)
-                result = a if result is None else result @ a
-            cls_attn = result[0, 1 : 1 + patch_count]
-
-        else:
-            raise ValueError(f"Unknown attention method: {method!r}")
-
-        attn_map = cls_attn.numpy().reshape(grid_size, grid_size)
-        lo, hi = attn_map.min(), attn_map.max()
-        if hi - lo > 1e-8:
-            attn_map = (attn_map - lo) / (hi - lo)
-        else:
-            attn_map = np.zeros_like(attn_map)
-
-        return attn_map
-
-
-# ── Heatmap overlay ──────────────────────────────────────────────────
-
-
-def overlay_heatmap(image, attn_map, alpha=0.55, cmap_name="jet"):
-    """Blend a spatial attention map onto a PIL image as a colour heatmap.
-
-    Higher attention regions appear as yellow/red, lower regions as blue.
-    """
-    img = np.asarray(image, dtype=np.float32) / 255.0
-    h, w = img.shape[:2]
-
-    # Bicubic upsample from grid to image resolution.
-    t = torch.from_numpy(attn_map)[None, None].float()
-    t = F.interpolate(t, size=(h, w), mode="bicubic", align_corners=False)
-    heat = t[0, 0].numpy()
-
-    lo, hi = heat.min(), heat.max()
-    if hi - lo > 1e-8:
-        heat = (heat - lo) / (hi - lo)
-
-    cmap = cm.get_cmap(cmap_name)
-    colored = cmap(heat)[:, :, :3].astype(np.float32)
-
-    blended = (1.0 - alpha) * img + alpha * colored
-    blended = np.clip(blended * 255, 0, 255).astype(np.uint8)
-    return Image.fromarray(blended)
-
-
-# ── Attention extractors ─────────────────────────────────────────────
-
-
-def student_attention(clip_model, tensor, prompt_learner, grid_size, method):
-    """Extract spatial attention from the student CLIP visual encoder."""
-    blocks = list(clip_model.visual.transformer.resblocks)
-
-    prompt, compounds = (None, [])
-    if prompt_learner is not None:
-        ctx, comps = prompt_learner()
-        prompt, compounds = ctx, comps
-
-    with torch.no_grad(), AttentionCapture(blocks) as cap:
-        clip_model.visual(tensor.type(clip_model.dtype), prompt, compounds)
-        return cap.spatial_attention(grid_size, method)
-
-
-# ── Feature extraction helpers ───────────────────────────────────────
+def overlay_heatmap(image, raw, alpha=0.55, signed=False):
+    raw = torch.as_tensor(raw).float()
+    if signed:
+        scale = raw.abs().max()
+        heat = raw / scale if scale > 1e-12 else torch.zeros_like(raw)
+    else:
+        heat = torch.from_numpy(normalize_map(raw))
+    heat = F.interpolate(
+        heat[None, None],
+        size=(image.height, image.width),
+        mode="bilinear",
+        align_corners=False,
+    )[0, 0].numpy()
+    cmap = plt.get_cmap("coolwarm" if signed else "viridis")
+    colors = cmap((heat + 1) / 2 if signed else heat)[:, :, :3]
+    output = (1 - alpha) * np.asarray(image) / 255.0 + alpha * colors
+    return Image.fromarray((output.clip(0, 1) * 255).astype(np.uint8))
 
 
 @torch.no_grad()
-def encode_all_images(clip_model, paths, prompt_learner, transform,
-                      batch_size, device, modality_label="image"):
-    """Encode a list of image paths into L2-normalised features."""
-    dtype = clip_model.dtype
-    features = []
+def encode_paths(encoder, paths, transform, batch_size):
+    result = []
     for start in range(0, len(paths), batch_size):
-        batch_paths = paths[start : start + batch_size]
-        images = []
-        for p in batch_paths:
-            with Image.open(p) as img:
-                images.append(transform(img.convert("RGB")))
-        tensor = torch.stack(images).to(device=device, dtype=dtype)
-
-        prompt, compounds = (None, [])
-        if prompt_learner is not None:
-            ctx, comps = prompt_learner()
-            prompt, compounds = ctx, comps
-
-        feat = clip_model.visual(tensor, prompt, compounds)
-        feat = feat / feat.norm(dim=-1, keepdim=True)
-        features.append(feat.cpu().float())
-
-    return torch.cat(features, dim=0)
-
-
-# ── Composite figure builder ─────────────────────────────────────────
-
-
-def build_composite(
-    sketch_img,
-    photo_imgs,
-    sketch_base_heat,
-    sketch_kd_heat,
-    photo_base_heats,
-    photo_kd_heats,
-    class_name,
-    sketch_index,
-    similarities,
-    alpha=0.55,
-):
-    """Build a 3-row composite: Raw / Base CLIP heatmap / KD Student heatmap.
-
-    Columns: [query sketch, top-1 photo, top-2 photo, …, top-K photo].
-    """
-    n_cols = 1 + len(photo_imgs)
-    cell_size = 2.2
-    label_width = 1.8
-
-    fig_width = label_width + cell_size * n_cols
-    fig_height = cell_size * 3 + 0.5  # 3 rows + title
-
-    fig = plt.figure(figsize=(fig_width, fig_height), facecolor="white")
-    fig.suptitle(
-        f"{class_name.replace('_', ' ')}  —  sketch #{sketch_index + 1}",
-        fontsize=11,
-        fontweight="bold",
-        y=0.98,
-    )
-
-    gs = GridSpec(
-        3,
-        n_cols + 1,
-        width_ratios=[label_width / cell_size] + [1] * n_cols,
-        wspace=0.04,
-        hspace=0.08,
-        left=0.01,
-        right=0.99,
-        top=0.92,
-        bottom=0.01,
-    )
-
-    row_labels = ["Raw image", "Base CLIP\n(no prompts)", "KD Student\n(with prompts)"]
-    row_colors = ["#222222", "#d32f2f", "#2e7d32"]
-
-    # Combine all images and heatmaps into rows.
-    all_raw = [sketch_img] + photo_imgs
-    all_base = [overlay_heatmap(sketch_img, sketch_base_heat, alpha)] + [
-        overlay_heatmap(p, h, alpha) for p, h in zip(photo_imgs, photo_base_heats)
-    ]
-    all_kd = [overlay_heatmap(sketch_img, sketch_kd_heat, alpha)] + [
-        overlay_heatmap(p, h, alpha) for p, h in zip(photo_imgs, photo_kd_heats)
-    ]
-    rows = [all_raw, all_base, all_kd]
-
-    for row_idx in range(3):
-        # Row label on the left.
-        ax_label = fig.add_subplot(gs[row_idx, 0])
-        ax_label.axis("off")
-        ax_label.text(
-            0.95,
-            0.5,
-            row_labels[row_idx],
-            transform=ax_label.transAxes,
-            fontsize=9,
-            fontweight="bold",
-            color=row_colors[row_idx],
-            ha="right",
-            va="center",
-            linespacing=1.4,
+        images = torch.cat(
+            [load_image(p, transform)[1] for p in paths[start : start + batch_size]]
         )
+        result.append(encoder.encode(images, "photo").cpu())
+    return torch.cat(result)
 
-        for col_idx in range(n_cols):
-            ax = fig.add_subplot(gs[row_idx, col_idx + 1])
-            ax.imshow(rows[row_idx][col_idx])
-            ax.axis("off")
 
-            # Column headers (only on the first row).
-            if row_idx == 0:
-                if col_idx == 0:
-                    header = "Query"
-                else:
-                    sim_value = similarities[col_idx - 1]
-                    header = f"#{col_idx} ({sim_value:.3f})"
-                ax.set_title(header, fontsize=7, pad=2)
-
+def build_composite(sketch, photos, maps, names, scores, ranks, title, method, alpha):
+    # Every photo column has its own query map: pair attribution must not
+    # reuse a single sketch heatmap across different retrieved photos.
+    rows = 1 + len(names)
+    fig, axes = plt.subplots(
+        rows, len(photos), squeeze=False, figsize=(4 * len(photos) + 2, 2.4 * rows)
+    )
+    for j, photo in enumerate(photos):
+        canvas = np.concatenate([np.asarray(sketch), np.asarray(photo)], axis=1)
+        axes[0, j].imshow(canvas)
+        axes[0, j].set_title(f"Student rank #{ranks[j]} | sketch / photo", fontsize=9)
+        for i, name in enumerate(names):
+            left, right = maps[i][j]
+            canvas = np.concatenate(
+                [
+                    np.asarray(
+                        overlay_heatmap(sketch, left, alpha, method == "pair_grad")
+                    ),
+                    np.asarray(
+                        overlay_heatmap(photo, right, alpha, method == "pair_grad")
+                    ),
+                ],
+                axis=1,
+            )
+            axes[i + 1, j].imshow(canvas)
+            axes[i + 1, j].set_title(f"cos={scores[i][j]:.4f}", fontsize=9)
+    for i, label in enumerate(["Raw"] + names):
+        axes[i, 0].set_ylabel(label, fontsize=9)
+    for ax in axes.flat:
+        ax.set_xticks([])
+        ax.set_yticks([])
+    meaning = (
+        "Signed token gradient x activation for pair cosine (red positive / blue negative); NOT native attention"
+        if method == "pair_grad"
+        else "Per-image CLS attention; NOT conditioned on retrieval partner"
+    )
+    wrap_width = max(55, 35 * len(photos))
+    caption = "Each map normalized independently; color intensity is not comparable across models"
+    fig.suptitle(
+        title
+        + "\n"
+        + textwrap.fill(meaning, wrap_width)
+        + "\n"
+        + textwrap.fill(caption, wrap_width),
+        fontsize=10,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.91))
     return fig
 
 
-# ── Main retrieval + visualisation pipeline ──────────────────────────
-
-
 def run_visualisation(args):
-    """Encode unseen images, retrieve, and render heatmap composites."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(args.seed)
+    torch.use_deterministic_algorithms(True)
+    output = Path(args.output_dir)
+    if output.exists() and any(output.iterdir()):
+        raise FileExistsError(
+            "Use a new --output_dir; previous figures will not be overwritten"
+        )
+    output.mkdir(parents=True, exist_ok=True)
     transform = normal_transform(args.max_size)
+    model = _load_clip_model(args.backbone).to(device).eval()
+    base, student, student_info = student_encoders(model, args.ckpt_path, args.seed)
+    if base.size != args.max_size:
+        raise ValueError("Input size must match the encoder positional grid")
+    encoders = [base, student]
+    names = ["Base CLIP", "KD student"]
+    teacher_info = None
+    if not args.student_only:
+        teacher, teacher_info = teacher_encoder(
+            args.teacher_cache_path, args.teacher_mode, args.dataset, device
+        )
+        if teacher.size != args.max_size:
+            raise ValueError("Teacher input resolution mismatch")
+        encoders.append(teacher)
+        names.append("Teacher DFN5B (" + args.teacher_mode + ")")
+    print("[Viz] Models:", names)
+    print("[Viz] Student checkpoint:", args.ckpt_path)
+    print("[Viz] Teacher cache:", teacher_info)
+    print("[Viz] Method:", args.method, "; gallery ranked ONLY by prompted student")
+    classes = UNSEEN_CLASSES[args.dataset]
+    if args.classes and not set(args.classes) <= set(classes):
+        raise ValueError("--classes must be a subset of the chosen unseen split")
+    render_classes = args.classes or classes
+    extensions = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 
-    unseen_classes = UNSEEN_CLASSES[args.dataset]
-
-    # ── Load student model ───────────────────────────────────────────
-    print(f"[Viz] Loading CLIP {args.backbone} ...")
-    clip_model = _load_clip_model(args.backbone).to(device).eval()
-    freeze_clip(clip_model)
-
-    patch_size = clip_model.visual.conv1.kernel_size[0]
-    grid_size = args.max_size // patch_size
-    vis_width = clip_model.visual.ln_pre.normalized_shape[0]
-    print(f"[Viz] Student grid {grid_size}×{grid_size} (patch {patch_size})")
-
-    # Build prompt learners.
-    prompt_depth = min(args.prompt_depth, clip_model.visual.transformer.layers)
-    photo_pl = IndependentVisualPromptLearner(
-        args.n_ctx_visual, vis_width, args.seed + 201, prompt_depth
-    ).to(device)
-    sketch_pl = IndependentVisualPromptLearner(
-        args.n_ctx_visual, vis_width, args.seed + 202, prompt_depth
-    ).to(device)
-
-    # Load checkpoint.
-    if args.ckpt_path and os.path.isfile(args.ckpt_path):
-        print(f"[Viz] Loading checkpoint {args.ckpt_path}")
-        ckpt = torch.load(args.ckpt_path, map_location=device)
-        sd = ckpt.get("state_dict", ckpt)
-        for name, learner in [("photo", photo_pl), ("sketch", sketch_pl)]:
-            prefix = f"model.{name}_visual_prompt."
-            sub = {
-                k[len(prefix) :]: v
-                for k, v in sd.items()
-                if k.startswith(prefix)
-            }
-            if sub:
-                learner.load_state_dict(sub)
-                print(f"[Viz]   loaded {name} prompt ({len(sub)} params)")
-    else:
-        print("[Viz] ⚠  No checkpoint — using random prompts (demo mode)")
-
-    # ── Gather unseen paths ──────────────────────────────────────────
-    class_sketch_paths = {}
-    class_photo_paths = {}
-    for cls in unseen_classes:
-        sketches = sorted(glob.glob(os.path.join(args.root, "sketch", cls, "*")))
-        photos = sorted(glob.glob(os.path.join(args.root, "photo", cls, "*")))
-        class_sketch_paths[cls] = sketches
-        class_photo_paths[cls] = photos
-
-    all_photo_paths = []
-    photo_labels = []
-    for cls in unseen_classes:
-        paths = class_photo_paths[cls]
-        all_photo_paths.extend(paths)
-        photo_labels.extend([cls] * len(paths))
-
-    print(
-        f"[Viz] Unseen classes: {len(unseen_classes)}, "
-        f"total photos: {len(all_photo_paths)}"
-    )
-
-    # ── Encode all unseen photos (prompted student) ──────────────────
-    print("[Viz] Encoding all unseen photos ...")
-    photo_features = encode_all_images(
-        clip_model,
-        all_photo_paths,
-        photo_pl,
-        transform,
-        batch_size=args.test_batch_size,
-        device=device,
-    )
-
-    # ── Output directory ─────────────────────────────────────────────
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    total_composites = 0
-
-    for cls_idx, cls in enumerate(unseen_classes):
-        sketches = class_sketch_paths[cls]
-        if not sketches:
-            print(f"[Viz] ⚠  No sketches for class '{cls}', skipping.")
-            continue
-
-        n_sketches = min(args.sketches_per_class, len(sketches))
-
-        # Deterministic selection of sketches.
-        rng = np.random.default_rng(args.seed + cls_idx)
-        chosen_indices = rng.choice(len(sketches), size=n_sketches, replace=False)
-        chosen_indices.sort()
-
-        print(
-            f"[Viz] Class {cls_idx + 1}/{len(unseen_classes)}: "
-            f"'{cls}' ({n_sketches} sketches)"
+    def paths(modality, cls):
+        return sorted(
+            str(p)
+            for p in (Path(args.root) / modality / cls).glob("*")
+            if p.suffix.lower() in extensions
         )
 
-        class_figures = []
-
-        for sketch_i, sketch_idx in enumerate(chosen_indices):
-            sketch_path = sketches[sketch_idx]
-
-            # Encode this sketch (prompted student).
-            with Image.open(sketch_path) as sk_pil:
-                sk_pil = sk_pil.convert("RGB")
-            sk_display = sk_pil.resize(
-                (args.max_size, args.max_size), Image.LANCZOS
-            )
-            sk_tensor = transform(sk_pil).unsqueeze(0).to(device)
-
-            sk_feat = encode_all_images(
-                clip_model,
-                [sketch_path],
-                sketch_pl,
-                transform,
-                batch_size=1,
-                device=device,
-            )
-
-            # Cosine similarity → top-K photos.
-            sims = (sk_feat @ photo_features.t()).squeeze(0)
-            top_k_values, top_k_indices = sims.topk(args.top_k)
-            top_k_values = top_k_values.tolist()
-            top_k_indices = top_k_indices.tolist()
-
-            # Load top-K photo images.
-            photo_imgs = []
-            for pi in top_k_indices:
-                with Image.open(all_photo_paths[pi]) as ph_pil:
-                    ph_pil = ph_pil.convert("RGB")
-                photo_imgs.append(
-                    ph_pil.resize(
-                        (args.max_size, args.max_size), Image.LANCZOS
-                    )
+    gallery = [p for cls in classes for p in paths("photo", cls)]
+    if not gallery:
+        raise ValueError("No gallery photos found")
+    features = encode_paths(student, gallery, transform, args.test_batch_size)
+    records = []
+    for ci, cls in enumerate(classes):
+        if cls not in render_classes:
+            continue
+        sketches = paths("sketch", cls)
+        chosen = np.random.default_rng(args.seed + ci).choice(
+            len(sketches), min(len(sketches), args.sketches_per_class), replace=False
+        )
+        for qi, index in enumerate(sorted(chosen)):
+            sketch_path = sketches[index]
+            sketch, st = load_image(sketch_path, transform)
+            with torch.no_grad():
+                similarities = (student.encode(st, "sketch").cpu() @ features.t())[0]
+            indices = similarities.topk(min(args.top_k, len(gallery))).indices.tolist()
+            for start in range(0, len(indices), args.pairs_per_figure):
+                subset = indices[start : start + args.pairs_per_figure]
+                photos = []
+                maps = [[] for _ in encoders]
+                values = [[] for _ in encoders]
+                arrays = {}
+                pair_records = []
+                for j, pi in enumerate(subset):
+                    photo, pt = load_image(gallery[pi], transform)
+                    photos.append(photo)
+                    record = {
+                        "sketch": sketch_path,
+                        "photo": gallery[pi],
+                        "student_rank": start + j + 1,
+                        "ranking_cosine": float(similarities[pi]),
+                        "models": {},
+                    }
+                    for mi, (name, encoder) in enumerate(zip(names, encoders)):
+                        if args.method == "pair_grad":
+                            pair, score = pair_attribution(encoder, st, pt)
+                        else:
+                            pair = [
+                                native_attention(encoder, st, "sketch", args.method),
+                                native_attention(encoder, pt, "photo", args.method),
+                            ]
+                            with torch.no_grad():
+                                score = float(
+                                    (
+                                        encoder.encode(st, "sketch")
+                                        * encoder.encode(pt, "photo")
+                                    ).sum()
+                                )
+                        if not all(torch.isfinite(m).all() for m in pair):
+                            raise RuntimeError("Nonfinite diagnostic map")
+                        maps[mi].append(pair)
+                        values[mi].append(score)
+                        record["models"][name] = {
+                            "cosine": score,
+                            "grid": encoder.grid,
+                            "map_minmax": [
+                                [float(m.min()), float(m.max())] for m in pair
+                            ],
+                        }
+                        for side, m in zip(("sketch", "photo"), pair):
+                            arrays[f"pair{j}_model{mi}_{side}"] = m.numpy()
+                    pair_records.append(record)
+                stem = f"{cls}_sketch{qi+1}_ranks{start+1}-{start+len(subset)}"
+                fig = build_composite(
+                    sketch,
+                    photos,
+                    maps,
+                    names,
+                    values,
+                    list(range(start + 1, start + 1 + len(subset))),
+                    f"{cls} / sketch {qi+1}",
+                    args.method,
+                    args.alpha,
                 )
-
-            # ── Attention heatmaps ───────────────────────────────────
-            # Sketch heatmaps.
-            sketch_base_heat = student_attention(
-                clip_model, sk_tensor, None, grid_size, args.method
+                fig.savefig(output / (stem + ".png"), dpi=120)
+                plt.close(fig)
+                np.savez_compressed(output / (stem + ".npz"), **arrays)
+                for record in pair_records:
+                    record["figure"] = stem + ".png"
+                records.extend(pair_records)
+            print(
+                f"[Viz] {cls} sketch {qi+1}: {len(indices)} pairs, {len(encoders)} models"
             )
-            sketch_kd_heat = student_attention(
-                clip_model, sk_tensor, sketch_pl, grid_size, args.method
-            )
+    import open_clip
 
-            # Photo heatmaps (all top-K).
-            photo_base_heats = []
-            photo_kd_heats = []
-            for pi in top_k_indices:
-                with Image.open(all_photo_paths[pi]) as ph_pil:
-                    ph_pil = ph_pil.convert("RGB")
-                ph_tensor = transform(ph_pil).unsqueeze(0).to(device)
-
-                photo_base_heats.append(
-                    student_attention(
-                        clip_model, ph_tensor, None, grid_size, args.method
-                    )
-                )
-                photo_kd_heats.append(
-                    student_attention(
-                        clip_model, ph_tensor, photo_pl, grid_size, args.method
-                    )
-                )
-
-            # Build composite figure.
-            fig = build_composite(
-                sketch_img=sk_display,
-                photo_imgs=photo_imgs,
-                sketch_base_heat=sketch_base_heat,
-                sketch_kd_heat=sketch_kd_heat,
-                photo_base_heats=photo_base_heats,
-                photo_kd_heats=photo_kd_heats,
-                class_name=cls,
-                sketch_index=sketch_i,
-                similarities=top_k_values,
-                alpha=args.alpha,
-            )
-            class_figures.append(fig)
-            total_composites += 1
-
-        # ── Stack all sketch composites for this class vertically ────
-        # Save each figure as a temporary image, then vertically stack.
-        temp_imgs = []
-        for fig_i, fig in enumerate(class_figures):
-            temp_path = output_dir / f"_temp_{cls}_{fig_i}.png"
-            fig.savefig(temp_path, dpi=120, facecolor="white")
-            plt.close(fig)
-            temp_imgs.append(Image.open(temp_path))
-
-        # Vertical concatenation.
-        widths = [img.width for img in temp_imgs]
-        max_width = max(widths)
-        total_height = sum(img.height for img in temp_imgs)
-
-        combined = Image.new("RGB", (max_width, total_height), (255, 255, 255))
-        y_offset = 0
-        for img in temp_imgs:
-            combined.paste(img, (0, y_offset))
-            y_offset += img.height
-            img.close()
-
-        out_path = output_dir / f"{cls}.png"
-        combined.save(out_path, quality=95)
-        combined.close()
-
-        # Clean up temp files.
-        for fig_i in range(len(class_figures)):
-            temp_path = output_dir / f"_temp_{cls}_{fig_i}.png"
-            if temp_path.exists():
-                temp_path.unlink()
-
-        print(f"[Viz]   → {out_path.name}")
-
-    print(f"[Viz] Generated {total_composites} composites across {len(unseen_classes)} classes")
-
-    # ── ZIP output ───────────────────────────────────────────────────
-    zip_path = Path(args.output_dir).with_suffix(".zip")
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for png in sorted(output_dir.glob("*.png")):
-            zf.write(png, arcname=png.name)
-    print(f"[Viz] ✓ Zipped → {zip_path}  ({zip_path.stat().st_size / 1024:.0f} KB)")
-
-
-# ── CLI ──────────────────────────────────────────────────────────────
+    manifest = {
+        "method": args.method,
+        "ranking_model": "KD student",
+        "normalization": "per-map",
+        "student": student_info,
+        "teacher": teacher_info,
+        "arguments": vars(args),
+        "versions": {
+            "torch": str(torch.__version__),
+            "open_clip": getattr(open_clip, "__version__", "unknown"),
+        },
+        "pairs": records,
+    }
+    (output / "manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
+    with zipfile.ZipFile(str(output) + ".zip", "w", zipfile.ZIP_DEFLATED) as archive:
+        for p in sorted(output.iterdir()):
+            archive.write(p, arcname=p.name)
+    print("[Viz] Saved", str(output) + ".zip")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Attention heatmap visualization for KD-SBIR retrieval",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", required=True)
     parser.add_argument(
-        "--root",
-        type=str,
-        required=True,
-        help="Dataset root containing sketch/ and photo/.",
+        "--dataset", choices=sorted(UNSEEN_CLASSES), default="sketchy_2"
     )
+    parser.add_argument("--ckpt_path", required=True)
+    parser.add_argument("--backbone", default="ViT-B/32")
+    parser.add_argument("--teacher_cache_path", default="")
+    parser.add_argument("--teacher_mode", choices=["tuned", "raw"], default="tuned")
+    parser.add_argument("--student_only", action="store_true")
     parser.add_argument(
-        "--dataset",
-        type=str,
-        default="sketchy_2",
-        choices=sorted(UNSEEN_CLASSES),
-        help="Zero-shot split.",
+        "--method", choices=["pair_grad", "last", "rollout"], default="pair_grad"
     )
-    parser.add_argument(
-        "--ckpt_path",
-        type=str,
-        default="",
-        help="Student Lightning checkpoint (.ckpt) path.",
-    )
-    parser.add_argument("--backbone", type=str, default="ViT-B/32")
-    parser.add_argument("--n_ctx_visual", type=int, default=3)
-    parser.add_argument("--prompt_depth", type=int, default=12)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--method",
-        type=str,
-        default="rollout",
-        choices=["last", "rollout"],
-        help="Attention extraction method.",
-    )
-    parser.add_argument("--alpha", type=float, default=0.55)
     parser.add_argument("--max_size", type=int, default=224)
-    parser.add_argument("--test_batch_size", type=int, default=512)
-    parser.add_argument(
-        "--sketches_per_class",
-        type=int,
-        default=5,
-        help="Number of query sketches per unseen class.",
-    )
-    parser.add_argument(
-        "--top_k",
-        type=int,
-        default=10,
-        help="Number of top retrieved photos per sketch.",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="heatmaps",
-        help="Directory for output PNG files and ZIP archive.",
-    )
-
+    parser.add_argument("--test_batch_size", type=int, default=32)
+    parser.add_argument("--sketches_per_class", type=int, default=5)
+    parser.add_argument("--top_k", type=int, default=10)
+    parser.add_argument("--pairs_per_figure", type=int, default=5)
+    parser.add_argument("--classes", nargs="+")
+    parser.add_argument("--alpha", type=float, default=0.55)
+    parser.add_argument("--output_dir", default="/kaggle/working/pair_heatmaps")
     args = parser.parse_args()
+    if (
+        min(
+            args.test_batch_size,
+            args.sketches_per_class,
+            args.top_k,
+            args.pairs_per_figure,
+        )
+        < 1
+        or not 0 <= args.alpha <= 1
+    ):
+        parser.error("Counts must be positive and alpha must lie in [0,1]")
+    if (
+        not args.student_only
+        and args.teacher_mode == "tuned"
+        and not args.teacher_cache_path
+    ):
+        parser.error(
+            "Specify --teacher_cache_path explicitly, or choose --teacher_mode raw / --student_only"
+        )
     run_visualisation(args)
 
 
