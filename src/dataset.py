@@ -63,6 +63,8 @@ class TrainDataset(torch.utils.data.Dataset):
         self.photo_path_to_index = {}
         self.teacher_sketch_features = None
         self.teacher_photo_features = None
+        self.attention_sketch_features = None
+        self.attention_photo_features = None
 
         for category in self.all_categories:
             sketch_paths = sorted(
@@ -87,6 +89,12 @@ class TrainDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.all_sketches_path)
+
+    def set_attention_output_features(self, sketch_features, photo_features):
+        if len(sketch_features) != len(self.all_sketches_path) or len(photo_features) != len(self.all_photo_paths):
+            raise ValueError("AV cache lengths do not match dataset indexes")
+        self.attention_sketch_features = sketch_features
+        self.attention_photo_features = photo_features
         
     def __getitem__(self, sample_key):
         if isinstance(sample_key, tuple):
@@ -116,13 +124,19 @@ class TrainDataset(torch.utils.data.Dataset):
                 self.photo_path_to_index[img_path]
             ]
 
-        return (
+        result = (
             img_tensor,
             sk_tensor,
             teacher_photo_feature,
             teacher_sketch_feature,
             self.category_to_label[category],
         )
+        if self.attention_sketch_features is not None:
+            result += (
+                self.attention_photo_features[self.photo_path_to_index[img_path]],
+                self.attention_sketch_features[index],
+            )
+        return result
 
 
 class TeacherFeatureDataset(torch.utils.data.Dataset):

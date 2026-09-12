@@ -917,6 +917,18 @@ class ZS_SBIR(pl.LightningModule):
             teacher=teacher,
         )
 
+        self.lambda_av = getattr(args, "lambda_av", 0.0)
+        self.lambda_global_feature = getattr(args, "lambda_global_feature", 0.0)
+        from src.attention_output_kd import make_projector
+        if self.lambda_av > 0:
+            self.model.av_projector = make_projector(
+                clip_model.visual.conv1.out_channels, 1280, args.seed + 3901
+            )
+        if self.lambda_global_feature > 0:
+            self.model.global_feature_projector = make_projector(
+                clip_model.visual.output_dim, DFN5B_OUTPUT_DIM, args.seed + 3902
+            )
+
         self.val_step_outputs_sk = []
         self.val_step_outputs_ph = []
 
@@ -983,8 +995,33 @@ class ZS_SBIR(pl.LightningModule):
         return self.model(data)
     
     def training_step(self, batch, batch_idx):
-        features = self(batch)
+        from src.attention_output_kd import PatchOutputCapture, feature_cosine_kd
+        if self.lambda_av > 0:
+            if len(batch) != 7:
+                raise RuntimeError("AV targets missing from batch; prepare AV cache before fitting")
+            with PatchOutputCapture(self.model.clip_model.visual) as capture:
+                features = self(batch[:5])
+            if len(capture.values) != 2:
+                raise RuntimeError("Expected photo and sketch AV outputs")
+        else:
+            features = self(batch[:5])
         loss, loss_dict = loss_fn(self.args, features)
+        if self.lambda_av > 0:
+            av_loss = 0.5 * (
+                feature_cosine_kd(capture.values[0], batch[5], self.model.av_projector)
+                + feature_cosine_kd(capture.values[1], batch[6], self.model.av_projector)
+            )
+            loss = loss + self.lambda_av * av_loss
+            self.log('AV_KD', av_loss, on_step=False, on_epoch=True, prog_bar=True)
+        if self.lambda_global_feature > 0:
+            if not features[4]:
+                raise RuntimeError("Global feature KD needs teacher targets")
+            global_loss = 0.5 * (
+                feature_cosine_kd(features[0], features[2], self.model.global_feature_projector)
+                + feature_cosine_kd(features[1], features[3], self.model.global_feature_projector)
+            )
+            loss = loss + self.lambda_global_feature * global_loss
+            self.log('GLOBAL_FEATURE_KD', global_loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         bar_names = {
             "domain_kd": "DOMAIN",

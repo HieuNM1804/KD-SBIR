@@ -322,7 +322,24 @@ if __name__ == "__main__":
         default="teacher_visual_student_visual_only",
     )
 
+    parser.add_argument('--lambda_av', type=float, default=0.0,
+                        help='Weight of final-block CLS patch-attention-output cosine KD')
+    parser.add_argument('--lambda_global_feature', type=float, default=0.0,
+                        help='Weight of global image-feature cosine KD (control)')
+    parser.add_argument('--av_cache_path', default='',
+                        help='Optional AV target cache path; default is content-addressed beside main teacher cache')
+    parser.add_argument('--av_teacher_batch_size', type=int, default=8,
+                        help='Teacher batch size when building AV targets')
+    parser.add_argument('--prepare_kd_cache_only', action='store_true',
+                        help='Prepare teacher/AV caches and exit before student training')
     args = parser.parse_args()
+    import math
+    if any(not math.isfinite(x) or x < 0 for x in (args.lambda_av, args.lambda_global_feature)):
+        parser.error('New KD weights must be finite and nonnegative')
+    if args.av_teacher_batch_size < 1:
+        parser.error('--av_teacher_batch_size must be positive')
+    if (args.lambda_av > 0 or args.lambda_global_feature > 0) and args.teacher_pretrain_epochs < 1:
+        parser.error('New KD branches require a tuned teacher: keep --teacher_pretrain_epochs >= 1 even when loading its cache')
     if args.teacher_prompt_seed is None:
         args.teacher_prompt_seed = args.seed
     if args.photo_text_kd_temperature is None:
@@ -435,4 +452,12 @@ if __name__ == "__main__":
         show_progress=args.progress,
     )
 
-    trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])
+    if args.lambda_av > 0:
+        from src.attention_output_cache import prepare_av_cache
+        # Building/loading auxiliary caches must not change training randomness.
+        with torch.random.fork_rng(devices=list(range(torch.cuda.device_count()))):
+            prepare_av_cache(args, train_loader.dataset)
+    if args.prepare_kd_cache_only:
+        print('[KD Cache] preparation complete; student training skipped')
+    else:
+        trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])
