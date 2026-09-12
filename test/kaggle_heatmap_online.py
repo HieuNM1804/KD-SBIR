@@ -29,7 +29,7 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/attention-heatmap-visualization"
 # Pin after the final commit to this branch.
-COMMIT = "5f30aa162a043428b9041c45d972274471e9c131"
+COMMIT = "fc7cb7bfda627b533a236932481df38ea960a927"
 TASK = "attention_heatmap_visualization"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
@@ -227,6 +227,8 @@ required_paths = (
     project / "src" / "teacher_prompts.py",
     project / "src" / "train.py",
     project / "src" / "visualize_attention.py",
+    project / "src" / "attention_diagnostics.py",
+    project / "tests" / "test_attention_diagnostics.py",
     dfn_target,
     student_target,
 )

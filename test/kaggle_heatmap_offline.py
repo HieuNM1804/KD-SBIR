@@ -23,7 +23,7 @@ import sys
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/attention-heatmap-visualization"
-EXPECTED_COMMIT = "5f30aa162a043428b9041c45d972274471e9c131"
+EXPECTED_COMMIT = "fc7cb7bfda627b533a236932481df38ea960a927"
 EXPECTED_TASK = "attention_heatmap_visualization"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
@@ -129,6 +129,8 @@ required_bundle_paths = (
     source_project / "src" / "teacher_prompts.py",
     source_project / "src" / "train.py",
     source_project / "src" / "visualize_attention.py",
+    source_project / "src" / "attention_diagnostics.py",
+    source_project / "tests" / "test_attention_diagnostics.py",
     dfn_source,
     student_source,
 )
@@ -239,6 +241,8 @@ shutil.copytree(source_project, WORKING_PROJECT, symlinks=False)
 actual_commit = subprocess.check_output(
     ["git", "rev-parse", "HEAD"], cwd=WORKING_PROJECT, text=True
 ).strip()
+if actual_commit != manifest["commit"]:
+    raise RuntimeError("Restored source commit differs from the bundle manifest")
 print("Repository copied:", WORKING_PROJECT)
 print("Commit:", actual_commit)
 
@@ -261,9 +265,12 @@ print('PyTorch:', torch.__version__)
 print('OpenCLIP:', getattr(open_clip, '__version__', 'unknown'))
 print('Lightning:', pytorch_lightning.__version__)
 print('Matplotlib:', matplotlib.__version__)
-# Quick import check for visualize_attention.
-from src.visualize_attention import AttentionCapture, overlay_heatmap
-print('Visualization module: OK')
+import unittest
+suite = unittest.defaultTestLoader.discover('tests', pattern='test_attention_diagnostics.py')
+result = unittest.TextTestRunner(verbosity=2).run(suite)
+if not result.wasSuccessful():
+    raise SystemExit('Teacher/student visualization smoke test failed')
+print('Pair attribution, teacher prompt restore and four-row rendering: OK')
 """
 subprocess.run(
     [sys.executable, "-c", smoke_test],
@@ -281,6 +288,7 @@ print("=" * 70)
 # ── Phase 9: Train ──────────────────────────────────────────────────
 
 EXP_NAME = "heatmap_viz_sketchy2"
+TEACHER_CACHE = WORKING_ROOT / "teacher_cache" / "heatmap_viz_sketchy2_teacher_1ep.pt"
 
 train_command = [
     sys.executable,
@@ -304,6 +312,8 @@ train_command = [
     "12",
     "--teacher_pretrain_epochs",
     "1",
+    "--teacher_cache_path",
+    str(TEACHER_CACHE),
     "--teacher_pretrain_batch_size",
     "64",
     "--teacher_n_ctx_visual",
@@ -373,8 +383,10 @@ last_ckpt = saved_dir / "last.ckpt"
 
 # Prefer best checkpoint, fall back to last.
 best_candidates = sorted(saved_dir.glob("epoch=*.ckpt"))
+if len(best_candidates) > 1:
+    raise RuntimeError(f"Multiple epoch checkpoints in {saved_dir}; specify the intended checkpoint explicitly")
 if best_candidates:
-    ckpt_path = str(best_candidates[-1])
+    ckpt_path = str(best_candidates[0])
     print("Using best checkpoint:", ckpt_path)
 elif last_ckpt.exists():
     ckpt_path = str(last_ckpt)
@@ -387,7 +399,7 @@ else:
 
 # ── Phase 11: Visualize attention heatmaps ───────────────────────────
 
-HEATMAP_DIR = WORKING_ROOT / "heatmaps"
+HEATMAP_DIR = WORKING_ROOT / "pair_heatmaps"
 
 viz_command = [
     sys.executable,
@@ -399,14 +411,14 @@ viz_command = [
     "sketchy_2",
     "--ckpt_path",
     ckpt_path,
-    "--n_ctx_visual",
-    "3",
-    "--prompt_depth",
-    "12",
+    "--teacher_cache_path",
+    str(TEACHER_CACHE),
+    "--teacher_mode",
+    "tuned",
     "--seed",
     "42",
     "--method",
-    "rollout",
+    "pair_grad",
     "--sketches_per_class",
     "5",
     "--top_k",
@@ -436,4 +448,5 @@ print("=" * 70)
 print("Output directory:", HEATMAP_DIR)
 print("ZIP file:", HEATMAP_DIR.with_suffix(".zip"))
 print()
-print("Download heatmaps.zip from the notebook output.")
+print("Download pair_heatmaps.zip from the notebook output.")
+os.chdir(WORKING_PROJECT)
