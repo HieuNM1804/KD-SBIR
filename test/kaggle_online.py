@@ -29,7 +29,7 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/patch-attention-output-kd"
 # Pinned training source; this builder is distributed separately.
-COMMIT = "ca92ba2149ef9ce7a4c89b15ac4ed7081062147a"
+COMMIT = "570754181baaa8a650a3a04aebf3a138885234b0"
 TASK = "patch_attention_output_kd"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
@@ -228,7 +228,10 @@ required_paths = (
     project / "src" / "train.py",
     project / "src" / "attention_output_kd.py",
     project / "src" / "attention_output_cache.py",
+    project / "src" / "av_gradient_audit.py",
     project / "tests" / "test_attention_output_kd.py",
+    project / "tests" / "test_av_sketch_only.py",
+    project / "test" / "kaggle_av_sketch_only_cell.py",
     dfn_target,
     student_target,
 )

@@ -1,6 +1,7 @@
 """Restore patch attention output KD on offline Kaggle; setup only."""
 
 from pathlib import Path
+from datetime import datetime
 import glob
 import hashlib
 import json
@@ -12,7 +13,7 @@ import sys
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/patch-attention-output-kd"
-EXPECTED_COMMIT = "ca92ba2149ef9ce7a4c89b15ac4ed7081062147a"
+EXPECTED_COMMIT = "570754181baaa8a650a3a04aebf3a138885234b0"
 EXPECTED_TASK = "patch_attention_output_kd"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
@@ -119,7 +120,10 @@ required_bundle_paths = (
     source_project / "src" / "train.py",
     source_project / "src" / "attention_output_kd.py",
     source_project / "src" / "attention_output_cache.py",
+    source_project / "src" / "av_gradient_audit.py",
     source_project / "tests" / "test_attention_output_kd.py",
+    source_project / "tests" / "test_av_sketch_only.py",
+    source_project / "test" / "kaggle_av_sketch_only_cell.py",
     dfn_source,
     student_source,
 )
@@ -217,6 +221,7 @@ os.environ["HF_HUB_CACHE"] = str(hf_hub)
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 print("DFN5B checkpoint:", dfn_target)
 
 
@@ -225,8 +230,12 @@ print("DFN5B checkpoint:", dfn_target)
 os.chdir(WORKING_ROOT)
 if WORKING_PROJECT.exists():
     existing = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=WORKING_PROJECT, text=True).strip()
-    if existing != manifest["commit"]:
-        raise RuntimeError("Existing KD-SBIR-AVKD uses another commit. Choose a new WORKING_PROJECT path.")
+    changed = subprocess.run(["git", "diff", "--quiet", "HEAD", "--"], cwd=WORKING_PROJECT).returncode
+    if existing != manifest["commit"] or changed:
+        backup = WORKING_ROOT / ('KD-SBIR-AVKD_backup_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
+        WORKING_PROJECT.rename(backup)
+        print('Previous project and checkpoints preserved:', backup)
+if WORKING_PROJECT.exists():
     print("Reusing existing project:", WORKING_PROJECT)
 else:
     shutil.copytree(source_project, WORKING_PROJECT, symlinks=False)
@@ -260,6 +269,7 @@ print('Lightning:', pytorch_lightning.__version__)
 print('Matplotlib:', matplotlib.__version__)
 import unittest
 suite = unittest.defaultTestLoader.discover('tests', pattern='test_attention_output_kd.py')
+suite.addTests(unittest.defaultTestLoader.discover('tests', pattern='test_av_sketch_only.py'))
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 if not result.wasSuccessful():
     raise SystemExit('Attention output KD smoke test failed')
@@ -280,4 +290,5 @@ print("=" * 70)
 
 os.chdir(WORKING_PROJECT)
 print("Project:", WORKING_PROJECT)
-print("Run the cache preparation and training commands supplied in chat.")
+print("Ready: python -m src.train with --av_objective cosine --av_modality sketch_only")
+print("Keep --lambda_av 1 and --lambda_modality 1 for the sketch-only ablation.")
