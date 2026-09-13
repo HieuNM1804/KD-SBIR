@@ -158,6 +158,10 @@ class RegionalAVTests(unittest.TestCase):
                              av_objective='regional_cosine', av_modality='sketch_only', av_region_grid=2)
             torch.save(dict(metadata=meta, teacher_prompt_state_dict=prompts.state_dict()), args.teacher_cache_path)
             ds = TrainDataset(args)
+            with patch('src.attention_output_cache.shutil.disk_usage', return_value=Namespace(free=0)), \
+                 patch('open_clip.create_model', side_effect=AssertionError('must check disk before loading teacher')):
+                with self.assertRaisesRegex(OSError, 'Insufficient disk space'):
+                    prepare_av_cache(args, ds)
             with patch('open_clip.create_model', side_effect=lambda *a,**kw: teacher.to(kw['device']).eval().requires_grad_(False)):
                 prepare_av_cache(args, ds)
             self.assertEqual(ds.attention_sketch_features.shape, (2,4,1280))
@@ -173,6 +177,23 @@ class RegionalAVTests(unittest.TestCase):
                 with self.assertRaises(ValueError): prepare_av_cache(args, restored)
             args.av_objective = 'cosine'
             with self.assertRaises(ValueError): prepare_av_cache(args, restored)
+
+    def test_large_cache_validation_checks_later_chunks(self):
+        from src.attention_output_cache import validate_cache, require_cache_space
+        meta = {'definition': 'last_CLS_regional_patch_AVWO_full_key_softmax_fp32_no_output_bias', 'region_grid': 7}
+        payload = {'metadata': meta, 'sketch': torch.ones(100, 49, 4, dtype=torch.float16),
+                   'photo': torch.empty(2, 0, dtype=torch.float16)}
+        validate_cache(payload, meta, 100, 2, width=4)
+        payload['sketch'][-1, -1, 0] = float('nan')
+        with self.assertRaisesRegex(ValueError, 'target values'):
+            validate_cache(payload, meta, 100, 2, width=4)
+        tensor_bytes = 56100 * 49 * 1280 * 2
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch('src.attention_output_cache.shutil.disk_usage', return_value=Namespace(free=6 * 1024**3)):
+                with self.assertRaisesRegex(OSError, 'Insufficient disk space'):
+                    require_cache_space(Path(tmp)/'nested/7x7.pt', tensor_bytes)
+            with patch('src.attention_output_cache.shutil.disk_usage', return_value=Namespace(free=8 * 1024**3)):
+                require_cache_space(Path(tmp)/'nested/7x7.pt', tensor_bytes)
 
 
 if __name__ == '__main__':

@@ -3,12 +3,35 @@
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from src.dataset import TeacherFeatureDataset
 from src.attention_output_kd import PatchOutputCapture
+
+
+def require_cache_space(path, tensor_bytes):
+    """Fail before teacher encoding if the destination filesystem is too full.
+
+    Filesystem free space does not necessarily include per-user storage quotas.
+    Reserve a small allowance for metadata and serialization overhead.
+    """
+    folder = Path(path).absolute().parent
+    while not folder.exists():
+        folder = folder.parent
+    free = shutil.disk_usage(folder).free
+    required = tensor_bytes + 64 * 1024**2
+    print(f'[AV Cache] estimated tensors={tensor_bytes / 1024**3:.2f} GiB; '
+          f'free disk={free / 1024**3:.2f} GiB', flush=True)
+    if free < required:
+        raise OSError(
+            f'Insufficient disk space for AV cache {path}: need at least '
+            f'{required / 1024**3:.2f} GiB, have {free / 1024**3:.2f} GiB. '
+            'Free space or choose a writable cache path on a larger filesystem. '
+            'Teacher encoding has not started at the initial check.'
+        )
 
 
 def file_sha256(path):
@@ -47,8 +70,12 @@ def validate_cache(payload, metadata, ns, np_, width=1280):
             raise ValueError(f"Invalid {name} AV target shape/dtype")
         if regional and name == 'photo':
             continue  # Empty rows preserve dataset photo indexing; no photo AV targets.
-        if not torch.isfinite(x).all() or (x.float().norm(dim=-1) <= 1e-8).any():
-            raise ValueError(f"Invalid {name} AV target values")
+        # Keep temporary FP32 validation buffers bounded for large region grids.
+        vectors = x.reshape(-1, width)
+        for start in range(0, len(vectors), 4096):
+            block = vectors[start:start + 4096].float()
+            if not torch.isfinite(block).all() or (block.norm(dim=-1) <= 1e-8).any():
+                raise ValueError(f"Invalid {name} AV target values")
 
 
 def prepare_av_cache(args, dataset):
@@ -105,6 +132,8 @@ def prepare_av_cache(args, dataset):
         dataset.set_attention_output_features(payload["sketch"], payload["photo"])
         print("[AV Cache] loaded; DFN5B target pass skipped")
         return
+    tensor_bytes = (ns * grid**2 if regional else ns + np_) * 1280 * 2
+    require_cache_space(path, tensor_bytes)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     teacher = (
         open_clip.create_model(
@@ -161,10 +190,18 @@ def prepare_av_cache(args, dataset):
         targets[modality] = output
     payload = {"metadata": metadata, **targets}
     validate_cache(payload, metadata, ns, np_)
+    require_cache_space(path, sum(x.numel() * x.element_size() for x in targets.values()))
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
     try:
-        torch.save(payload, tmp)
+        try:
+            torch.save(payload, tmp)
+        except (OSError, RuntimeError) as error:
+            raise OSError(
+                f'Failed writing AV cache {path} (tensors ~{tensor_bytes / 1024**3:.2f} GiB). '
+                'Check free disk space, storage quota and filesystem write access. '
+                f'Original serialization error: {error}'
+            ) from error
         if path.exists():
             raise FileExistsError(f"Another process created {path}; refusing overwrite")
         os.replace(tmp, path)
