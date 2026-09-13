@@ -332,7 +332,9 @@ if __name__ == "__main__":
 
     parser.add_argument('--lambda_av', type=float, default=0.0,
                         help='Weight of final-block CLS patch-attention-output KD')
-    parser.add_argument('--av_objective', choices=['cosine', 'relational'], default='cosine')
+    parser.add_argument('--av_objective', choices=['cosine', 'relational', 'regional_cosine'], default='cosine')
+    parser.add_argument('--av_region_grid', type=int, default=2,
+                        help='Regional cosine AV uses grid x grid regions with fractional patch overlap')
     parser.add_argument('--av_modality', choices=['both', 'sketch_only'], default='both',
                         help='Cosine AV branches; sketch_only retains the original 0.5 sketch factor.')
     parser.add_argument('--av_temperature', type=float, default=0.07,
@@ -355,8 +357,12 @@ if __name__ == "__main__":
         parser.error('--av_teacher_batch_size must be positive')
     if not math.isfinite(args.av_temperature) or args.av_temperature <= 0:
         parser.error('--av_temperature must be finite and positive')
-    if args.av_modality == 'sketch_only' and args.av_objective != 'cosine':
-        parser.error('--av_modality sketch_only requires --av_objective cosine')
+    if args.av_modality == 'sketch_only' and args.av_objective not in ('cosine', 'regional_cosine'):
+        parser.error('--av_modality sketch_only requires cosine or regional_cosine')
+    if args.av_region_grid < 1:
+        parser.error('--av_region_grid must be positive')
+    if args.av_objective == 'regional_cosine' and args.av_modality != 'sketch_only':
+        parser.error('--av_objective regional_cosine requires --av_modality sketch_only')
     if args.av_gradient_audit and args.lambda_av <= 0:
         parser.error('--av_gradient_audit requires --lambda_av > 0')
     if (args.lambda_av > 0 or args.lambda_global_feature > 0) and args.teacher_pretrain_epochs < 1:

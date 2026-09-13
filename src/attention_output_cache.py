@@ -35,12 +35,18 @@ def validate_cache(payload, metadata, ns, np_, width=1280):
         raise ValueError("AV cache metadata mismatch. Use a new --av_cache_path.")
     for name, count in [("sketch", ns), ("photo", np_)]:
         x = payload.get(name)
+        regional = metadata.get('definition') == 'last_CLS_regional_patch_AVWO_full_key_softmax_fp32_no_output_bias'
+        shape = (count, width)
+        if regional:
+            shape = (count, metadata['region_grid']**2, width) if name == 'sketch' else (count, 0)
         if (
             not isinstance(x, torch.Tensor)
-            or x.shape != (count, width)
+            or x.shape != shape
             or x.dtype != torch.float16
         ):
             raise ValueError(f"Invalid {name} AV target shape/dtype")
+        if regional and name == 'photo':
+            continue  # Empty rows preserve dataset photo indexing; no photo AV targets.
         if not torch.isfinite(x).all() or (x.float().norm(dim=-1) <= 1e-8).any():
             raise ValueError(f"Invalid {name} AV target values")
 
@@ -74,6 +80,15 @@ def prepare_av_cache(args, dataset):
         "torch": str(torch.__version__),
         "open_clip": getattr(open_clip, "__version__", "unknown"),
     }
+    regional = getattr(args, 'av_objective', 'cosine') == 'regional_cosine'
+    grid = getattr(args, 'av_region_grid', 2) if regional else None
+    if regional:
+        if getattr(args, 'av_modality', 'both') != 'sketch_only' or grid < 1:
+            raise ValueError('Regional AV cache requires sketch_only and positive region_grid')
+        metadata.update(version=2,
+                        definition='last_CLS_regional_patch_AVWO_full_key_softmax_fp32_no_output_bias',
+                        region_grid=grid, region_alignment='normalized_area_overlap_row_major_v1',
+                        modalities=['sketch'], photo_storage='empty_rows')
     key = hashlib.sha256(json.dumps(metadata, sort_keys=True).encode()).hexdigest()[:16]
     path = (
         Path(args.av_cache_path)
@@ -114,10 +129,14 @@ def prepare_av_cache(args, dataset):
     controller.eval().requires_grad_(False)
     del teacher_payload
     targets = {}
-    for modality, paths in [
+    modalities = [
         ("sketch", dataset.all_sketches_path),
         ("photo", dataset.all_photo_paths),
-    ]:
+    ]
+    if regional:
+        modalities = modalities[:1]
+        targets['photo'] = torch.empty(np_, 0, dtype=torch.float16)
+    for modality, paths in modalities:
         loader = DataLoader(
             TeacherFeatureDataset(paths, dataset.max_size),
             batch_size=args.av_teacher_batch_size,
@@ -126,13 +145,13 @@ def prepare_av_cache(args, dataset):
             pin_memory=device.type == "cuda",
             generator=torch.Generator().manual_seed(args.seed + 301),
         )
-        output = torch.empty(
-            len(paths), teacher.visual.conv1.out_channels, dtype=torch.float16
-        )
+        shape = (len(paths), grid**2, teacher.visual.conv1.out_channels) if regional else (
+            len(paths), teacher.visual.conv1.out_channels)
+        output = torch.empty(shape, dtype=torch.float16)
         offset = 0
         for images in tqdm(loader, desc=f"[AV Cache] {modality}"):
             images = images.to(device=device, dtype=teacher.visual.conv1.weight.dtype)
-            with torch.no_grad(), PatchOutputCapture(teacher.visual) as capture:
+            with torch.no_grad(), PatchOutputCapture(teacher.visual, region_grid=grid) as capture:
                 controller(images, modality)
             if len(capture.values) != 1:
                 raise RuntimeError("Expected one AV target per image batch")

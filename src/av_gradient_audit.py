@@ -42,7 +42,8 @@ class AVGradientAudit(Callback):
             if not named:
                 raise RuntimeError("No visual prompts found for AV gradient audit")
             params = [p for _, p in named]
-            with torch.enable_grad(), PatchOutputCapture(module.model.clip_model.visual) as capture:
+            grid = module.av_region_grid if module.av_objective == 'regional_cosine' else None
+            with torch.enable_grad(), PatchOutputCapture(module.model.clip_model.visual, region_grid=grid) as capture:
                 features = module(batch[:5])
                 main, _ = loss_fn(module.args, features)
                 av = module.av_distillation_loss(

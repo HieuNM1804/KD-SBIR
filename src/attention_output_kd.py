@@ -7,7 +7,24 @@ from torch import nn
 from torch.nn import functional as F
 
 
-def patch_attention_output(attn, query, key, value, patch_count):
+def region_patch_weights(patch_count, region_grid, device=None):
+    """Fraction of each square patch inside each normalized image region.
+
+    Columns sum to one. Fractional overlaps preserve contributions when, e.g.,
+    a 7x7 student and 16x16 teacher are both partitioned into 2x2 regions.
+    Regions and patches are flattened in row-major order.
+    """
+    side = math.isqrt(patch_count)
+    if side * side != patch_count or not 1 <= region_grid <= side:
+        raise ValueError('Regional AV requires a square patch grid and 1 <= region_grid <= grid size')
+    patches = torch.arange(side, device=device, dtype=torch.float32)
+    regions = torch.arange(region_grid, device=device, dtype=torch.float32)
+    overlap = (torch.minimum((regions[:, None] + 1) / region_grid, (patches[None, :] + 1) / side)
+               - torch.maximum(regions[:, None] / region_grid, patches[None, :] / side)).clamp_min(0) * side
+    return torch.einsum('ai,bj->abij', overlap, overlap).reshape(region_grid**2, patch_count)
+
+
+def patch_attention_output(attn, query, key, value, patch_count, region_grid=None):
     """Sum A[CLS,patch] V_patch W_O across heads; excludes output bias.
 
     The softmax denominator retains ALL keys (CLS, image and prompt tokens).
@@ -46,16 +63,23 @@ def patch_attention_output(attn, query, key, value, patch_count):
             .transpose(1, 2)
         )
         a = (q @ k.transpose(-1, -2) / math.sqrt(dim)).softmax(-1)
-        pooled = (a[..., 1 : 1 + patch_count] @ v).reshape(batch, width)
+        if region_grid is None:
+            pooled = (a[..., 1 : 1 + patch_count] @ v).reshape(batch, width)
+        else:
+            regions = region_patch_weights(patch_count, region_grid, query.device)
+            pooled = torch.einsum('bhp,rp,bhpd->brhd',
+                                  a[:, :, 0, 1 : 1 + patch_count], regions, v)
+            pooled = pooled.reshape(batch, region_grid**2, width)
         return F.linear(pooled, attn.out_proj.weight.float(), None)
 
 
 class PatchOutputCapture(AbstractContextManager):
     """Scoped hook on the final attention block; captured values retain gradients."""
 
-    def __init__(self, visual):
+    def __init__(self, visual, region_grid=None):
         self.attn = visual.transformer.resblocks[-1].attn
         self.patch_count = visual.positional_embedding.shape[0] - 1
+        self.region_grid = region_grid
         self.values = []
         self.handle = None
 
@@ -76,7 +100,7 @@ class PatchOutputCapture(AbstractContextManager):
                 for i, name in enumerate(("query", "key", "value"))
             ]
             self.values.append(
-                patch_attention_output(module, q, k, v, self.patch_count)
+                patch_attention_output(module, q, k, v, self.patch_count, self.region_grid)
             )
 
         self.handle = self.attn.register_forward_pre_hook(hook, with_kwargs=True)
@@ -102,6 +126,13 @@ def feature_cosine_kd(student, teacher, projector):
         predicted = projector(student.float())
         target = teacher.detach().to(device=predicted.device, dtype=torch.float32)
         return (1 - F.cosine_similarity(predicted, target, dim=-1, eps=1e-8)).mean()
+
+
+def regional_cosine_kd(student, teacher, projector):
+    """Mean cosine KD over images and regions; one shared projector for all regions."""
+    if student.ndim != 3 or teacher.ndim != 3 or student.shape[:2] != teacher.shape[:2]:
+        raise ValueError('Regional AV requires matching [batch, regions, width] tensors')
+    return feature_cosine_kd(student.flatten(0, 1), teacher.flatten(0, 1), projector)
 
 
 def relational_av_kd(student_sketch, student_photo, teacher_sketch, teacher_photo,

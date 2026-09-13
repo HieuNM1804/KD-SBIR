@@ -924,14 +924,20 @@ class ZS_SBIR(pl.LightningModule):
         self.lambda_global_feature = getattr(args, "lambda_global_feature", 0.0)
         self.av_objective = getattr(args, "av_objective", "cosine")
         self.av_modality = getattr(args, "av_modality", "both")
+        self.av_region_grid = getattr(args, "av_region_grid", 2)
         if self.av_modality not in ("both", "sketch_only"):
             raise ValueError("av_modality must be both or sketch_only")
-        if self.av_modality == "sketch_only" and self.av_objective != "cosine":
-            raise ValueError("sketch_only requires cosine AV")
+        if self.av_modality == "sketch_only" and self.av_objective not in ("cosine", "regional_cosine"):
+            raise ValueError("sketch_only requires cosine or regional_cosine AV")
+        if self.av_objective == "regional_cosine":
+            if self.av_modality != "sketch_only":
+                raise ValueError("regional_cosine currently requires sketch_only")
+            from src.attention_output_kd import region_patch_weights
+            region_patch_weights(clip_model.visual.positional_embedding.shape[0] - 1, self.av_region_grid)
         self.av_temperature = getattr(args, "av_temperature", 0.07)
         self.save_hyperparameters({"args": dict(vars(args)), "classnames": list(classnames)})
         from src.attention_output_kd import make_projector
-        if self.lambda_av > 0 and self.av_objective == "cosine":
+        if self.lambda_av > 0 and self.av_objective in ("cosine", "regional_cosine"):
             self.model.av_projector = make_projector(
                 clip_model.visual.conv1.out_channels, 1280, args.seed + 3901
             )
@@ -939,6 +945,9 @@ class ZS_SBIR(pl.LightningModule):
             self.model.global_feature_projector = make_projector(
                 clip_model.visual.output_dim, DFN5B_OUTPUT_DIM, args.seed + 3902
             )
+
+        print(f'[AV KD] objective={self.av_objective}, modality={self.av_modality}, '
+              f'lambda={self.lambda_av}, region_grid={self.av_region_grid if self.av_objective == "regional_cosine" else "n/a"}')
 
         self.val_step_outputs_sk = []
         self.val_step_outputs_ph = []
@@ -1007,6 +1016,9 @@ class ZS_SBIR(pl.LightningModule):
 
     def av_distillation_loss(self, photo, sketch, teacher_photo, teacher_sketch):
         from src.attention_output_kd import relational_av_kd, feature_cosine_kd
+        if getattr(self, "av_objective", "cosine") == "regional_cosine":
+            from src.attention_output_kd import regional_cosine_kd
+            return 0.5 * regional_cosine_kd(sketch, teacher_sketch, self.model.av_projector)
         if getattr(self, "av_modality", "both") == "sketch_only":
             # Preserve the original sketch branch weight when removing photo AV.
             return 0.5 * feature_cosine_kd(sketch, teacher_sketch, self.model.av_projector)
@@ -1023,6 +1035,7 @@ class ZS_SBIR(pl.LightningModule):
             "args": dict(vars(self.args)),
             "av_objective": getattr(self, "av_objective", "cosine"),
             "av_modality": getattr(self, "av_modality", "both"),
+            "av_region_grid": getattr(self, "av_region_grid", 2),
             "av_temperature": getattr(self, "av_temperature", 0.07),
             "av_target_metadata": getattr(self.args, "av_target_metadata", None),
         }
@@ -1032,7 +1045,8 @@ class ZS_SBIR(pl.LightningModule):
         if self.lambda_av > 0:
             if len(batch) != 7:
                 raise RuntimeError("AV targets missing from batch; prepare AV cache before fitting")
-            with PatchOutputCapture(self.model.clip_model.visual) as capture:
+            grid = self.av_region_grid if self.av_objective == "regional_cosine" else None
+            with PatchOutputCapture(self.model.clip_model.visual, region_grid=grid) as capture:
                 features = self(batch[:5])
             if len(capture.values) != 2:
                 raise RuntimeError("Expected photo and sketch AV outputs")
