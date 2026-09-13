@@ -12,9 +12,9 @@ import sys
 
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
-EXPECTED_BRANCH = "experiment/patch-attention-output-kd"
-EXPECTED_COMMIT = "570754181baaa8a650a3a04aebf3a138885234b0"
-EXPECTED_TASK = "patch_attention_output_kd"
+EXPECTED_BRANCH = "experiment/regional-av-sketch-kd"
+EXPECTED_COMMIT = "a971cbc67213366349fd7f957e0759e1b59c886d"
+EXPECTED_TASK = "regional_av_sketch_kd"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
 
@@ -123,6 +123,8 @@ required_bundle_paths = (
     source_project / "src" / "av_gradient_audit.py",
     source_project / "tests" / "test_attention_output_kd.py",
     source_project / "tests" / "test_av_sketch_only.py",
+    source_project / "tests" / "test_regional_av.py",
+    source_project / "test" / "kaggle_regional_av_train.ipy",
     source_project / "test" / "kaggle_av_sketch_only_cell.py",
     dfn_source,
     student_source,
@@ -270,6 +272,7 @@ print('Matplotlib:', matplotlib.__version__)
 import unittest
 suite = unittest.defaultTestLoader.discover('tests', pattern='test_attention_output_kd.py')
 suite.addTests(unittest.defaultTestLoader.discover('tests', pattern='test_av_sketch_only.py'))
+suite.addTests(unittest.defaultTestLoader.discover('tests', pattern='test_regional_av.py'))
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 if not result.wasSuccessful():
     raise SystemExit('Attention output KD smoke test failed')
@@ -290,5 +293,6 @@ print("=" * 70)
 
 os.chdir(WORKING_PROJECT)
 print("Project:", WORKING_PROJECT)
-print("Ready: python -m src.train with --av_objective cosine --av_modality sketch_only")
-print("Keep --lambda_av 1 and --lambda_modality 1 for the sketch-only ablation.")
+print("Ready: python -m src.train with --av_objective regional_cosine --av_modality sketch_only --av_region_grid 2")
+print("Keep --lambda_av 1 and --lambda_modality 1. Use a NEW regional AV cache path.")
+print("Training cell: test/kaggle_regional_av_train.ipy")
