@@ -63,6 +63,8 @@ class TrainDataset(torch.utils.data.Dataset):
         self.photo_path_to_index = {}
         self.teacher_sketch_features = None
         self.teacher_photo_features = None
+        self.anchor_sketch_features = None
+        self.anchor_photo_features = None
 
         for category in self.all_categories:
             sketch_paths = sorted(
@@ -87,6 +89,11 @@ class TrainDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.all_sketches_path)
+
+    def set_anchor_features(self, sketch, photo):
+        if len(sketch) != len(self.all_sketches_path) or len(photo) != len(self.all_photo_paths):
+            raise ValueError('Anchor target lengths differ from dataset paths')
+        self.anchor_sketch_features, self.anchor_photo_features = sketch, photo
         
     def __getitem__(self, sample_key):
         if isinstance(sample_key, tuple):
@@ -116,13 +123,17 @@ class TrainDataset(torch.utils.data.Dataset):
                 self.photo_path_to_index[img_path]
             ]
 
-        return (
+        result = (
             img_tensor,
             sk_tensor,
             teacher_photo_feature,
             teacher_sketch_feature,
             self.category_to_label[category],
         )
+        if self.anchor_sketch_features is not None:
+            result += (self.anchor_photo_features[self.photo_path_to_index[img_path]],
+                       self.anchor_sketch_features[index])
+        return result
 
 
 class TeacherFeatureDataset(torch.utils.data.Dataset):

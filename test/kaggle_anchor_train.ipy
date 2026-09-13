@@ -1,0 +1,46 @@
+# Standalone attention KD. Both sketch/photo use the shared descriptor at inference.
+# Run kaggle_offline.py setup first.
+%cd /kaggle/working/KD-SBIR-AVKD
+
+!python -m src.train \
+    --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
+    --dataset sketchy_1 \
+    --epochs 5 \
+    --workers 8 \
+    --batch_size 64 \
+    --test_batch_size 1024 \
+    --n_ctx_visual 3 \
+    --prompt_depth 12 \
+    --teacher_pretrain_epochs 1 \
+    --teacher_cache_path /kaggle/working/teacher_cache/sketchy1_teacher_1ep.pt \
+    --teacher_pretrain_batch_size 64 \
+    --teacher_n_ctx_visual 10 \
+    --teacher_prompt_depth 12 \
+    --teacher_prompt_std 0.02 \
+    --teacher_prompt_lr 3e-2 \
+    --teacher_prompt_seed 42 \
+    --teacher_prompt_gradient_checkpointing \
+    --teacher_momentum 0.9 \
+    --teacher_weight_decay 1e-3 \
+    --lambda_teacher_retrieval 1.5 \
+    --teacher_triplet_margin 0.2 \
+    --photo_text_kd_temperature 0.15 \
+    --sketch_text_kd_temperature 0.02 \
+    --lr 1e-2 \
+    --momentum 0.9 \
+    --weight_decay 5e-4 \
+    --seed 42 \
+    --retrieval_head attention_anchor \
+    --lambda_domain 0 \
+    --lambda_modality 0 \
+    --lambda_anchor 1 \
+    --anchor_count 256 \
+    --anchor_temperature 0.1 \
+    --anchor_pooling attention \
+    --anchor_fit_images_per_class 8 \
+    --anchor_fit_tokens_per_image 8 \
+    --anchor_fit_iterations 25 \
+    --anchor_teacher_batch_size 8 \
+    --anchor_cache_path /kaggle/working/teacher_cache/sketchy1_attention_anchors_k256.pt \
+    --exp_name anchor_student_s42_$(date +%Y%m%d_%H%M%S) \
+    --progress

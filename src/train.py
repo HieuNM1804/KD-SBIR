@@ -85,6 +85,18 @@ def get_loaders(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument('--retrieval_head', choices=['main', 'attention_anchor'], default='main')
+    parser.add_argument('--lambda_anchor', type=float, default=1.)
+    parser.add_argument('--anchor_count', type=int, default=256)
+    parser.add_argument('--anchor_temperature', type=float, default=.1)
+    parser.add_argument('--anchor_pooling', choices=['attention', 'uniform'], default='attention')
+    parser.add_argument('--anchor_fit_images_per_class', type=int, default=8)
+    parser.add_argument('--anchor_fit_tokens_per_image', type=int, default=8)
+    parser.add_argument('--anchor_fit_iterations', type=int, default=25)
+    parser.add_argument('--anchor_teacher_batch_size', type=int, default=8)
+    parser.add_argument('--anchor_cache_path', default='')
+    parser.add_argument('--prepare_anchor_cache_only', action='store_true')
+    parser.add_argument('--evaluate_anchor_teacher', action='store_true')
     parser.add_argument(
         "--root",
         type=str,
@@ -323,6 +335,19 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    import math
+    if not math.isfinite(args.lambda_anchor) or args.lambda_anchor < 0:
+        parser.error('--lambda_anchor must be finite and nonnegative')
+    if not math.isfinite(args.anchor_temperature) or args.anchor_temperature <= 0:
+        parser.error('--anchor_temperature must be positive and finite')
+    if args.anchor_count < 2 or min(args.anchor_fit_images_per_class, args.anchor_fit_tokens_per_image,
+                                  args.anchor_fit_iterations, args.anchor_teacher_batch_size) < 1:
+        parser.error('Invalid anchor count or cache preparation parameters')
+    if args.retrieval_head == 'attention_anchor':
+        if args.lambda_anchor <= 0 or args.teacher_pretrain_epochs < 1:
+            parser.error('Anchor retrieval requires lambda_anchor > 0 and a tuned teacher')
+    elif args.prepare_anchor_cache_only or args.evaluate_anchor_teacher:
+        parser.error('Anchor cache/evaluation flags require --retrieval_head attention_anchor')
     if args.teacher_prompt_seed is None:
         args.teacher_prompt_seed = args.seed
     if args.photo_text_kd_temperature is None:
@@ -421,10 +446,18 @@ if __name__ == "__main__":
     )
 
     model = ZS_SBIR(args=args, classnames=train_loader.dataset.all_categories)
+    ckpt = None
     if os.path.isfile(args.ckpt_path):
-        print(f"Resuming training from {args.ckpt_path}")
-        ckpt = torch.load(args.ckpt_path, map_location="cpu")
-        model.load_state_dict(ckpt["state_dict"], strict=False)
+        print(f"Loading initial weights from {args.ckpt_path}; optimizer starts fresh")
+        ckpt = torch.load(args.ckpt_path, map_location="cpu", weights_only=False)
+        recorded = ckpt.get('experiment_config', {})
+        if args.retrieval_head == 'attention_anchor' or recorded.get('retrieval_head') == 'attention_anchor':
+            for key in ('retrieval_head', 'anchor_count', 'anchor_temperature', 'anchor_pooling'):
+                if recorded.get('args', {}).get(key) != getattr(args, key):
+                    raise ValueError(f'Checkpoint configuration differs: {key}')
+            model.load_state_dict(ckpt['state_dict'], strict=True)
+        else:
+            model.load_state_dict(ckpt["state_dict"], strict=False)
 
     model.cache_teacher_features(
         train_loader.dataset,
@@ -435,4 +468,22 @@ if __name__ == "__main__":
         show_progress=args.progress,
     )
 
-    trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])
+    if args.retrieval_head == 'attention_anchor':
+        from src.attention_anchor_cache import prepare_anchor_cache, evaluate_teacher
+        with torch.random.fork_rng(devices=list(range(torch.cuda.device_count()))):
+            cache = prepare_anchor_cache(args, train_loader.dataset,
+                                         model.model._teacher_cache_metadata(train_loader.dataset))
+            if ckpt is not None and ckpt['experiment_config'].get('anchor_target_metadata') != cache['metadata']:
+                raise ValueError('Checkpoint and anchor cache use different teacher targets')
+            if args.evaluate_anchor_teacher:
+                evaluate_teacher(args, cache, val_sketch_loader, val_photo_loader,
+                                 os.path.join(logger.log_dir, 'anchor_teacher_evaluation.json'))
+        del cache
+    del ckpt
+    if args.prepare_anchor_cache_only:
+        print('[Anchor KD] preparation/evaluation complete; student training skipped')
+    else:
+        trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])
+        final_path = os.path.join('saved_models', args.exp_name, 'final.ckpt')
+        trainer.save_checkpoint(final_path)
+        print(f'[Student] final checkpoint: {final_path}; step={trainer.global_step}')

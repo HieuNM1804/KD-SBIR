@@ -897,12 +897,22 @@ class CustomCLIP(nn.Module):
         )
 
     def extract_feature(self, image, modality):
+        if hasattr(self, 'anchor_router'):
+            from src.attention_anchor import AnchorCapture
+            with AnchorCapture(self.clip_model.visual) as capture:
+                self.encode_student_image(image, modality)
+            if len(capture.values) != 1:
+                raise RuntimeError('Expected one student anchor capture')
+            return self.anchor_router.descriptor(*capture.values[0])
         return self.encode_student_image(image, modality)
 
 
 class ZS_SBIR(pl.LightningModule):
     def __init__(self, args, classnames):
         super().__init__()
+        if isinstance(args, dict):
+            from argparse import Namespace
+            args = Namespace(**args)
         self.args = args
         clip_model = _load_clip_model(args.backbone)
 
@@ -916,6 +926,18 @@ class ZS_SBIR(pl.LightningModule):
             classnames=classnames,
             teacher=teacher,
         )
+        self.retrieval_head = getattr(args, 'retrieval_head', 'main')
+        if self.retrieval_head == 'attention_anchor':
+            from src.attention_anchor import AnchorRouter
+            self.model.anchor_router = AnchorRouter(clip_model.visual.conv1.out_channels,
+                                                    args.anchor_count, args.anchor_temperature,
+                                                    args.anchor_pooling, args.seed+620)
+            print(f'[Anchor KD] descriptor=sqrt(probabilities), dimensions={args.anchor_count}, '
+                  f'pooling={args.anchor_pooling}, lambda={args.lambda_anchor}; '
+                  f'domain={args.lambda_domain}, modality={args.lambda_modality}')
+        elif self.retrieval_head != 'main':
+            raise ValueError('Unknown retrieval_head')
+        self.save_hyperparameters({'args': dict(vars(args)), 'classnames': list(classnames)})
 
         self.val_step_outputs_sk = []
         self.val_step_outputs_ph = []
@@ -981,10 +1003,32 @@ class ZS_SBIR(pl.LightningModule):
 
     def forward(self, data):
         return self.model(data)
+
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint['experiment_config'] = {
+            'args': dict(vars(self.args)), 'baseline_commit': 'b2d50842f7831c9eb14f06ddb6cbe5bbd22255b6',
+            'retrieval_head': self.retrieval_head,
+            'anchor_target_metadata': getattr(self.args, 'anchor_target_metadata', None),
+        }
     
     def training_step(self, batch, batch_idx):
-        features = self(batch)
+        if self.retrieval_head == 'attention_anchor':
+            from src.attention_anchor import AnchorCapture, anchor_kd
+            if len(batch) != 7:
+                raise RuntimeError('Prepare the anchor teacher cache before training')
+            with AnchorCapture(self.model.clip_model.visual) as capture:
+                features = self(batch[:5])
+            if len(capture.values) != 2:
+                raise RuntimeError('Expected photo and sketch anchor captures')
+        else:
+            features = self(batch)
         loss, loss_dict = loss_fn(self.args, features)
+        if self.retrieval_head == 'attention_anchor':
+            photo = self.model.anchor_router(*capture.values[0])
+            sketch = self.model.anchor_router(*capture.values[1])
+            kd = .5*(anchor_kd(photo, batch[5]) + anchor_kd(sketch, batch[6]))
+            loss = loss + self.args.lambda_anchor*kd
+            self.log('ANCHOR_KD', kd, on_step=False, on_epoch=True, prog_bar=True)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         bar_names = {
             "domain_kd": "DOMAIN",
