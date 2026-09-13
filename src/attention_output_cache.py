@@ -81,6 +81,7 @@ def prepare_av_cache(args, dataset):
         else teacher_path.parent / f"{args.dataset}_av_{key}.pt"
     )
     args.av_cache_path = str(path)
+    args.av_target_metadata = metadata
     print("[AV Cache] path:", path)
     ns, np_ = len(dataset.all_sketches_path), len(dataset.all_photo_paths)
     if path.is_file():

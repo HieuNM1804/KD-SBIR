@@ -102,3 +102,33 @@ def feature_cosine_kd(student, teacher, projector):
         predicted = projector(student.float())
         target = teacher.detach().to(device=predicted.device, dtype=torch.float32)
         return (1 - F.cosine_similarity(predicted, target, dim=-1, eps=1e-8)).mean()
+
+
+def relational_av_kd(student_sketch, student_photo, teacher_sketch, teacher_photo,
+                     temperature=0.07):
+    """Mean teacher->student KL for sketch->photo and photo->sketch.
+
+    Each space is normalized independently; no cross-model projector or T^2
+    scaling. Rows/columns must reference the same samples in teacher/student.
+    """
+    if not math.isfinite(temperature) or temperature <= 0:
+        raise ValueError("AV temperature must be finite and positive")
+    tensors = (student_sketch, student_photo, teacher_sketch, teacher_photo)
+    if any(x.ndim != 2 for x in tensors):
+        raise ValueError("AV relations require 2D feature batches")
+    if (student_sketch.shape[0] != teacher_sketch.shape[0]
+            or student_photo.shape[0] != teacher_photo.shape[0]
+            or min(student_sketch.shape[0], student_photo.shape[0]) < 2):
+        raise ValueError("Matching teacher/student batches with at least two samples required")
+    with torch.autocast(device_type=student_sketch.device.type, enabled=False):
+        s = F.normalize(student_sketch.float(), dim=-1) @ F.normalize(student_photo.float(), dim=-1).T
+        with torch.no_grad():
+            ts, tp = (x.detach().to(student_sketch.device, dtype=torch.float32)
+                      for x in (teacher_sketch, teacher_photo))
+            t = F.normalize(ts, dim=-1) @ F.normalize(tp, dim=-1).T
+        return 0.5 * (
+            F.kl_div(F.log_softmax(s / temperature, dim=-1),
+                     F.softmax(t / temperature, dim=-1), reduction="batchmean")
+            + F.kl_div(F.log_softmax(s.T / temperature, dim=-1),
+                       F.softmax(t.T / temperature, dim=-1), reduction="batchmean")
+        )

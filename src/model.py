@@ -903,6 +903,9 @@ class CustomCLIP(nn.Module):
 class ZS_SBIR(pl.LightningModule):
     def __init__(self, args, classnames):
         super().__init__()
+        if isinstance(args, dict):
+            from argparse import Namespace
+            args = Namespace(**args)
         self.args = args
         clip_model = _load_clip_model(args.backbone)
 
@@ -919,8 +922,16 @@ class ZS_SBIR(pl.LightningModule):
 
         self.lambda_av = getattr(args, "lambda_av", 0.0)
         self.lambda_global_feature = getattr(args, "lambda_global_feature", 0.0)
+        self.av_objective = getattr(args, "av_objective", "cosine")
+        self.av_modality = getattr(args, "av_modality", "both")
+        if self.av_modality not in ("both", "sketch_only"):
+            raise ValueError("av_modality must be both or sketch_only")
+        if self.av_modality == "sketch_only" and self.av_objective != "cosine":
+            raise ValueError("sketch_only requires cosine AV")
+        self.av_temperature = getattr(args, "av_temperature", 0.07)
+        self.save_hyperparameters({"args": dict(vars(args)), "classnames": list(classnames)})
         from src.attention_output_kd import make_projector
-        if self.lambda_av > 0:
+        if self.lambda_av > 0 and self.av_objective == "cosine":
             self.model.av_projector = make_projector(
                 clip_model.visual.conv1.out_channels, 1280, args.seed + 3901
             )
@@ -993,6 +1004,28 @@ class ZS_SBIR(pl.LightningModule):
 
     def forward(self, data):
         return self.model(data)
+
+    def av_distillation_loss(self, photo, sketch, teacher_photo, teacher_sketch):
+        from src.attention_output_kd import relational_av_kd, feature_cosine_kd
+        if getattr(self, "av_modality", "both") == "sketch_only":
+            # Preserve the original sketch branch weight when removing photo AV.
+            return 0.5 * feature_cosine_kd(sketch, teacher_sketch, self.model.av_projector)
+        if getattr(self, "av_objective", "cosine") == "relational":
+            return relational_av_kd(sketch, photo, teacher_sketch, teacher_photo,
+                                    self.av_temperature)
+        return 0.5 * (
+            feature_cosine_kd(photo, teacher_photo, self.model.av_projector)
+            + feature_cosine_kd(sketch, teacher_sketch, self.model.av_projector)
+        )
+
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint["experiment_config"] = {
+            "args": dict(vars(self.args)),
+            "av_objective": getattr(self, "av_objective", "cosine"),
+            "av_modality": getattr(self, "av_modality", "both"),
+            "av_temperature": getattr(self, "av_temperature", 0.07),
+            "av_target_metadata": getattr(self.args, "av_target_metadata", None),
+        }
     
     def training_step(self, batch, batch_idx):
         from src.attention_output_kd import PatchOutputCapture, feature_cosine_kd
@@ -1007,9 +1040,8 @@ class ZS_SBIR(pl.LightningModule):
             features = self(batch[:5])
         loss, loss_dict = loss_fn(self.args, features)
         if self.lambda_av > 0:
-            av_loss = 0.5 * (
-                feature_cosine_kd(capture.values[0], batch[5], self.model.av_projector)
-                + feature_cosine_kd(capture.values[1], batch[6], self.model.av_projector)
+            av_loss = self.av_distillation_loss(
+                capture.values[0], capture.values[1], batch[5], batch[6]
             )
             loss = loss + self.lambda_av * av_loss
             self.log('AV_KD', av_loss, on_step=False, on_epoch=True, prog_bar=True)

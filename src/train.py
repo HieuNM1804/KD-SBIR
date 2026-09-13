@@ -19,6 +19,14 @@ from src.data_config import UNSEEN_CLASSES
 from src.model import ZS_SBIR, default_teacher_cache_path
 
 
+def save_final_checkpoint(trainer, exp_name):
+    # save_last can track the last top-k save, rather than the final weights.
+    path = os.path.join('saved_models', exp_name, 'final.ckpt')
+    trainer.save_checkpoint(path)
+    print(f'[Student] final checkpoint: {path}; step={trainer.global_step}')
+    return path
+
+
 def seed_everything(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -323,7 +331,14 @@ if __name__ == "__main__":
     )
 
     parser.add_argument('--lambda_av', type=float, default=0.0,
-                        help='Weight of final-block CLS patch-attention-output cosine KD')
+                        help='Weight of final-block CLS patch-attention-output KD')
+    parser.add_argument('--av_objective', choices=['cosine', 'relational'], default='cosine')
+    parser.add_argument('--av_modality', choices=['both', 'sketch_only'], default='both',
+                        help='Cosine AV branches; sketch_only retains the original 0.5 sketch factor.')
+    parser.add_argument('--av_temperature', type=float, default=0.07,
+                        help='Temperature for bidirectional relational AV; no T^2 scaling')
+    parser.add_argument('--av_gradient_audit', action='store_true',
+                        help='Measure prompt gradients on one fixed train batch at steps 0/1/10/100/end')
     parser.add_argument('--lambda_global_feature', type=float, default=0.0,
                         help='Weight of global image-feature cosine KD (control)')
     parser.add_argument('--av_cache_path', default='',
@@ -338,6 +353,12 @@ if __name__ == "__main__":
         parser.error('New KD weights must be finite and nonnegative')
     if args.av_teacher_batch_size < 1:
         parser.error('--av_teacher_batch_size must be positive')
+    if not math.isfinite(args.av_temperature) or args.av_temperature <= 0:
+        parser.error('--av_temperature must be finite and positive')
+    if args.av_modality == 'sketch_only' and args.av_objective != 'cosine':
+        parser.error('--av_modality sketch_only requires --av_objective cosine')
+    if args.av_gradient_audit and args.lambda_av <= 0:
+        parser.error('--av_gradient_audit requires --lambda_av > 0')
     if (args.lambda_av > 0 or args.lambda_global_feature > 0) and args.teacher_pretrain_epochs < 1:
         parser.error('New KD branches require a tuned teacher: keep --teacher_pretrain_epochs >= 1 even when loading its cache')
     if args.teacher_prompt_seed is None:
@@ -423,6 +444,10 @@ if __name__ == "__main__":
             "--teacher_pretrain_epochs greater than 0."
         )
     progress_bar = TQDMProgressBar(refresh_rate=20)
+    callbacks = [checkpoint_callback, progress_bar]
+    if args.av_gradient_audit:
+        from src.av_gradient_audit import AVGradientAudit
+        callbacks.append(AVGradientAudit())
 
     trainer = Trainer(
         accelerator="gpu",
@@ -434,7 +459,7 @@ if __name__ == "__main__":
         logger=logger,
         check_val_every_n_epoch=1,
         enable_progress_bar=args.progress,
-        callbacks=[checkpoint_callback, progress_bar],
+        callbacks=callbacks,
     )
 
     model = ZS_SBIR(args=args, classnames=train_loader.dataset.all_categories)
@@ -461,3 +486,4 @@ if __name__ == "__main__":
         print('[KD Cache] preparation complete; student training skipped')
     else:
         trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])
+        save_final_checkpoint(trainer, args.exp_name)

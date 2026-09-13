@@ -16,6 +16,7 @@ from src.attention_output_kd import (
     patch_attention_output,
     make_projector,
     feature_cosine_kd,
+    relational_av_kd,
 )
 from src.attention_output_cache import validate_cache
 from src.dataset import TrainDataset
@@ -242,7 +243,9 @@ class AttentionOutputTests(unittest.TestCase):
         from src.losses import loss_fn
         from src.model import CustomCLIP
 
-        for av, glob in [(0, 0), (1, 0), (0, 1), (1, 1)]:
+        for av, glob, objective in [(0, 0, "cosine"), (1, 0, "cosine"),
+                                    (0, 1, "cosine"), (1, 1, "cosine"),
+                                    (1, 0, "relational"), (1, 1, "relational")]:
             model, prompts = self.student("cpu")
 
             class Wrapper(torch.nn.Module):
@@ -253,7 +256,7 @@ class AttentionOutputTests(unittest.TestCase):
                     self.sketch_visual_prompt = IndependentVisualPromptLearner(
                         3, 64, 43, 3
                     )
-                    if av:
+                    if av and objective == "cosine":
                         self.av_projector = make_projector(64, 1280, 4)
                     if glob:
                         self.global_feature_projector = make_projector(32, 1024, 5)
@@ -263,10 +266,10 @@ class AttentionOutputTests(unittest.TestCase):
                 def forward(self, b):
                     p, s, tp, ts, _ = b
                     p = F.normalize(
-                        model.visual(p, *self.photo_visual_prompt()), dim=-1
+                        self.clip_model.visual(p, *self.photo_visual_prompt()), dim=-1
                     )
                     s = F.normalize(
-                        model.visual(s, *self.sketch_visual_prompt()), dim=-1
+                        self.clip_model.visual(s, *self.sketch_visual_prompt()), dim=-1
                     )
                     return (
                         p,
@@ -287,7 +290,10 @@ class AttentionOutputTests(unittest.TestCase):
             module.model = Wrapper()
             module.lambda_av = av
             module.lambda_global_feature = glob
+            module.av_objective = objective
+            module.av_temperature = 0.07
             module.args = SimpleNamespace(
+                seed=42,
                 lambda_domain=3.0,
                 lambda_modality=1.0,
                 kd_temperature=0.07,
@@ -320,13 +326,108 @@ class AttentionOutputTests(unittest.TestCase):
             registered = {
                 id(p) for group in optimizer.param_groups for p in group["params"]
             }
-            if av:
+            if av and objective == "cosine":
                 self.assertIn(id(module.model.av_projector.weight), registered)
+            if objective == "relational":
+                self.assertFalse(hasattr(module.model, "av_projector"))
             if glob:
                 self.assertIn(
                     id(module.model.global_feature_projector.weight), registered
                 )
             self.assertTrue(all(p.grad is None for p in model.parameters()))
+
+            checkpoint = {}
+            module.on_save_checkpoint(checkpoint)
+            self.assertEqual(checkpoint["experiment_config"]["av_objective"], objective)
+
+            if objective == "relational" and not glob:
+                from src.av_gradient_audit import AVGradientAudit
+                with tempfile.TemporaryDirectory() as tmp:
+                    callback = AVGradientAudit()
+                    callback.batch = batch
+                    callback.indices = [0, 1, 2]
+                    callback.records = []
+                    callback.path = Path(tmp) / "audit.json"
+                    trainer = SimpleNamespace(global_step=0, current_epoch=0)
+                    before = [p.grad.clone() if p.grad is not None else None
+                              for p in module.parameters()]
+                    rng = torch.get_rng_state().clone()
+                    callback.measure(trainer, module, "test")
+                    self.assertTrue(torch.equal(rng, torch.get_rng_state()))
+                    for p, old in zip(module.parameters(), before):
+                        if old is None:
+                            self.assertIsNone(p.grad)
+                        else:
+                            torch.testing.assert_close(p.grad, old, atol=0, rtol=0)
+                    self.assertTrue(callback.path.is_file())
+                    self.assertGreater(callback.records[0]["av_norm"], 0)
+
+                    # Real Lightning lifecycle: diagnostics must leave the SGD
+                    # update identical, and export start/first-step/end records.
+                    from copy import deepcopy
+                    from torch.utils.data import DataLoader, Dataset
+                    import json
+
+                    class FixedDataset(Dataset):
+                        def __len__(self):
+                            return 3
+
+                        def __getitem__(self, key):
+                            index = key[1] if isinstance(key, tuple) else key
+                            return tuple(x[index] for x in batch)
+
+                    results = []
+                    for enabled in (False, True):
+                        current = deepcopy(module)
+                        current.zero_grad(set_to_none=True)
+                        audit = AVGradientAudit()
+                        trainer = pl.Trainer(
+                            accelerator="cpu", devices=1, max_epochs=1,
+                            limit_train_batches=1, limit_val_batches=0,
+                            num_sanity_val_steps=0, logger=False,
+                            enable_checkpointing=False, enable_progress_bar=False,
+                            enable_model_summary=False, default_root_dir=tmp,
+                            callbacks=[audit] if enabled else [],
+                        )
+                        trainer.fit(current, DataLoader(FixedDataset(), batch_size=3))
+                        results.append(deepcopy(current.state_dict()))
+                        if enabled:
+                            report = json.loads(audit.path.read_text())
+                            self.assertEqual([r["stage"] for r in report["measurements"]],
+                                             ["start", "step_1", "end"])
+                            trainer.save_checkpoint(str(Path(tmp) / "test.ckpt"))
+                            saved = torch.load(Path(tmp) / "test.ckpt", weights_only=False)
+                            self.assertEqual(saved["experiment_config"]["av_objective"], "relational")
+                    for key in results[0]:
+                        torch.testing.assert_close(results[0][key], results[1][key], atol=0, rtol=0)
+
+    def test_relational_av_formula_gradients_and_invariance(self):
+        for device in (["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"]):
+            sk = torch.randn(4, 16, device=device, requires_grad=True)
+            ph = torch.randn(5, 16, device=device, requires_grad=True)
+            ts = torch.randn(4, 24, device=device, requires_grad=True)
+            tp = torch.randn(5, 24, device=device, requires_grad=True)
+            with torch.autocast(device_type=device, enabled=device == "cuda", dtype=torch.float16):
+                loss = relational_av_kd(sk, ph, ts, tp, 0.2)
+            s = F.normalize(sk, dim=-1) @ F.normalize(ph, dim=-1).T / .2
+            t = F.normalize(ts, dim=-1) @ F.normalize(tp, dim=-1).T / .2
+            expected = .5 * (
+                (t.softmax(-1) * (t.log_softmax(-1) - s.log_softmax(-1))).sum(-1).mean()
+                + (t.T.softmax(-1) * (t.T.log_softmax(-1) - s.T.log_softmax(-1))).sum(-1).mean()
+            )
+            torch.testing.assert_close(loss, expected)
+            torch.testing.assert_close(loss, relational_av_kd(ph, sk, tp, ts, .2))
+            loss.backward()
+            self.assertGreater(sk.grad.norm().item(), 0)
+            self.assertGreater(ph.grad.norm().item(), 0)
+            self.assertIsNone(ts.grad)
+            self.assertIsNone(tp.grad)
+            # Embedding the same relations in a different width must give zero KL.
+            zero = relational_av_kd(sk, ph, F.pad(sk, (0, 8)), F.pad(ph, (0, 8)), .2)
+            self.assertLess(abs(zero.item()), 1e-5)
+            for temperature in (0, -1, float("nan")):
+                with self.assertRaises(ValueError):
+                    relational_av_kd(sk, ph, ts, tp, temperature)
 
 
 if __name__ == "__main__":
