@@ -63,6 +63,7 @@ class TrainDataset(torch.utils.data.Dataset):
         self.photo_path_to_index = {}
         self.teacher_sketch_features = None
         self.teacher_photo_features = None
+        self.mask_features = None
 
         for category in self.all_categories:
             sketch_paths = sorted(
@@ -87,6 +88,14 @@ class TrainDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.all_sketches_path)
+
+    def set_mask_features(self, cache, strategy):
+        if strategy not in ('attention', 'random'):
+            raise ValueError('Unknown mask strategy')
+        self.mask_features = {
+            mod: (cache[mod][strategy+'_mask'], cache[mod][strategy+'_target'])
+            for mod in ('photo', 'sketch')
+        }
         
     def __getitem__(self, sample_key):
         if isinstance(sample_key, tuple):
@@ -116,13 +125,21 @@ class TrainDataset(torch.utils.data.Dataset):
                 self.photo_path_to_index[img_path]
             ]
 
-        return (
+        result = (
             img_tensor,
             sk_tensor,
             teacher_photo_feature,
             teacher_sketch_feature,
             self.category_to_label[category],
         )
+        if self.mask_features is not None:
+            from src.mask_guided import apply_mask
+            photo_index = self.photo_path_to_index[img_path]
+            pm, pt = self.mask_features['photo']
+            sm, st = self.mask_features['sketch']
+            result += (apply_mask(img_tensor, pm[photo_index]), apply_mask(sk_tensor, sm[index]),
+                       pt[photo_index], st[index])
+        return result
 
 
 class TeacherFeatureDataset(torch.utils.data.Dataset):

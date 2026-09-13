@@ -897,12 +897,17 @@ class CustomCLIP(nn.Module):
         )
 
     def extract_feature(self, image, modality):
+        if hasattr(self, 'retrieval_projection'):
+            return self.retrieval_projection(self.encode_student_image(image, modality))
         return self.encode_student_image(image, modality)
 
 
 class ZS_SBIR(pl.LightningModule):
     def __init__(self, args, classnames):
         super().__init__()
+        if isinstance(args, dict):
+            from argparse import Namespace
+            args = Namespace(**args)
         self.args = args
         clip_model = _load_clip_model(args.backbone)
 
@@ -916,6 +921,19 @@ class ZS_SBIR(pl.LightningModule):
             classnames=classnames,
             teacher=teacher,
         )
+        self.retrieval_head = getattr(args, 'retrieval_head', 'main')
+        if self.retrieval_head == 'mask_guided':
+            from src.mask_guided import RetrievalProjection
+            self.model.retrieval_projection = RetrievalProjection(clip_model.visual.proj.shape[1], 1024, args.seed+810)
+            self.mask_epoch_sums = {}
+            self.mask_epoch_samples = 0
+            self.mask_gradient_rows = []
+            print(f'[Mask KD] strategy={args.mask_strategy}, embedding={args.lambda_embedding}, '
+                  f'response={args.lambda_response}; inference=projected global embedding; '
+                  f'domain={args.lambda_domain}, modality={args.lambda_modality}')
+        elif self.retrieval_head != 'main':
+            raise ValueError('Unknown retrieval head')
+        self.save_hyperparameters({'args': dict(vars(args)), 'classnames': list(classnames)})
 
         self.val_step_outputs_sk = []
         self.val_step_outputs_ph = []
@@ -981,8 +999,65 @@ class ZS_SBIR(pl.LightningModule):
 
     def forward(self, data):
         return self.model(data)
+
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint['experiment_config'] = {
+            'args': dict(vars(self.args)), 'retrieval_head': self.retrieval_head,
+            'baseline_commit': 'b2d50842f7831c9eb14f06ddb6cbe5bbd22255b6',
+            'mask_target_metadata': getattr(self.args, 'mask_target_metadata', None),
+        }
+
+    def on_train_epoch_start(self):
+        if self.retrieval_head == 'mask_guided':
+            self.mask_epoch_sums = {}
+            self.mask_epoch_samples = 0
+
+    def mask_training_step(self, batch, batch_idx):
+        from src.mask_guided import embedding_loss, response_terms, gradient_comparison
+        expected = 9 if self.args.lambda_response > 0 else 5
+        if len(batch) != expected:
+            raise ValueError(f'Mask KD expects {expected} batch fields, got {len(batch)}')
+        features = self(batch[:5])
+        base, main_terms = loss_fn(self.args, features)
+        metrics = {'weighted_domain_loss': self.args.lambda_domain*main_terms['domain_kd'],
+                   'weighted_modality_loss': self.args.lambda_modality*main_terms['modality_kd']}
+        embedding = features[0].new_zeros((), dtype=torch.float32)
+        response = embedding.clone()
+        for mod, feature, full, masked_image, target in (
+                ('photo', features[0], batch[2], 5, 7), ('sketch', features[1], batch[3], 6, 8)):
+            z = self.model.retrieval_projection(feature)
+            loss = embedding_loss(z, full)
+            metrics[mod+'_embedding_loss'] = loss
+            # Within-batch spread of normalized descriptors: zero means collapse.
+            teacher_z = F.normalize(full.detach().to(z.device).float(), dim=-1)
+            metrics[mod+'_student_feature_spread'] = 1-z.mean(0).square().sum()
+            metrics[mod+'_teacher_feature_spread'] = 1-teacher_z.mean(0).square().sum()
+            embedding = embedding + .5*loss
+            if self.args.lambda_response > 0:
+                zm = self.model.extract_feature(batch[masked_image], mod)
+                loss, stats = response_terms(z, zm, full, batch[target])
+                response = response + .5*loss
+                metrics.update({mod+'_'+key: value for key, value in stats.items()})
+        loss = base + self.args.lambda_embedding*embedding + self.args.lambda_response*response
+        metrics.update(embedding_loss=embedding, response_loss=response, total_loss=loss,
+                       weighted_embedding_loss=self.args.lambda_embedding*embedding,
+                       weighted_response_loss=self.args.lambda_response*response)
+        if batch_idx == 0 and self.args.lambda_response > 0 and getattr(self.args, 'mask_gradient_audit', False):
+            rows = gradient_comparison(embedding, response, self.named_parameters())
+            self.mask_gradient_rows.extend(dict(epoch=int(self.current_epoch), **row) for row in rows)
+            for row in rows:
+                print('[Mask Gradient]', row, flush=True)
+        size = len(batch[4])
+        self.mask_epoch_samples += size
+        for key, value in metrics.items():
+            self.mask_epoch_sums[key] = self.mask_epoch_sums.get(key, 0.) + value.detach().item()*size
+            self.log('MASK/'+key, value, on_step=False, on_epoch=True, batch_size=size)
+        self.log('train_loss', loss, on_step=False, on_epoch=True, batch_size=size)
+        return loss
     
     def training_step(self, batch, batch_idx):
+        if self.retrieval_head == 'mask_guided':
+            return self.mask_training_step(batch, batch_idx)
         features = self(batch)
         loss, loss_dict = loss_fn(self.args, features)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
@@ -1032,6 +1107,10 @@ class ZS_SBIR(pl.LightningModule):
         )
         self.log("mAP", mAP, on_step=False, on_epoch=True)
         self.log("precision", precision, on_step=False, on_epoch=True)
+        if self.retrieval_head == 'mask_guided' and not self.trainer.sanity_checking:
+            self.mask_validation = {'mAP': mAP.item(), 'precision': precision.item(),
+                                    'map_k': map_k, 'p_k': p_k,
+                                    'queries': len(query_features), 'gallery': len(gallery_features)}
         if self.global_step > 0:
             self.best_precision = max(
                 self.best_precision,

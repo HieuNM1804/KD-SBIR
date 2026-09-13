@@ -85,6 +85,17 @@ def get_loaders(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument('--retrieval_head', choices=['main', 'mask_guided'], default='main')
+    parser.add_argument('--lambda_embedding', type=float, default=1.)
+    parser.add_argument('--lambda_response', type=float, default=1.)
+    parser.add_argument('--mask_strategy', choices=['attention', 'random'], default='attention')
+    parser.add_argument('--mask_ratio', type=float, default=.2)
+    parser.add_argument('--mask_grid', type=int, default=7)
+    parser.add_argument('--mask_teacher_batch_size', type=int, default=8)
+    parser.add_argument('--mask_cache_path', default='')
+    parser.add_argument('--prepare_mask_cache_only', action='store_true')
+    parser.add_argument('--mask_gradient_audit', action='store_true')
+    parser.add_argument('--mask_initial_validation', action='store_true')
     parser.add_argument(
         "--root",
         type=str,
@@ -369,7 +380,30 @@ if __name__ == "__main__":
         parser.error("--photo_text_kd_temperature must be greater than 0.")
     if args.sketch_text_kd_temperature <= 0:
         parser.error("--sketch_text_kd_temperature must be greater than 0.")
+    import math
+    if args.retrieval_head == 'mask_guided':
+        if not math.isfinite(args.lambda_embedding) or args.lambda_embedding <= 0:
+            parser.error('--lambda_embedding must be finite and positive')
+        if not math.isfinite(args.lambda_response) or args.lambda_response < 0:
+            parser.error('--lambda_response must be finite and nonnegative')
+        if not 0 < args.mask_ratio < 1 or args.mask_grid < 2 or args.max_size % args.mask_grid:
+            parser.error('Need 0 < mask_ratio < 1, mask_grid >= 2 dividing max_size')
+        if args.teacher_pretrain_epochs < 1 or args.mask_teacher_batch_size < 1:
+            parser.error('Mask KD needs a tuned teacher and a positive teacher batch size')
+    elif args.prepare_mask_cache_only or args.mask_initial_validation or args.mask_gradient_audit:
+        parser.error('Mask flags require --retrieval_head mask_guided')
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
+    diagnostics = None
+    if args.retrieval_head == 'mask_guided':
+        from src.mask_guided_diagnostics import MaskDiagnostics
+        from src.mask_guided_cache import file_hash
+        from pathlib import Path
+        diagnostics = MaskDiagnostics(os.path.join(logger.log_dir, 'mask_diagnostics'))
+        project_root = Path(__file__).resolve().parent.parent
+        args.training_source_sha256 = {name: file_hash(project_root/name) for name in
+            ('src/model.py', 'src/train.py', 'src/dataset.py', 'src/losses.py',
+             'src/mask_guided.py', 'src/mask_guided_cache.py', 'src/mask_guided_diagnostics.py',
+             'src/teacher_prompts.py', 'clip/model.py')}
 
     checkpoint_callback = ModelCheckpoint(
         monitor="precision",
@@ -417,14 +451,24 @@ if __name__ == "__main__":
         logger=logger,
         check_val_every_n_epoch=1,
         enable_progress_bar=args.progress,
-        callbacks=[checkpoint_callback, progress_bar],
+        callbacks=[checkpoint_callback, progress_bar] + ([diagnostics] if diagnostics else []),
+        num_sanity_val_steps=0 if diagnostics else 2,
     )
 
     model = ZS_SBIR(args=args, classnames=train_loader.dataset.all_categories)
+    ckpt = None
     if os.path.isfile(args.ckpt_path):
-        print(f"Resuming training from {args.ckpt_path}")
-        ckpt = torch.load(args.ckpt_path, map_location="cpu")
-        model.load_state_dict(ckpt["state_dict"], strict=False)
+        print(f"Loading initial weights from {args.ckpt_path}; optimizer starts fresh")
+        ckpt = torch.load(args.ckpt_path, map_location="cpu", weights_only=False)
+        recorded = ckpt.get('experiment_config', {})
+        if args.retrieval_head == 'mask_guided' or recorded.get('retrieval_head') == 'mask_guided':
+            if recorded.get('retrieval_head') != args.retrieval_head:
+                raise ValueError('Checkpoint retrieval head differs from this run')
+            if ckpt.get('hyper_parameters', {}).get('classnames') != train_loader.dataset.all_categories:
+                raise ValueError('Checkpoint class order differs')
+            model.load_state_dict(ckpt['state_dict'], strict=True)
+        else:
+            model.load_state_dict(ckpt["state_dict"], strict=False)
 
     model.cache_teacher_features(
         train_loader.dataset,
@@ -435,4 +479,28 @@ if __name__ == "__main__":
         show_progress=args.progress,
     )
 
-    trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])
+    if args.retrieval_head == 'mask_guided':
+        from src.mask_guided_cache import prepare_mask_cache
+        with torch.random.fork_rng(devices=list(range(torch.cuda.device_count()))):
+            cache = prepare_mask_cache(args, train_loader.dataset,
+                                       model.model._teacher_cache_metadata(train_loader.dataset), diagnostics.directory)
+        if ckpt is not None and ckpt['experiment_config'].get('mask_target_metadata') != cache['metadata']:
+            raise ValueError('Checkpoint and mask cache target metadata differ')
+        del cache
+        import json
+        from pathlib import Path
+        (diagnostics.directory/'run.json').write_text(json.dumps({'args':vars(args),
+            'baseline_commit':'b2d50842f7831c9eb14f06ddb6cbe5bbd22255b6',
+            'objective':'lambda_embedding * mean cosine distance + lambda_response * mean squared delta distance',
+            'inference':'normalize(shared_projection(student_global_feature))',
+            'optimizer_initialization':'fresh; ckpt_path, if provided, loads weights only'},indent=2),encoding='utf-8')
+    del ckpt
+    if args.prepare_mask_cache_only:
+        print('[Mask KD] preparation complete; student training skipped')
+    else:
+        if args.mask_initial_validation:
+            trainer.validate(model, [val_sketch_loader, val_photo_loader])
+        trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])
+        final_path = os.path.join('saved_models', args.exp_name, 'final.ckpt')
+        trainer.save_checkpoint(final_path)
+        print(f'[Student] final checkpoint: {final_path}; step={trainer.global_step}')
