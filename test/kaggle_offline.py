@@ -13,7 +13,7 @@ import sys
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/regional-av-sketch-kd"
-EXPECTED_COMMIT = "a971cbc67213366349fd7f957e0759e1b59c886d"
+EXPECTED_COMMIT = "192dba4e058965e3b874f2ded964f013c315c51f"
 EXPECTED_TASK = "regional_av_sketch_kd"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"

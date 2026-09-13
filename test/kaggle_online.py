@@ -29,7 +29,7 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/regional-av-sketch-kd"
 # Pinned training source; this builder is distributed separately.
-COMMIT = "a971cbc67213366349fd7f957e0759e1b59c886d"
+COMMIT = "192dba4e058965e3b874f2ded964f013c315c51f"
 TASK = "regional_av_sketch_kd"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
