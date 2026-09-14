@@ -896,7 +896,17 @@ class CustomCLIP(nn.Module):
             teacher_photo_text,
         )
 
+    def encode_region_image(self, image, modality):
+        from src.semantic_region import DenseRegionCapture, content_prior
+        with DenseRegionCapture(self.clip_model.visual) as capture:
+            native = self.encode_student_image(image, modality)
+        return self.region_head(native, capture.dense_features(),
+                                content_prior(image, modality, self.cfg.region_grid),
+                                self.cfg.region_mode)
+
     def extract_feature(self, image, modality):
+        if hasattr(self, 'region_head'):
+            return self.encode_region_image(image, modality)['descriptor']
         return self.encode_student_image(image, modality)
 
 
@@ -917,8 +927,29 @@ class ZS_SBIR(pl.LightningModule):
             teacher=teacher,
         )
 
+        self.save_hyperparameters({'args': dict(vars(args)), 'classnames': list(classnames)})
+        if getattr(args, 'retrieval_head', 'main') == 'semantic_region':
+            from src.semantic_region import SemanticRegionHead
+            with torch.random.fork_rng():
+                torch.manual_seed(args.seed + 810)
+                self.model.region_head = SemanticRegionHead(
+                    clip_model.visual.proj.shape[1], args.max_size,
+                    int((clip_model.visual.positional_embedding.shape[0] - 1)**.5),
+                    args.region_grid, args.region_bottleneck, args.region_beta)
+            self.model.register_buffer('region_alignment', torch.zeros(1024, clip_model.visual.proj.shape[1]))
+            if args.region_mode == 'global':
+                for name, parameter in self.model.region_head.named_parameters():
+                    if not name.startswith('fusion.'):
+                        parameter.requires_grad_(False)
+            if not args.region_train_prompts:
+                self.model.photo_visual_prompt.requires_grad_(False)
+                self.model.sketch_visual_prompt.requires_grad_(False)
+            print(f'[Region KD] mode={args.region_mode}, grid={args.region_grid}, '
+                  f'prompts_train={args.region_train_prompts}, descriptor=native+residual')
         self.val_step_outputs_sk = []
         self.val_step_outputs_ph = []
+        self.val_native_sk = []
+        self.val_native_ph = []
 
     def cache_teacher_features(
         self,
@@ -939,6 +970,22 @@ class ZS_SBIR(pl.LightningModule):
         )
         
     def configure_optimizers(self):
+        if hasattr(self.model, 'region_head'):
+            head = [p for p in self.model.region_head.parameters() if p.requires_grad]
+            prompts = [p for n, p in self.model.named_parameters()
+                       if p.requires_grad and 'region_head.' not in n]
+            groups = [{'params': head, 'lr': self.args.region_head_lr}]
+            if prompts:
+                groups.append({'params': prompts, 'lr': self.args.lr})
+            if self.args.region_optimizer == 'adamw':
+                optimizer = torch.optim.AdamW(groups, weight_decay=self.args.weight_decay)
+            else:
+                optimizer = torch.optim.SGD(groups, momentum=self.args.momentum,
+                                            weight_decay=self.args.weight_decay)
+            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=.1)
+            print('[Region Optimizer]', self.args.region_optimizer,
+                  'groups=', [(g['lr'], sum(p.numel() for p in g['params'])) for g in groups])
+            return [optimizer], [scheduler]
         student_params = [
             parameter
             for parameter in self.model.parameters()
@@ -982,7 +1029,18 @@ class ZS_SBIR(pl.LightningModule):
     def forward(self, data):
         return self.model(data)
     
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint['experiment_config'] = {
+            'args': dict(vars(self.args)),
+            'retrieval_head': getattr(self.args, 'retrieval_head', 'main'),
+            'baseline_commit': 'b2d50842f7831c9eb14f06ddb6cbe5bbd22255b6',
+            'region_target_metadata': getattr(self.args, 'region_target_metadata', None),
+            'source_sha256': getattr(self.args, 'training_source_sha256', {}),
+        }
+
     def training_step(self, batch, batch_idx):
+        if hasattr(self.model, 'region_head'):
+            return self.region_training_step(batch, batch_idx)
         features = self(batch)
         loss, loss_dict = loss_fn(self.args, features)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
@@ -1000,14 +1058,49 @@ class ZS_SBIR(pl.LightningModule):
             )
         return loss
     
+    def region_training_step(self, batch, batch_idx):
+        from src.semantic_region import region_losses
+        outputs, components = {}, {}
+        losses = []
+        for modality, image_idx, teacher_idx, crop_idx, gate_idx, vis_idx, random_idx, ref_idx in (
+            ('photo', 0, 2, 5, 7, 9, 11, 13), ('sketch', 1, 3, 6, 8, 10, 12, 14)):
+            output = self.model.encode_region_image(batch[image_idx], modality)
+            target = F.normalize(batch[teacher_idx].float() @ self.model.region_alignment, dim=-1)
+            mode = self.args.region_mode
+            gate = batch[gate_idx] if mode == 'semantic' else batch[random_idx] if mode == 'random' else batch[vis_idx]
+            loss, values = region_losses(output, target, batch[crop_idx], gate,
+                                         batch[vis_idx], batch[ref_idx], self.args)
+            outputs[modality] = output
+            components[modality] = values
+            losses.append(loss)
+            for key, value in values.items():
+                self.log(modality + '_' + key, value, on_step=False, on_epoch=True, batch_size=len(batch[0]))
+        total = .5 * sum(losses)
+        main_loss = total.new_zeros(())
+        if self.args.lambda_domain > 0 or self.args.lambda_modality > 0:
+            main_loss, _ = loss_fn(self.args, self(batch[:5]))
+            total = total + main_loss
+        self.log('train_loss', total, on_step=False, on_epoch=True, batch_size=len(batch[0]))
+        self.log('REGION', .5 * sum(v['region'] for v in components.values()), prog_bar=True)
+        self.log('DESC', .5 * sum(v['descriptor'] for v in components.values()), prog_bar=True)
+        if not torch.isfinite(total):
+            raise RuntimeError('Nonfinite region loss')
+        from src.semantic_region_diagnostics import training_diagnostics
+        training_diagnostics(self, batch, batch_idx, outputs, components, main_loss)
+        return total
+
     def validation_step(self, batch, batch_idx, dataloader_idx):
         image_tensor, label = batch
-        if dataloader_idx == 0:
-            feat = self.model.extract_feature(image_tensor, "sketch")
-            self.val_step_outputs_sk.append((feat, label))
+        modality = 'sketch' if dataloader_idx == 0 else 'photo'
+        if hasattr(self.model, 'region_head'):
+            output = self.model.encode_region_image(image_tensor, modality)
+            feat = output['descriptor']
+            native = self.val_native_sk if dataloader_idx == 0 else self.val_native_ph
+            native.append(output['native'].detach().cpu())
         else:
-            feat = self.model.extract_feature(image_tensor, "photo")
-            self.val_step_outputs_ph.append((feat, label))
+            feat = self.model.extract_feature(image_tensor, modality)
+        values = self.val_step_outputs_sk if dataloader_idx == 0 else self.val_step_outputs_ph
+        values.append((feat, label))
 
     def on_validation_epoch_end(self):
         query_features = torch.cat(
@@ -1048,9 +1141,14 @@ class ZS_SBIR(pl.LightningModule):
                 f"mAP@all: {mAP.item()}, P@{p_k}: {precision}, "
                 f"Best P@{p_k}: {self.best_precision}"
             )
+        if hasattr(self.model, 'region_head') and not self.trainer.sanity_checking:
+            from src.semantic_region_diagnostics import validation_diagnostics
+            validation_diagnostics(self, query_features, gallery_features, sketch_labels, photo_labels, mAP, precision)
         train_loss = self.trainer.callback_metrics.get("train_loss")
         if train_loss is not None:
             print(f"Train loss (epoch avg): {train_loss.item():.6f}")
 
         self.val_step_outputs_sk.clear()
         self.val_step_outputs_ph.clear()
+        self.val_native_sk.clear()
+        self.val_native_ph.clear()

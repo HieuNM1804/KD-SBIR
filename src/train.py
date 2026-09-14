@@ -6,6 +6,9 @@ os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 import argparse
 import random
+import hashlib
+import json
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -322,7 +325,60 @@ if __name__ == "__main__":
         default="teacher_visual_student_visual_only",
     )
 
+    parser.add_argument('--retrieval_head', choices=('main', 'semantic_region'), default='main')
+    parser.add_argument('--region_mode', choices=('semantic', 'uniform', 'random', 'global'), default='semantic')
+    parser.add_argument('--region_grid', type=int, default=2)
+    parser.add_argument('--region_bottleneck', type=int, default=64)
+    parser.add_argument('--region_beta', type=float, default=.5)
+    parser.add_argument('--region_temperature', type=float, default=.1)
+    parser.add_argument('--region_train_prompts', action='store_true')
+    parser.add_argument('--region_head_lr', type=float, default=1e-3)
+    parser.add_argument('--region_optimizer', choices=('adamw', 'sgd'), default='adamw')
+    parser.add_argument('--region_cache_dir', default='')
+    parser.add_argument('--region_teacher_batch_size', type=int, default=8)
+    parser.add_argument('--region_calibration_per_class', type=int, default=32)
+    parser.add_argument('--region_shard_size', type=int, default=4096)
+    parser.add_argument('--region_prepare_only', action='store_true')
+    parser.add_argument('--region_eval_teacher', action='store_true')
+    parser.add_argument('--region_spread_fraction', type=float, default=.5)
+    parser.add_argument('--region_diagnostic_interval', type=int, default=200)
+    for key, default in [('descriptor', 1.), ('region', 1.), ('gate', .1), ('reference', .1), ('spread', 1.)]:
+        parser.add_argument('--lambda_' + key, type=float, default=default)
     args = parser.parse_args()
+    if args.retrieval_head == 'semantic_region':
+        if args.backbone != 'ViT-B/32' or args.max_size != 224:
+            parser.error('First region implementation supports ViT-B/32 at 224 only.')
+        if not 1 <= args.region_grid <= 3:
+            parser.error('--region_grid supports 1..3; use 2 for matched controls.')
+        for key in ('region_bottleneck', 'region_teacher_batch_size', 'region_shard_size',
+                    'region_calibration_per_class', 'region_diagnostic_interval'):
+            if getattr(args, key) < 1:
+                parser.error(key + ' must be positive')
+        for key in ('region_head_lr', 'region_temperature', 'lr'):
+            if getattr(args, key) <= 0:
+                parser.error(key + ' must be positive')
+        if not 0 < args.region_beta <= 1 or not 0 <= args.region_spread_fraction <= 1:
+            parser.error('beta must be in (0,1]; spread fraction in [0,1]')
+        for key in ('descriptor', 'region', 'gate', 'reference', 'spread'):
+            if getattr(args, 'lambda_' + key) < 0:
+                parser.error('Loss weights must be nonnegative')
+        if args.lambda_descriptor <= 0:
+            parser.error('Descriptor KD must be active for this implementation')
+        if not args.region_train_prompts and (args.lambda_domain > 0 or args.lambda_modality > 0):
+            parser.error('Main loss ablations need --region_train_prompts; standalone uses domain=modality=0')
+        if not args.teacher_cache_path or args.rebuild_teacher_cache:
+            parser.error('Region preparation requires a persistent teacher_cache_path; rebuild teacher separately')
+        if not args.region_cache_dir:
+            args.region_cache_dir = str(Path(args.teacher_cache_path).parent / (args.dataset + '_semantic_regions_g' + str(args.region_grid)))
+    elif args.region_prepare_only or args.region_eval_teacher:
+        parser.error('Region preparation requires --retrieval_head semantic_region')
+    if args.ckpt_path and not Path(args.ckpt_path).is_file():
+        parser.error('Resume checkpoint does not exist: ' + args.ckpt_path)
+    args.training_source_sha256 = {name: hashlib.sha256(Path(name).read_bytes()).hexdigest()
+        for name in ('src/model.py', 'src/train.py', 'src/dataset.py', 'src/losses.py',
+                     'src/teacher_prompts.py', 'clip/model.py', 'src/semantic_region.py',
+                     'src/semantic_region_cache.py', 'src/semantic_region_diagnostics.py')}
+
     if args.teacher_prompt_seed is None:
         args.teacher_prompt_seed = args.seed
     if args.photo_text_kd_temperature is None:
@@ -421,11 +477,6 @@ if __name__ == "__main__":
     )
 
     model = ZS_SBIR(args=args, classnames=train_loader.dataset.all_categories)
-    if os.path.isfile(args.ckpt_path):
-        print(f"Resuming training from {args.ckpt_path}")
-        ckpt = torch.load(args.ckpt_path, map_location="cpu")
-        model.load_state_dict(ckpt["state_dict"], strict=False)
-
     model.cache_teacher_features(
         train_loader.dataset,
         val_sketch_loader,
@@ -435,4 +486,34 @@ if __name__ == "__main__":
         show_progress=args.progress,
     )
 
-    trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])
+    if args.retrieval_head == 'semantic_region':
+        from src.semantic_region_cache import prepare_region_cache
+        prepare_region_cache(model, train_loader.dataset, val_sketch_loader, val_photo_loader)
+        if args.region_prepare_only:
+            print('[Region KD] preparation complete; no student optimizer steps')
+            raise SystemExit(0)
+        if args.ckpt_path:
+            saved = torch.load(args.ckpt_path, map_location='cpu', weights_only=False)
+            recorded = saved.get('experiment_config', {}).get('args', {})
+            for key in ('retrieval_head', 'region_mode', 'region_grid', 'region_beta',
+                        'region_bottleneck', 'region_train_prompts', 'seed', 'n_ctx_visual', 'prompt_depth',
+                        'lambda_domain', 'lambda_modality', 'lambda_descriptor', 'lambda_region',
+                        'lambda_gate', 'lambda_reference', 'lambda_spread', 'region_spread_fraction',
+                        'region_optimizer', 'region_head_lr', 'lr', 'momentum', 'weight_decay',
+                        'batch_size', 'photo_text_kd_temperature', 'sketch_text_kd_temperature', 'kd_temperature'):
+                if recorded.get(key) != getattr(args, key):
+                    raise ValueError('Resume configuration differs: ' + key)
+            if saved['experiment_config']['region_target_metadata'] != args.region_target_metadata:
+                raise ValueError('Resume target cache differs')
+            model.load_state_dict(saved['state_dict'], strict=True)
+            del saved
+        train_loader.sampler.epoch_source = model
+        if not args.ckpt_path:
+            trainer.validate(model, dataloaders=[val_sketch_loader, val_photo_loader], verbose=False)
+    trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader], ckpt_path=args.ckpt_path or None)
+    final = Path('saved_models') / args.exp_name / 'final.ckpt'
+    trainer.save_checkpoint(str(final))
+    manifest = {'completed': True, 'args': vars(args), 'global_step': trainer.global_step,
+                'final_checkpoint': str(final), 'best_checkpoint': checkpoint_callback.best_model_path,
+                'best_P100': float(checkpoint_callback.best_model_score), 'source_sha256': args.training_source_sha256}
+    (final.parent / 'run.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')

@@ -27,7 +27,7 @@ class WorkerInvariantSampler(torch.utils.data.Sampler):
         self.epoch = 0
 
     def __iter__(self):
-        epoch = self.epoch
+        epoch = self.epoch_source.current_epoch if hasattr(self, 'epoch_source') else self.epoch
         self.epoch += 1
         generator = torch.Generator().manual_seed(sample_seed(self.seed, epoch, -1))
         indices = torch.randperm(len(self.dataset), generator=generator).tolist()
@@ -63,6 +63,7 @@ class TrainDataset(torch.utils.data.Dataset):
         self.photo_path_to_index = {}
         self.teacher_sketch_features = None
         self.teacher_photo_features = None
+        self.region_targets = None
 
         for category in self.all_categories:
             sketch_paths = sorted(
@@ -116,13 +117,22 @@ class TrainDataset(torch.utils.data.Dataset):
                 self.photo_path_to_index[img_path]
             ]
 
-        return (
+        result = (
             img_tensor,
             sk_tensor,
             teacher_photo_feature,
             teacher_sketch_feature,
             self.category_to_label[category],
         )
+        if self.region_targets is not None:
+            p = self.photo_path_to_index[img_path]
+            ph, sk = self.region_targets['photo'], self.region_targets['sketch']
+            result += (ph['crops'][p], sk['crops'][index],
+                       ph['semantic'][p], sk['semantic'][index],
+                       ph['prior'][p], sk['prior'][index],
+                       ph['random'][p], sk['random'][index],
+                       ph['reference'][p], sk['reference'][index])
+        return result
 
 
 class TeacherFeatureDataset(torch.utils.data.Dataset):
