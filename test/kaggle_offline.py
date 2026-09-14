@@ -13,7 +13,7 @@ import sys
 WORKING = Path('/kaggle/working')
 PROJECT = WORKING / 'KD-SBIR'
 EXPECTED_BRANCH = 'experiment/sketch-region-correspondence-kd'
-EXPECTED_COMMIT = 'SOURCE_COMMIT_PENDING'
+EXPECTED_COMMIT = '065b8d26e86cd81d2fc61d93cd76892654ec160d'
 EXPECTED_TASK = 'sketch_region_correspondence_kd'
 EXPECTED_ENTRYPOINT = 'src.train_correspondence'
 DFN_REPO = 'apple/DFN5B-CLIP-ViT-H-14'

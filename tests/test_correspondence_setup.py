@@ -1,6 +1,7 @@
 """Inspect Kaggle cells without executing their filesystem/network actions."""
 import ast
 from pathlib import Path
+import re
 from types import SimpleNamespace
 import unittest
 
@@ -24,6 +25,7 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(online['COMMIT'], offline['EXPECTED_COMMIT'])
         self.assertEqual(online['TASK'], offline['EXPECTED_TASK'])
         self.assertEqual(online['ENTRYPOINT'], offline['EXPECTED_ENTRYPOINT'])
+        self.assertIsNotNone(re.fullmatch(r'[0-9a-f]{40}', online['COMMIT']))
         for key in ('DFN_REPO', 'DFN_REVISION', 'DFN_FILENAME', 'DFN_SHA256', 'STUDENT_FILENAME', 'STUDENT_SHA256'):
             self.assertEqual(online[key], offline[key])
         self.assertEqual(len(online['DFN_SHA256']), 64)

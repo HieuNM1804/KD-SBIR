@@ -1,6 +1,7 @@
 SKETCH-REGION CORRESPONDENCE KD - KAGGLE RUN ORDER
 
 Branch: experiment/sketch-region-correspondence-kd
+Pinned training source: 065b8d26e86cd81d2fc61d93cd76892654ec160d
 Method: direction 1 only; raw 1024-D DFN5B relations supervise a 512-D
 student in candidate/region decision space. No feature alignment is used.
 

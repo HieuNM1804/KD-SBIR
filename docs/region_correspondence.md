@@ -1,6 +1,7 @@
 # Sketch-region correspondence KD
 
 Branch: `experiment/sketch-region-correspondence-kd`.
+Pinned Kaggle training source: `065b8d26e86cd81d2fc61d93cd76892654ec160d`.
 Parent: `experiment/semantic-region-attention-kd` at
 `c03b39e507074fc20907ed80799e295d91fd46c1`.
 This implements direction 1 only. Attribute prompts and counterfactual
