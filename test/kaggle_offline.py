@@ -13,7 +13,7 @@ import sys
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/attention-verified-counterfactual-kd"
-EXPECTED_COMMIT = '780a33d2cbf9a8b2691b1edd74783184c0fe8467'
+EXPECTED_COMMIT = 'df767c57ea53a3292639f35de2365748a19f8fd1'
 EXPECTED_TASK = "attention_verified_counterfactual_kd"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"

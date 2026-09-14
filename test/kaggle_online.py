@@ -30,7 +30,7 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/attention-verified-counterfactual-kd"
 # Pinned training source; this builder is distributed separately.
-COMMIT = '780a33d2cbf9a8b2691b1edd74783184c0fe8467'
+COMMIT = 'df767c57ea53a3292639f35de2365748a19f8fd1'
 TASK = "attention_verified_counterfactual_kd"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
