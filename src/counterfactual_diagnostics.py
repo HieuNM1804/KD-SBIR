@@ -181,7 +181,10 @@ class CounterfactualDiagnostics(Callback):
 
     def measure(self,trainer,module,stage):
         from src.counterfactual_retrieval_kd import avcrd_loss
-        with torch.random.fork_rng(devices=list(range(torch.cuda.device_count()))):
+        # Lightning validation hooks run inside inference_mode. Merely enabling
+        # grad would still yield empty epoch-end gradient probes. Disable it for
+        # this independent differentiable forward, then restore the outer mode.
+        with torch.inference_mode(False), torch.random.fork_rng(devices=list(range(torch.cuda.device_count()))):
             batch=module.transfer_batch_to_device(self.batch,module.device,0)
             named=[(n,p) for n,p in module.named_parameters() if p.requires_grad and '_visual_prompt.' in n]
             params=[p for _,p in named]
@@ -225,10 +228,19 @@ class CounterfactualDiagnostics(Callback):
             sc=similarity_field(features[1],features[0]).cpu();sm=similarity_field(masked,features[0]).cpu()
             tc=similarity_field(batch[-1]['clean'],features[2]).cpu()
             tm=similarity_field(batch[-1]['masked'][:,selected],features[2]).cpu()
-            sd=(sc-sm).numpy();td=(tc-tm).numpy()
+            sd=(sc-sm).numpy();actual_td=(tc-tm)
+            supervised_td=actual_td.roll(1,dims=0) if module.args.avcrd_objective=='shuffled_effect' else actual_td
+            td=supervised_td.numpy()
+            rows=[{'query_position':i,'gallery_position':j,
+                   'sketch_index':int(batch[-1]['sketch_index'][i]),
+                   'teacher_actual_delta':float(actual_td[i,j]),
+                   'teacher_supervised_delta':float(supervised_td[i,j]),
+                   'student_delta':float(sd[i,j])}
+                  for i in range(len(sd)) for j in range(sd.shape[1])]
+            write_csv(self.out/('pair_effects_'+stage+'.csv'),rows)
         fig,axes=plt.subplots(2,3,figsize=(15,8))
         for axis,field,title in [(axes[0,0],tc.numpy(),'Teacher clean field'),(axes[0,1],sc.numpy(),'Student clean field'),
-                                 (axes[1,0],td,'Teacher counterfactual delta'),(axes[1,1],sd,'Student counterfactual delta')]:
+                                 (axes[1,0],td,'Teacher supervised delta'),(axes[1,1],sd,'Student counterfactual delta')]:
             lim=max(float(torch.stack([tc.abs().max(),sc.abs().max()]).max()),1e-6) if 'clean' in title else max(float(abs(td).max()),float(abs(sd).max()),1e-6)
             im=axis.imshow(field,cmap='RdBu_r',vmin=-lim,vmax=lim)
             axis.set(title=title,xlabel='Photo position',ylabel='Sketch position');fig.colorbar(im,ax=axis,shrink=.7)
@@ -263,8 +275,8 @@ class CounterfactualDiagnostics(Callback):
         stages=list(dict.fromkeys(r['stage'] for r in self.gradients))
         if layers:
             fig,axes=plt.subplots(1,2,figsize=(max(12,len(stages)*2),max(6,len(layers)*.27)))
-            for axis,key,title in [(axes[0],'cosine','Main vs weighted effect gradient cosine'),
-                                   (axes[1],'cf_over_main','log10(weighted effect / main gradient norm)')]:
+            for axis,key,title in [(axes[0],'cosine','Main vs weighted AVCRD gradient cosine'),
+                                   (axes[1],'cf_over_main','log10(weighted AVCRD / main gradient norm)')]:
                 matrix=np.full((len(layers),len(stages)),np.nan)
                 for i,layer in enumerate(layers):
                     for j,stage in enumerate(stages):

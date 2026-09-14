@@ -239,6 +239,12 @@ class LifecycleTests(unittest.TestCase):
                     self.assertTrue((callback.out/'fields_epoch_2.png').is_file())
                     self.assertTrue((callback.out/'gradient_interaction.csv').is_file())
                     self.assertEqual(len(callback.epochs),3)
+                    epoch_gradients=[r for r in callback.gradients if r['global_step']>0 and r['group']=='all']
+                    self.assertEqual(len(epoch_gradients),2)
+                    for record in epoch_gradients:
+                        self.assertGreater(record['main_norm'],0)
+                        self.assertGreater(record['weighted_cf_norm'],0)
+                    self.assertTrue((callback.out/'pair_effects_epoch_2.csv').is_file())
                     checkpoint={};current.on_save_checkpoint(checkpoint)
                     self.assertEqual(checkpoint['experiment_config']['method'],'AVCRD')
             for name in states[0]:torch.testing.assert_close(states[0][name],states[1][name],atol=0,rtol=0)

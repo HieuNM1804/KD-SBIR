@@ -86,7 +86,7 @@ student sketch forward is added per train batch (none for geometry-only).
 
 Cache keys include teacher checkpoint SHA256, teacher configuration, sketch
 and photo content hashes, exact selected indices, photo bank indices, view
-parameters, seed, package versions and microbatch. Incompatible existing caches
+parameters, seed, package versions, view-source hashes and microbatch. Incompatible existing caches
 fail without replacement. Atomic temporary files are removed on serialization
 failure. A re-encoded clean teacher vector must agree with the original main
 cache (cosine >=0.999). The inherited main teacher cache format itself records
@@ -107,7 +107,8 @@ start, not optimizer/scheduler resume; use fresh runs for these comparisons.
   per-query AP/P@K, per-class summaries, and training plus validation wall time.
 - Fixed seen batch: clean/effect field alignment and RMS; native descriptor drift;
   main vs weighted AVCRD raw gradient cosine/norm for photo/sketch prompts and
-  every prompt parameter; clean and counterfactual similarity field heatmaps.
+  every prompt parameter; clean and counterfactual similarity field heatmaps
+  with shared teacher/student color scales; raw actual/supervised/student effect CSV.
 
 Diagnostics use `autograd.grad`, preserve RNG, do not step an optimizer and do
 not overwrite `.grad` buffers. Tests verify identical SGD states with diagnostics

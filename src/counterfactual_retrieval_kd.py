@@ -124,37 +124,6 @@ def attention_proposals(attention_map, ink_map, window, count, image_size, max_o
     return [(box, score_value, mass_value) for box, score_value, mass_value, _ in proposals]
 
 
-def matched_control_box(attention_map, ink_map, window, target_ink_mass, excluded_boxes, image_size):
-    """Choose a low-attention window with ink mass closest to the selected mask."""
-    grid = attention_map.shape[0]
-    attention = attention_map.float().clamp_min(0)
-    attention = attention / attention.sum().clamp_min(1e-12)
-    score = _window_sums(attention, window)
-    mass = _window_sums(ink_map.float().clamp_min(0), window)
-    median = score.median()
-    candidates = []
-    for row in range(score.shape[0]):
-        for col in range(score.shape[1]):
-            box = _grid_box(row, col, window, grid, image_size)
-            grid_box = (row, col, row + window, col + window)
-            if any(_overlap_fraction(grid_box, other) > 0.25 for other in excluded_boxes):
-                continue
-            low_attention_penalty = 0 if score[row, col] <= median else 1
-            candidates.append((
-                low_attention_penalty,
-                abs(float(mass[row, col]) - float(target_ink_mass)),
-                float(score[row, col]),
-                row,
-                col,
-                box,
-            ))
-    if not candidates:
-        raise RuntimeError("No matched control region is available")
-    candidates.sort(key=lambda item: item[:5])
-    item = candidates[0]
-    return item[-1], item[2], float(mass[item[3], item[4]])
-
-
 def similarity_field(query, gallery):
     if query.ndim != 2 or gallery.ndim != 2:
         raise ValueError("Retrieval fields require 2D feature tensors")

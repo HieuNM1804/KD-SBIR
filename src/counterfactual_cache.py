@@ -114,6 +114,8 @@ def validate_payload(payload,metadata,count,width):
 def prepare_cache(args,dataset,report_dir):
     preparation_started=time.perf_counter()
     import open_clip
+    import torchvision
+    import PIL
     from src.model import DFN5B_MODEL, DFN5B_PRETRAINED, TEACHER_CACHE_FORMAT_VERSION
     from src.teacher_prompts import TeacherPromptController
     path_teacher=Path(args.teacher_cache_path)
@@ -150,7 +152,11 @@ def prepare_cache(args,dataset,report_dir):
               'ink_threshold':args.avcrd_ink_threshold,'ink_softness':args.avcrd_ink_softness,
               'view_definition':'original_main_resize;soft_ink_whitening;no_crop;no_prompt_masking',
               'teacher_batch_size':args.avcrd_teacher_batch_size,
-              'torch':str(torch.__version__),'open_clip':getattr(open_clip,'__version__','unknown')}
+              'torch':str(torch.__version__),'open_clip':getattr(open_clip,'__version__','unknown'),
+              'torchvision':str(torchvision.__version__),'pillow':str(PIL.__version__),
+              'view_source_sha256':{name:file_sha256(Path(__file__).resolve().parent.parent/name)
+                    for name in ('src/dataset.py','src/teacher_prompts.py','src/attention_output_kd.py',
+                                 'src/counterfactual_retrieval_kd.py','src/counterfactual_cache.py')}}
     key=hashlib.sha256(json.dumps(metadata,sort_keys=True).encode()).hexdigest()[:16]
     path=Path(args.avcrd_cache_path) if args.avcrd_cache_path else path_teacher.parent/f'{args.dataset}_avcrd_{key}.pt'
     args.avcrd_cache_path=str(path);args.avcrd_target_metadata=metadata
