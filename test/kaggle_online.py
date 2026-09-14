@@ -1,16 +1,12 @@
-"""Build the offline Kaggle bundle for semantic-region attention KD.
+"""Build a pinned correspondence bundle; paste into Internet-enabled Kaggle.
 
-Run this notebook once with Internet enabled to download:
-  - Python wheels for offline installation
-  - Source repository (pinned commit)
-  - ViT-B/32 student checkpoint
-  - DFN5B ViT-H/14 teacher checkpoint
-
-Save the notebook version with output and expose its output as a Kaggle
-input dataset for the offline notebook.
+An uploaded sketch-region-correspondence-source.bundle takes precedence over
+GitHub. This makes the local, not-yet-pushed branch runnable on Kaggle.
 """
-
+from datetime import datetime
 from pathlib import Path
+from importlib import metadata
+import glob
 import hashlib
 import json
 import os
@@ -18,282 +14,149 @@ import shutil
 import subprocess
 import sys
 
-
-WORKING = Path("/kaggle/working")
-BUNDLE = WORKING / "semantic_region_bundle" / "offline_bundle"
-WHEELS = BUNDLE / "wheels"
-SOURCE = BUNDLE / "source"
-CLIP_CACHE = BUNDLE / "clip_cache"
-DFN_DIR = BUNDLE / "dfn5b_openclip"
-
-REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
-BRANCH = "experiment/semantic-region-attention-kd"
-# Pinned training source; this builder is distributed separately.
-COMMIT = "1e6312ef62f8656b720bf353d44d70f9ddf811c7"
-TASK = "semantic_region_attention_kd"
-ENTRYPOINT = "src.train"
-DATASET = "b20dccn616nguynhutun/sketchy"
-
-DFN_REPO = "apple/DFN5B-CLIP-ViT-H-14"
-DFN_FILENAME = "open_clip_pytorch_model.bin"
-DFN_REVISION = "11738501a1db6d5e0a3451a71ba100be02e577e6"
-DFN_SHA256 = (
-    "d67de50faa7f3ddce52fbab4f4656b046"
-    "86a0bb15c26ebd0144d375cfa08b8ae"
-)
-STUDENT_FILENAME = "ViT-B-32.pt"
-STUDENT_SHA256 = (
-    "40d365715913c9da98579312b702a82c1"
-    "8be219cc2a73407c4526f58eba950af"
-)
+os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+WORKING = Path('/kaggle/working')
+BUNDLE = WORKING / 'correspondence_bundle'
+BRANCH = 'experiment/sketch-region-correspondence-kd'
+COMMIT = 'SOURCE_COMMIT_PENDING'
+REPO = 'https://github.com/HieuNM1804/KD-SBIR.git'
+TASK = 'sketch_region_correspondence_kd'
+ENTRYPOINT = 'src.train_correspondence'
+REQUIREMENTS = ('open-clip-torch==3.2.0', 'pytorch-lightning==2.6.0', 'torchmetrics==1.8.2',
+                'lightning-utilities==0.15.2', 'huggingface-hub==0.36.2', 'ftfy', 'regex',
+                'tensorboard', 'packaging', 'tqdm', 'numpy==2.2.6', 'pillow==10.4.0')
+DFN_REPO = 'apple/DFN5B-CLIP-ViT-H-14'
+DFN_REVISION = '11738501a1db6d5e0a3451a71ba100be02e577e6'
+DFN_FILENAME = 'open_clip_pytorch_model.bin'
+DFN_SHA256 = 'd67de50faa7f3ddce52fbab4f4656b04686a0bb15c26ebd0144d375cfa08b8ae'
+STUDENT_FILENAME = 'ViT-B-32.pt'
+STUDENT_SHA256 = '40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af'
 
 
-def run(command, cwd):
+def run(command, cwd=WORKING):
     subprocess.run(command, cwd=cwd, check=True)
 
 
-def file_sha256(path):
+def sha256(path):
     digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for block in iter(lambda: file.read(16 * 1024 * 1024), b""):
+    with Path(path).open('rb') as stream:
+        for block in iter(lambda: stream.read(8 * 1024**2), b''):
             digest.update(block)
     return digest.hexdigest()
 
 
+def installed_dependency_closure(requirements):
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+    excluded = {'torch', 'torchvision', 'torchaudio', 'triton'}
+    pending = [Requirement(item) for item in requirements]
+    processed, pinned = set(), {}
+    while pending:
+        req = pending.pop()
+        name = canonicalize_name(req.name)
+        if name in excluded or name.startswith(('nvidia-', 'cuda-')):
+            continue
+        key = (name, tuple(sorted(req.extras)))
+        if key in processed:
+            continue
+        processed.add(key)
+        dist = metadata.distribution(name)
+        if req.specifier and not req.specifier.contains(dist.version, prereleases=True):
+            raise RuntimeError(f'Installed dependency does not satisfy {req}: {dist.version}')
+        pinned[name] = dist.version
+        for item in dist.requires or ():
+            child = Requirement(item)
+            if child.marker is None or any(child.marker.evaluate({'extra': extra}) for extra in ('', *req.extras)):
+                pending.append(child)
+    return pinned
+
+
 WORKING.mkdir(parents=True, exist_ok=True)
-os.chdir(WORKING)
 if BUNDLE.exists():
-    from datetime import datetime
-    backup = BUNDLE.with_name('offline_bundle_backup_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
+    if BUNDLE.resolve().parent != WORKING.resolve():
+        raise ValueError('Unexpected bundle target path')
+    backup = WORKING / ('correspondence_bundle_backup_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
     BUNDLE.rename(backup)
-    print('Previous bundle preserved:', backup)
-for directory in (WHEELS, SOURCE, CLIP_CACHE, DFN_DIR):
-    directory.mkdir(parents=True, exist_ok=True)
-print("[1/6] Clean bundle created:", BUNDLE)
+    print('Previous bundle retained:', backup)
+for directory in ('wheels', 'source', 'clip_cache', 'dfn5b_openclip'):
+    (BUNDLE / directory).mkdir(parents=True)
+requirements = BUNDLE / 'requirements.txt'
+requirements.write_text('\n'.join(REQUIREMENTS) + '\n', encoding='utf-8')
 
-requirements = """
-open-clip-torch==3.2.0
-pytorch-lightning==2.6.0
-torchmetrics==1.8.2
-lightning-utilities
-huggingface-hub
-ftfy
-regex
-tensorboard
-packaging
-tqdm
-numpy
-pillow
-matplotlib
-"""
-from importlib.metadata import version
-constraints_path = BUNDLE / 'kaggle_stack_constraints.txt'
-constraints_path.write_text('torch==' + version('torch').split('+')[0] + '\n' +
-                            'torchvision==' + version('torchvision').split('+')[0] + '\n', encoding='utf-8')
-requirements_path = BUNDLE / "requirements.txt"
-requirements_path.write_text(requirements.strip() + "\n", encoding="utf-8")
-run(
-    [
-        sys.executable,
-        "-m",
-        "pip",
-        "download",
-        "--dest",
-        str(WHEELS),
-        "--only-binary=:all:",
-        "-c",
-        str(constraints_path),
-        "-r",
-        str(requirements_path),
-    ],
-    WORKING,
-)
+# Respect the installed Kaggle CUDA stack; fail rather than replace it.
+stack = {}
+for name in ('torch', 'torchvision', 'torchaudio', 'triton'):
+    try:
+        stack[name] = metadata.version(name)
+    except metadata.PackageNotFoundError:
+        pass
+if 'torch' not in stack or 'torchvision' not in stack:
+    raise RuntimeError('Use a Kaggle image with its preinstalled torch/torchvision stack')
+constraints = BUNDLE / 'online_stack_constraints.txt'
+constraints.write_text('\n'.join(f'{name}=={version}' for name, version in stack.items()) + '\n', encoding='utf-8')
+run([sys.executable, '-m', 'pip', 'install', '-r', str(requirements), '-c', str(constraints)])
+assert stack == {name: metadata.version(name) for name in stack}, 'CUDA stack changed'
 
-# Kaggle already supplies its CUDA/PyTorch stack. Do not bundle a second stack.
-for pattern in (
-    "torch-*.whl",
-    "torchvision-*.whl",
-    "torchaudio-*.whl",
-    "triton-*.whl",
-    "nvidia_*.whl",
-    "cuda_*.whl",
-):
-    for wheel in WHEELS.glob(pattern):
-        print("Removing Kaggle-provided wheel:", wheel.name)
-        wheel.unlink()
+# Download the installed dependency closure WITHOUT ever downloading a second
+# torch/CUDA stack. Extras (e.g. fsspec[http]) are propagated through metadata.
+pinned = installed_dependency_closure(REQUIREMENTS)
+closure = BUNDLE / 'wheel_closure.txt'
+closure.write_text('\n'.join(f'{name}=={version}' for name, version in sorted(pinned.items())) + '\n', encoding='utf-8')
+run([sys.executable, '-m', 'pip', 'download', '--only-binary=:all:', '--no-deps',
+     '--dest', str(BUNDLE / 'wheels'), '-r', str(closure)])
+print('[1/4] Pinned dependency wheels:', len(list((BUNDLE / 'wheels').glob('*.whl'))))
 
-required_wheels = (
-    "open_clip_torch-*.whl",
-    "pytorch_lightning-*.whl",
-    "torchmetrics-*.whl",
-    "lightning_utilities-*.whl",
-    "huggingface_hub-*.whl",
-    "ftfy-*.whl",
-    "regex-*.whl",
-    "matplotlib-*.whl",
-)
-missing_wheels = [
-    pattern for pattern in required_wheels if not list(WHEELS.glob(pattern))
-]
-if missing_wheels:
-    raise FileNotFoundError(
-        "Missing required wheels:\n" + "\n".join(missing_wheels)
-    )
-print("[2/6] Wheels downloaded:", len(list(WHEELS.glob("*.whl"))))
-
-# These lightweight packages are needed by this online builder itself.
-run(
-    [
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "-q",
-        "huggingface-hub",
-        "ftfy",
-        "regex",
-        "packaging",
-    ],
-    WORKING,
-)
-
-project = SOURCE / "KD-SBIR"
-clone_args = [
-    "git",
-    "clone",
-    "--branch",
-    BRANCH,
-    "--single-branch",
-    REPO_URL,
-    str(project),
-]
-run(clone_args, WORKING)
-if COMMIT is not None:
-    run(["git", "checkout", "--detach", COMMIT], project)
-actual_commit = subprocess.check_output(
-    ["git", "rev-parse", "HEAD"], cwd=project, text=True
-).strip()
-if COMMIT is not None and actual_commit != COMMIT:
-    raise RuntimeError(
-        f"Repository commit mismatch: {actual_commit} != {COMMIT}"
-    )
-print("[3/6] Source commit:", actual_commit)
+source_bundles = []
+for depth in range(1, 6):
+    source_bundles.extend(Path(p) for p in glob.glob('/kaggle/input/' + '*/' * depth + 'sketch-region-correspondence-source.bundle'))
+source_bundles = sorted(set(source_bundles))
+if len(source_bundles) > 1:
+    raise RuntimeError('Attach exactly one correspondence source.bundle; multiple versions found')
+project = BUNDLE / 'source' / 'KD-SBIR'
+if source_bundles:
+    run(['git', 'bundle', 'verify', str(source_bundles[0])])
+    origin = str(source_bundles[0])
+    print('Using uploaded local branch:', origin)
+else:
+    origin = REPO
+    print('No local source.bundle found; GitHub branch must already be pushed')
+run(['git', 'clone', '--branch', BRANCH, '--single-branch', origin, str(project)])
+run(['git', 'checkout', '--detach', COMMIT], project)
+actual = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=project, text=True).strip()
+if actual != COMMIT:
+    raise RuntimeError('Source commit mismatch')
+sys.path.insert(0, str(project))
+from src.train_correspondence import SOURCE_FILES
+source_hashes = {name: sha256(project / name) for name in SOURCE_FILES}
+for name in ('tests/test_correspondence.py', 'tests/test_correspondence_setup.py', 'docs/region_correspondence.md',
+             'test/kaggle_online.py', 'test/kaggle_offline.py', 'test/kaggle_correspondence_prepare.ipy',
+             'test/kaggle_correspondence_train.ipy', 'test/kaggle_correspondence_report.py', 'test/RUN_ORDER.txt'):
+    source_hashes[name] = sha256(project / name)
+print('[2/4] Source validated:', actual)
 
 from huggingface_hub import hf_hub_download
-
-
-downloaded_dfn = Path(
-    hf_hub_download(
-        repo_id=DFN_REPO,
-        filename=DFN_FILENAME,
-        revision=DFN_REVISION,
-    )
-)
-dfn_target = DFN_DIR / DFN_FILENAME
-shutil.copy2(downloaded_dfn, dfn_target)
-actual_dfn_sha = file_sha256(dfn_target)
-if actual_dfn_sha != DFN_SHA256:
-    raise RuntimeError(
-        f"DFN5B checksum mismatch: {actual_dfn_sha} != {DFN_SHA256}"
-    )
-print(
-    "[4/6] DFN5B downloaded:",
-    dfn_target,
-    f"({dfn_target.stat().st_size / 1024**3:.3f} GiB)",
-)
-
-# Import the repository's vendored CLIP instead of an unrelated `clip` package.
-for module_name in list(sys.modules):
-    if module_name == "clip" or module_name.startswith("clip."):
-        del sys.modules[module_name]
-sys.path.insert(0, str(project))
+teacher = BUNDLE / 'dfn5b_openclip' / DFN_FILENAME
+shutil.copy2(hf_hub_download(DFN_REPO, filename=DFN_FILENAME, revision=DFN_REVISION), teacher)
+if sha256(teacher) != DFN_SHA256:
+    raise RuntimeError('DFN5B checksum mismatch')
+for name in list(sys.modules):
+    if name == 'clip' or name.startswith('clip.'):
+        del sys.modules[name]
 from clip import clip as project_clip
+student = BUNDLE / 'clip_cache' / STUDENT_FILENAME
+shutil.copy2(project_clip.download_model('ViT-B/32'), student)
+if sha256(student) != STUDENT_SHA256:
+    raise RuntimeError('Student checksum mismatch')
+print('[3/4] Teacher/student checkpoint hashes verified')
 
-
-downloaded_student = Path(project_clip.download_model("ViT-B/32"))
-student_target = CLIP_CACHE / STUDENT_FILENAME
-shutil.copy2(downloaded_student, student_target)
-actual_student_sha = file_sha256(student_target)
-if actual_student_sha != STUDENT_SHA256:
-    raise RuntimeError(
-        "ViT-B/32 checksum mismatch: "
-        f"{actual_student_sha} != {STUDENT_SHA256}"
-    )
-print(
-    "[5/6] ViT-B/32 downloaded:",
-    student_target,
-    f"({student_target.stat().st_size / 1024**2:.1f} MiB)",
-)
-
-required_paths = (
-    BUNDLE / "requirements.txt",
-    WHEELS,
-    project / ".git",
-    project / "clip" / "model.py",
-    project / "src" / "dataset.py",
-    project / "src" / "losses.py",
-    project / "src" / "model.py",
-    project / "src" / "teacher_prompts.py",
-    project / "src" / "train.py",
-    project / "src/semantic_region.py",
-    project / "src/semantic_region_cache.py",
-    project / "src/semantic_region_diagnostics.py",
-    project / "src/semantic_region_inference.py",
-    project / "tests/test_semantic_region.py",
-    project / "tests/test_semantic_region_cache.py",
-    project / "tests/test_semantic_region_integration.py",
-    project / "test/kaggle_region_prepare.ipy",
-    project / "test/kaggle_region_semantic_train.ipy",
-    project / "test/kaggle_region_uniform_train.ipy",
-    project / "test/kaggle_region_random_train.ipy",
-    project / "test/kaggle_region_global_train.ipy",
-    project / "test/kaggle_region_prompts_train.ipy",
-    project / "test/kaggle_main_baseline_train.ipy",
-    project / "test/kaggle_region_report.py",
-    dfn_target,
-    student_target,
-)
-missing_paths = [str(path) for path in required_paths if not path.exists()]
-if missing_paths:
-    raise FileNotFoundError(
-        "Offline bundle is incomplete. Missing:\n" + "\n".join(missing_paths)
-    )
-
-manifest = {
-    "repository": REPO_URL,
-    "branch": BRANCH,
-    "commit": actual_commit,
-    "task": TASK,
-    "entrypoint": ENTRYPOINT,
-    "dataset": DATASET,
-    "teacher_repo": DFN_REPO,
-    "teacher_revision": DFN_REVISION,
-    "teacher_filename": DFN_FILENAME,
-    "teacher_sha256": DFN_SHA256,
-    "teacher_size": dfn_target.stat().st_size,
-    "student_filename": STUDENT_FILENAME,
-    "student_sha256": STUDENT_SHA256,
-    "student_size": student_target.stat().st_size,
-    "python_version": sys.version,
-}
-(BUNDLE / "bundle_manifest.json").write_text(
-    json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
-    encoding="utf-8",
-)
-
-bundle_size = sum(
-    path.stat().st_size for path in BUNDLE.rglob("*") if path.is_file()
-)
-print("[6/6] Bundle validated")
-print("=" * 70)
-print("ONLINE SEMANTIC-REGION ATTENTION KD BUNDLE COMPLETE")
-print("=" * 70)
-print("Bundle:", BUNDLE)
-print("Branch:", BRANCH)
-print("Commit:", actual_commit)
-print("Entry point:", ENTRYPOINT)
-print("DFN5B SHA256:", actual_dfn_sha)
-print("Student SHA256:", actual_student_sha)
-print("Bundle size:", f"{bundle_size / 1024**3:.3f} GiB")
-print()
-print("Save Version -> Save & Run All -> Always save output.")
+manifest = {'repository': REPO, 'branch': BRANCH, 'commit': COMMIT, 'task': TASK, 'entrypoint': ENTRYPOINT,
+            'protocols': ['category', 'fg'], 'teacher_repo': DFN_REPO, 'teacher_revision': DFN_REVISION,
+            'teacher_filename': DFN_FILENAME, 'teacher_sha256': DFN_SHA256, 'teacher_size': teacher.stat().st_size,
+            'student_filename': STUDENT_FILENAME, 'student_sha256': STUDENT_SHA256, 'student_size': student.stat().st_size,
+            'source_sha256': source_hashes, 'requirements_sha256': sha256(requirements),
+            'wheel_sha256': {p.name: sha256(p) for p in (BUNDLE / 'wheels').glob('*.whl')},
+            'python_minor': list(sys.version_info[:2]), 'kaggle_stack': stack, 'dependency_versions': pinned}
+(BUNDLE / 'bundle_manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+print('[4/4] CORRESPONDENCE BUNDLE COMPLETE:', BUNDLE)
+print('Save Version -> Save & Run All -> Always save output.')
+print('Attach this correspondence_bundle output to the offline GPU notebook.')

@@ -1,0 +1,32 @@
+SKETCH-REGION CORRESPONDENCE KD - KAGGLE RUN ORDER
+
+Branch: experiment/sketch-region-correspondence-kd
+Method: direction 1 only; raw 1024-D DFN5B relations supervise a 512-D
+student in candidate/region decision space. No feature alignment is used.
+
+1. INTERNET-ON NOTEBOOK
+   - Attach sketch-region-correspondence-source.bundle from the delivery ZIP.
+   - Paste and run test/kaggle_online.py.
+   - Save Version -> Save & Run All -> Always save output.
+
+2. OFFLINE GPU NOTEBOOK
+   - Attach the saved correspondence_bundle output and the target dataset.
+   - Paste and run test/kaggle_offline.py.
+
+3. PREPARE TEACHER TARGETS
+   - Paste test/kaggle_correspondence_prepare.ipy.
+   - Set PROTOCOL to category or fg.
+   - Keep TEACHER_EPOCHS/TEACHER_N_CTX identical in all later runs.
+
+4. MATCHED STUDENT RUNS
+   - Paste test/kaggle_correspondence_train.ipy.
+   - Run fresh names for MODE=gt, global, uniform, teacher, shuffled.
+   - Change only MODE/run name inside a matched comparison series.
+   - Use at least seeds 42, 43, 44 before drawing a conclusion.
+
+5. REPORT
+   - Paste test/kaggle_correspondence_report.py.
+   - Download its diagnostics ZIP and best/last/final checkpoints separately.
+
+Read docs/region_correspondence.md for exact commands, protocol definitions,
+failure checks, resume rules, inference and interpretation caveats.

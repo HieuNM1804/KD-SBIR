@@ -1,3 +1,17 @@
+# Sketch-region correspondence distillation
+
+Current branch: `experiment/sketch-region-correspondence-kd`.
+New entry point: `python -m src.train_correspondence`.
+See [docs/region_correspondence.md](docs/region_correspondence.md) for the raw
+1024-to-512 decision-space method, category/FG protocols, Kaggle setup,
+matched controls, resume and teacher-free inference. The new method does
+not require an alignment matrix or matching teacher/student layers.
+
+The implementation and documentation below are the preserved parent baseline.
+They describe the old Q-aligned semantic-region method, NOT the new entry point.
+
+---
+
 # Semantic region attention distillation for ZS-SBIR
 
 Branch: `experiment/semantic-region-attention-kd`. Baseline: `main` at

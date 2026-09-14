@@ -1,0 +1,21 @@
+"""Paste AFTER offline setup. Change PROTOCOL in both prepare/train cells."""
+import os
+import subprocess
+import sys
+
+PROTOCOL = 'category'  # 'fg' for exact-instance Sketchy Basic
+TEACHER_EPOCHS = 0     # 0 original DFN5B; optional 2 for seen-selected prompts
+TEACHER_N_CTX = 3      # optional 10; keep identical in the train cell
+OUTPUT = '/kaggle/working/correspondence_runs'
+root = ('/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy' if PROTOCOL == 'category'
+        else '/kaggle/input/datasets/b20dccn616nguynhutun/sketchy-fg')
+dataset = 'sketchy_1' if PROTOCOL == 'category' else 'sketchy_2'
+os.chdir('/kaggle/working/KD-SBIR')
+command = [sys.executable, '-m', 'src.train_correspondence', '--root', root, '--dataset', dataset,
+           '--retrieval_protocol', PROTOCOL, '--fg_gallery', 'category', '--output_dir', OUTPUT,
+           '--teacher_pretrain_epochs', str(TEACHER_EPOCHS), '--teacher_n_ctx_visual', str(TEACHER_N_CTX),
+           '--teacher_prompt_depth', '12', '--teacher_prompt_lr', '2e-5',
+           '--correspondence_cache_dir', f'{OUTPUT}/correspondence_cache/{PROTOCOL}_t{TEACHER_EPOCHS}_ctx{TEACHER_N_CTX}',
+           '--prepare_only', '--audit_teacher']
+print(' '.join(command))
+subprocess.run(command, check=True)

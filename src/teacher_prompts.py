@@ -113,7 +113,11 @@ class TeacherPromptController(nn.Module):
                     x = torch.cat(
                         (x[:-self.n_ctx], prompt.transpose(0, 1)), dim=0
                     )
-            x = block(x)
+            if getattr(self, 'gradient_checkpointing', False) and torch.is_grad_enabled():
+                from torch.utils.checkpoint import checkpoint
+                x = checkpoint(block, x, use_reentrant=False)
+            else:
+                x = block(x)
 
         if not batch_first:
             x = x.transpose(0, 1)

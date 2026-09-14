@@ -1,7 +1,7 @@
-"""Restore semantic-region attention KD on offline Kaggle; setup only."""
-
-from pathlib import Path
+"""Restore pinned correspondence source/weights and run deterministic GPU tests."""
 from datetime import datetime
+from pathlib import Path
+from importlib import metadata
 import glob
 import hashlib
 import json
@@ -10,295 +10,102 @@ import shutil
 import subprocess
 import sys
 
+WORKING = Path('/kaggle/working')
+PROJECT = WORKING / 'KD-SBIR'
+EXPECTED_BRANCH = 'experiment/sketch-region-correspondence-kd'
+EXPECTED_COMMIT = 'SOURCE_COMMIT_PENDING'
+EXPECTED_TASK = 'sketch_region_correspondence_kd'
+EXPECTED_ENTRYPOINT = 'src.train_correspondence'
+DFN_REPO = 'apple/DFN5B-CLIP-ViT-H-14'
+DFN_REVISION = '11738501a1db6d5e0a3451a71ba100be02e577e6'
+DFN_FILENAME = 'open_clip_pytorch_model.bin'
+DFN_SHA256 = 'd67de50faa7f3ddce52fbab4f4656b04686a0bb15c26ebd0144d375cfa08b8ae'
+STUDENT_FILENAME = 'ViT-B-32.pt'
+STUDENT_SHA256 = '40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af'
+os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
-EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
-EXPECTED_BRANCH = "experiment/semantic-region-attention-kd"
-EXPECTED_COMMIT = "1e6312ef62f8656b720bf353d44d70f9ddf811c7"
-EXPECTED_TASK = "semantic_region_attention_kd"
-EXPECTED_ENTRYPOINT = "src.train"
-EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
 
-WORKING_ROOT = Path("/kaggle/working")
-WORKING_PROJECT = WORKING_ROOT / "KD-SBIR-AVKD"
-SKETCHY_ROOT = Path(
-    "/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy"
-)
-
-
-def file_sha256(path):
+def sha256(path):
     digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for block in iter(lambda: file.read(16 * 1024 * 1024), b""):
+    with Path(path).open('rb') as stream:
+        for block in iter(lambda: stream.read(8 * 1024**2), b''):
             digest.update(block)
     return digest.hexdigest()
 
 
-# â”€â”€ Phase 1: Locate and validate the offline bundle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+WORKING.mkdir(parents=True, exist_ok=True)
+matches = []
+reports = []
+for depth in range(1, 6):
+    for path in glob.glob('/kaggle/input/' + '*/' * depth + 'correspondence_bundle/bundle_manifest.json'):
+        candidate = json.loads(Path(path).read_text(encoding='utf-8'))
+        reports.append((path, candidate.get('branch'), candidate.get('commit')))
+        if (candidate.get('branch') == EXPECTED_BRANCH and candidate.get('commit') == EXPECTED_COMMIT
+                and candidate.get('task') == EXPECTED_TASK and candidate.get('entrypoint') == EXPECTED_ENTRYPOINT):
+            matches.append((Path(path).parent, candidate))
+if len(matches) != 1:
+    raise RuntimeError(f'Attach exactly one matching correspondence_bundle; matches={len(matches)}, inspected={reports}')
+bundle, manifest = matches[0]
+if list(sys.version_info[:2]) != manifest['python_minor']:
+    raise RuntimeError('Online/offline Python minor versions differ; rebuild wheels in the matching Kaggle image')
+if (manifest['teacher_repo'] != DFN_REPO or manifest['teacher_revision'] != DFN_REVISION
+        or manifest['teacher_filename'] != DFN_FILENAME or manifest['student_filename'] != STUDENT_FILENAME):
+    raise ValueError('Unexpected teacher/student checkpoint definitions')
+requirements = bundle / 'requirements.txt'
+if sha256(requirements) != manifest['requirements_sha256']:
+    raise RuntimeError('Requirements hash mismatch')
+for name, digest in manifest['wheel_sha256'].items():
+    if Path(name).name != name or not name.endswith('.whl') or sha256(bundle / 'wheels' / name) != digest:
+        raise RuntimeError('Invalid/mismatched wheel: ' + name)
+if not manifest['wheel_sha256']:
+    raise RuntimeError('No dependency wheels attached')
+teacher = bundle / 'dfn5b_openclip' / DFN_FILENAME
+student = bundle / 'clip_cache' / STUDENT_FILENAME
+for path, digest, size in ((teacher, DFN_SHA256, manifest['teacher_size']),
+                           (student, STUDENT_SHA256, manifest['student_size'])):
+    if path.stat().st_size != size or sha256(path) != digest:
+        raise RuntimeError('Checkpoint size/SHA256 mismatch: ' + str(path))
+source = bundle / 'source' / 'KD-SBIR'
+commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip()
+if commit != EXPECTED_COMMIT:
+    raise RuntimeError('Attached source commit mismatch')
+for name, digest in manifest['source_sha256'].items():
+    if '..' in Path(name).parts or Path(name).is_absolute() or sha256(source / name) != digest:
+        raise RuntimeError('Source hash mismatch: ' + name)
 
-WORKING_ROOT.mkdir(parents=True, exist_ok=True)
-os.chdir(WORKING_ROOT)
+stack = {name: metadata.version(name) for name in ('torch', 'torchvision')}
+constraint = WORKING / 'correspondence_stack_constraints.txt'
+constraint.write_text('\n'.join(f'{name}=={version}' for name, version in stack.items()) + '\n', encoding='utf-8')
+subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-index', '--find-links', str(bundle / 'wheels'),
+                '-r', str(requirements), '-c', str(constraint)], check=True)
+if stack != {name: metadata.version(name) for name in stack}:
+    raise RuntimeError('Kaggle CUDA stack changed')
 
-manifest_paths = []
-for pattern in (
-    "/kaggle/input/*/offline_bundle/bundle_manifest.json",
-    "/kaggle/input/*/*/offline_bundle/bundle_manifest.json",
-    "/kaggle/input/*/*/*/offline_bundle/bundle_manifest.json",
-    "/kaggle/input/*/*/*/*/offline_bundle/bundle_manifest.json",
-):
-    manifest_paths.extend(Path(path) for path in glob.glob(pattern))
-manifest_paths = sorted(set(manifest_paths))
-print("Manifest files found:", len(manifest_paths))
-
-matching_bundles = []
-manifest_reports = []
-for manifest_path in manifest_paths:
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except Exception as error:
-        manifest_reports.append(
-            f"- {manifest_path}\n"
-            f"  unreadable: {type(error).__name__}: {error}"
-        )
-        continue
-
-    manifest_reports.append(
-        f"- {manifest_path}\n"
-        f"  branch: {manifest.get('branch')}\n"
-        f"  commit: {manifest.get('commit')}\n"
-        f"  task: {manifest.get('task')}\n"
-        f"  entrypoint: {manifest.get('entrypoint')}\n"
-        f"  dataset: {manifest.get('dataset')}"
-    )
-    commit_ok = (
-        EXPECTED_COMMIT is None
-        or manifest.get("commit") == EXPECTED_COMMIT
-    )
-    if (
-        manifest.get("repository") == EXPECTED_REPOSITORY
-        and manifest.get("branch") == EXPECTED_BRANCH
-        and commit_ok
-        and manifest.get("task") == EXPECTED_TASK
-        and manifest.get("entrypoint") == EXPECTED_ENTRYPOINT
-        and manifest.get("dataset") == EXPECTED_DATASET
-    ):
-        matching_bundles.append((manifest_path, manifest))
-
-if not matching_bundles:
-    raise FileNotFoundError(
-        "Cannot find the required semantic-region attention KD bundle.\n\n"
-        f"Expected branch: {EXPECTED_BRANCH}\n"
-        f"Expected task: {EXPECTED_TASK}\n\n"
-        "Manifest files inspected:\n"
-        + ("\n".join(manifest_reports) if manifest_reports else "(none)")
-    )
-if len(matching_bundles) > 1:
-    print("Warning: matching bundle attached more than once; using the first.")
-
-manifest_path, manifest = matching_bundles[0]
-bundle = manifest_path.parent
-wheels = bundle / "wheels"
-source_project = bundle / "source" / "KD-SBIR"
-clip_cache = bundle / "clip_cache"
-dfn_source = bundle / "dfn5b_openclip" / manifest["teacher_filename"]
-student_source = clip_cache / manifest["student_filename"]
-print("Selected bundle:", bundle)
-print("Branch:", manifest["branch"])
-print("Commit:", manifest["commit"])
-
-
-# â”€â”€ Phase 2: Validate bundle contents â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-required_bundle_paths = (
-    bundle / "requirements.txt",
-    wheels,
-    source_project / ".git",
-    source_project / "clip" / "model.py",
-    source_project / "src" / "dataset.py",
-    source_project / "src" / "losses.py",
-    source_project / "src" / "model.py",
-    source_project / "src" / "teacher_prompts.py",
-    source_project / "src" / "train.py",
-    source_project / "src/semantic_region.py",
-    source_project / "src/semantic_region_cache.py",
-    source_project / "src/semantic_region_diagnostics.py",
-    source_project / "src/semantic_region_inference.py",
-    source_project / "tests/test_semantic_region.py",
-    source_project / "tests/test_semantic_region_cache.py",
-    source_project / "tests/test_semantic_region_integration.py",
-    source_project / "test/kaggle_region_prepare.ipy",
-    source_project / "test/kaggle_region_semantic_train.ipy",
-    source_project / "test/kaggle_region_uniform_train.ipy",
-    source_project / "test/kaggle_region_random_train.ipy",
-    source_project / "test/kaggle_region_global_train.ipy",
-    source_project / "test/kaggle_region_prompts_train.ipy",
-    source_project / "test/kaggle_main_baseline_train.ipy",
-    source_project / "test/kaggle_region_report.py",
-    dfn_source,
-    student_source,
-)
-missing_paths = [
-    str(path) for path in required_bundle_paths if not path.exists()
-]
-if missing_paths:
-    raise FileNotFoundError(
-        "Offline bundle is incomplete. Missing:\n" + "\n".join(missing_paths)
-    )
-wheel_files = list(wheels.glob("*.whl"))
-if not wheel_files:
-    raise FileNotFoundError(f"No wheel files found inside {wheels}")
-print("Offline wheels:", len(wheel_files))
-
-
-# â”€â”€ Phase 3: Install packages offline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-subprocess.run(
-    [
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "--no-index",
-        "--find-links",
-        str(wheels),
-        "open-clip-torch==3.2.0",
-        "pytorch-lightning==2.6.0",
-        "torchmetrics==1.8.2",
-        "lightning-utilities",
-        "huggingface-hub",
-        "ftfy",
-        "regex",
-        "tensorboard",
-        "packaging",
-        "tqdm",
-        "numpy",
-        "pillow",
-        "matplotlib",
-    ],
-    cwd=WORKING_ROOT,
-    check=True,
-)
-print("Offline Python packages installed")
-
-
-# â”€â”€ Phase 4: Validate checksums â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-if dfn_source.stat().st_size != manifest["teacher_size"]:
-    raise RuntimeError("DFN5B checkpoint size mismatch.")
-actual_dfn_sha = file_sha256(dfn_source)
-if actual_dfn_sha != manifest["teacher_sha256"]:
-    raise RuntimeError(
-        "DFN5B checksum mismatch:\n"
-        f"Expected: {manifest['teacher_sha256']}\n"
-        f"Actual:   {actual_dfn_sha}"
-    )
-
-if student_source.stat().st_size != manifest["student_size"]:
-    raise RuntimeError("ViT-B/32 checkpoint size mismatch.")
-actual_student_sha = file_sha256(student_source)
-if actual_student_sha != manifest["student_sha256"]:
-    raise RuntimeError(
-        "ViT-B/32 checksum mismatch:\n"
-        f"Expected: {manifest['student_sha256']}\n"
-        f"Actual:   {actual_student_sha}"
-    )
-
-
-# â”€â”€ Phase 5: Restore model caches â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-# OpenAI CLIP cache.
-student_cache = Path.home() / ".cache" / "clip"
-student_cache.mkdir(parents=True, exist_ok=True)
-student_target = student_cache / manifest["student_filename"]
-shutil.copy2(student_source, student_target)
-print("Student checkpoint:", student_target)
-
-# Hugging Face snapshot for offline open_clip.
-hf_home = WORKING_ROOT / "huggingface"
-hf_hub = hf_home / "hub"
-repo_cache_name = "models--" + manifest["teacher_repo"].replace("/", "--")
-repo_cache = hf_hub / repo_cache_name
-snapshot = repo_cache / "snapshots" / manifest["teacher_revision"]
+clip_cache = Path.home() / '.cache' / 'clip'
+clip_cache.mkdir(parents=True, exist_ok=True)
+shutil.copy2(student, clip_cache / STUDENT_FILENAME)
+hf_home = WORKING / 'huggingface'
+repo_cache = hf_home / 'hub' / ('models--' + DFN_REPO.replace('/', '--'))
+snapshot = repo_cache / 'snapshots' / DFN_REVISION
 snapshot.mkdir(parents=True, exist_ok=True)
-dfn_target = snapshot / manifest["teacher_filename"]
-shutil.copy2(dfn_source, dfn_target)
-refs = repo_cache / "refs"
-refs.mkdir(parents=True, exist_ok=True)
-(refs / "main").write_text(manifest["teacher_revision"], encoding="utf-8")
-
-os.environ["HF_HOME"] = str(hf_home)
-os.environ["HF_HUB_CACHE"] = str(hf_hub)
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
-os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
-os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-print("DFN5B checkpoint:", dfn_target)
-
-
-# â”€â”€ Phase 6: Copy source to working directory â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-os.chdir(WORKING_ROOT)
-if WORKING_PROJECT.exists():
-    existing = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=WORKING_PROJECT, text=True).strip()
-    changed = subprocess.run(["git", "diff", "--quiet", "HEAD", "--"], cwd=WORKING_PROJECT).returncode
-    if existing != manifest["commit"] or changed:
-        backup = WORKING_ROOT / ('KD-SBIR-AVKD_backup_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
-        WORKING_PROJECT.rename(backup)
-        print('Previous project and checkpoints preserved:', backup)
-if WORKING_PROJECT.exists():
-    print("Reusing existing project:", WORKING_PROJECT)
-else:
-    shutil.copytree(source_project, WORKING_PROJECT, symlinks=False)
-
-actual_commit = subprocess.check_output(
-    ["git", "rev-parse", "HEAD"], cwd=WORKING_PROJECT, text=True
-).strip()
-if actual_commit != manifest["commit"]:
-    raise RuntimeError("Restored source commit differs from the bundle manifest")
-print("Repository copied:", WORKING_PROJECT)
-print("Commit:", actual_commit)
-
-
-# â”€â”€ Phase 7: Validate dataset â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-for directory in (SKETCHY_ROOT / "sketch", SKETCHY_ROOT / "photo"):
-    if not directory.is_dir():
-        raise FileNotFoundError(f"Missing dataset directory: {directory}")
-print("Dataset:", SKETCHY_ROOT)
-
-
-# â”€â”€ Phase 8: Smoke test â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-smoke_test = """
-import os
-os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
-import torch, open_clip, pytorch_lightning, matplotlib
-print('PyTorch:', torch.__version__)
-print('OpenCLIP:', getattr(open_clip, '__version__', 'unknown'))
-print('Lightning:', pytorch_lightning.__version__)
-print('Matplotlib:', matplotlib.__version__)
-import unittest
-suite = unittest.defaultTestLoader.discover('tests', pattern='test_semantic_region*.py')
-result = unittest.TextTestRunner(verbosity=2).run(suite)
-if not result.wasSuccessful():
-    raise SystemExit('Semantic-region smoke test failed')
-print('Region alignment, attention gradients, checkpoint inference and sharded cache: OK')
-"""
-subprocess.run(
-    [sys.executable, "-c", smoke_test],
-    cwd=WORKING_PROJECT,
-    check=True,
-    env=os.environ.copy(),
-)
-
-print()
-print("=" * 70)
-print("OFFLINE SETUP COMPLETE â€” READY TO TRAIN")
-print("=" * 70)
-
-
-os.chdir(WORKING_PROJECT)
-print("Project:", WORKING_PROJECT)
-print('First run test/kaggle_region_prepare.ipy to evaluate teacher targets.')
-print('Controls: kaggle_region_global_train.ipy, kaggle_region_uniform_train.ipy.')
-print('Method: kaggle_region_semantic_train.ipy; export: kaggle_region_report.py.')
-print('Standalone commands use domain=modality=0 and frozen prompts by default.')
+shutil.copy2(teacher, snapshot / DFN_FILENAME)
+(repo_cache / 'refs').mkdir(parents=True, exist_ok=True)
+(repo_cache / 'refs' / 'main').write_text(DFN_REVISION, encoding='utf-8')
+os.environ.update(HF_HOME=str(hf_home), HF_HUB_CACHE=str(hf_home / 'hub'), HF_HUB_OFFLINE='1',
+                  TRANSFORMERS_OFFLINE='1', HF_HUB_DISABLE_TELEMETRY='1')
+if PROJECT.exists():
+    if PROJECT.resolve().parent != WORKING.resolve():
+        raise ValueError('Unexpected working project path; refusing to move it')
+    backup = WORKING / ('KD-SBIR_backup_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
+    PROJECT.rename(backup)
+    print('Previous project/checkpoints retained:', backup)
+shutil.copytree(source, PROJECT)
+os.chdir(PROJECT)
+subprocess.run([sys.executable, '-c', "import torch; assert torch.cuda.is_available(), 'Enable Kaggle GPU'; print('GPU:', torch.cuda.get_device_name(0))"], check=True)
+subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_correspondence*.py', '-v'], check=True)
+subprocess.run([sys.executable, '-m', EXPECTED_ENTRYPOINT, '--help'], check=True, stdout=subprocess.DEVNULL)
+print('CORRESPONDENCE SETUP COMPLETE:', PROJECT)
+print('Branch:', EXPECTED_BRANCH, 'source:', EXPECTED_COMMIT)
+print('Run the preparation cell, then GT/global/teacher controls from docs/region_correspondence.md.')
+print('Category root: /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy')
+print('FG root: /kaggle/input/datasets/b20dccn616nguynhutun/sketchy-fg (must directly contain sketch/ and photo/)')

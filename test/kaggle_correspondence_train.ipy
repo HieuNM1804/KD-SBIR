@@ -1,0 +1,27 @@
+"""Fresh matched runs: change MODE and run name; teacher config matches prep."""
+import os
+import subprocess
+import sys
+
+PROTOCOL = 'category'  # 'fg' to match FG preparation
+MODE = 'teacher'      # gt / global / uniform / teacher / shuffled
+SEED = 42
+TEACHER_EPOCHS = 0
+TEACHER_N_CTX = 3
+OUTPUT = '/kaggle/working/correspondence_runs'
+root = ('/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy' if PROTOCOL == 'category'
+        else '/kaggle/input/datasets/b20dccn616nguynhutun/sketchy-fg')
+dataset = 'sketchy_1' if PROTOCOL == 'category' else 'sketchy_2'
+os.chdir('/kaggle/working/KD-SBIR')
+command = [sys.executable, '-m', 'src.train_correspondence', '--root', root, '--dataset', dataset,
+           '--retrieval_protocol', PROTOCOL, '--fg_gallery', 'category', '--output_dir', OUTPUT,
+           '--teacher_pretrain_epochs', str(TEACHER_EPOCHS), '--teacher_n_ctx_visual', str(TEACHER_N_CTX),
+           '--teacher_prompt_depth', '12', '--teacher_prompt_lr', '2e-5',
+           '--correspondence_cache_dir', f'{OUTPUT}/correspondence_cache/{PROTOCOL}_t{TEACHER_EPOCHS}_ctx{TEACHER_N_CTX}',
+           '--correspondence_mode', MODE, '--exp_name', f'{PROTOCOL}_{MODE}_s{SEED}',
+           '--seed', str(SEED), '--batch_size', '64', '--classes_per_batch', '4', '--epochs', '5',
+           '--n_ctx_visual', '3', '--prompt_depth', '12', '--region_grid', '2',
+           '--region_head_lr', '1e-3', '--lambda_retrieval', '1', '--lambda_rank', '.5',
+           '--lambda_correspondence', '.25']
+print(' '.join(command))
+subprocess.run(command, check=True)
