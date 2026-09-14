@@ -1,2 +1,8 @@
 __pycache__/
 *.py[cod]
+
+artifacts/
+tb_logs/
+saved_models/
+teacher_cache/
+*.log

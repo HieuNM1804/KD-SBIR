@@ -65,6 +65,7 @@ class TrainDataset(torch.utils.data.Dataset):
         self.teacher_photo_features = None
         self.attention_sketch_features = None
         self.attention_photo_features = None
+        self.counterfactual_targets = None
 
         for category in self.all_categories:
             sketch_paths = sorted(
@@ -96,6 +97,11 @@ class TrainDataset(torch.utils.data.Dataset):
         self.attention_sketch_features = sketch_features
         self.attention_photo_features = photo_features
         
+    def set_counterfactual_targets(self, payload):
+        if payload['metadata']['indices'] != list(range(len(self))):
+            raise ValueError('Training requires complete, aligned AVCRD targets')
+        self.counterfactual_targets = payload
+
     def __getitem__(self, sample_key):
         if isinstance(sample_key, tuple):
             epoch, index = sample_key
@@ -136,6 +142,14 @@ class TrainDataset(torch.utils.data.Dataset):
                 self.attention_photo_features[self.photo_path_to_index[img_path]],
                 self.attention_sketch_features[index],
             )
+        if self.counterfactual_targets is not None:
+            payload = self.counterfactual_targets
+            result += ({
+                'sketch_index': index,
+                'clean': payload['clean'][index],
+                'masked': torch.cat([payload['masked'][index], payload['first_masked'][index]], dim=0),
+                'boxes': torch.cat([payload['boxes'][index], payload['first_boxes'][index]], dim=0),
+            },)
         return result
 
 

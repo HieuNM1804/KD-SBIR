@@ -1,3 +1,10 @@
+# Experimental AVCRD branch
+
+See [method and diagnostics](docs/avcrd.md) and [Kaggle run order](test/RUN_ORDER.txt).
+AVCRD uses teacher attention to propose sketch ink interventions and distils their
+measured cross-modal retrieval-field response into native student descriptors.
+The clean geometry term is a control; novelty/metric gains are not established by code.
+
 # KD-SBIR: Teacher Visual Prompts, Student Visual-Only Prompts
 
 This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from

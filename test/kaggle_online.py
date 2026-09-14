@@ -1,4 +1,4 @@
-"""Build the offline Kaggle bundle for patch attention output KD.
+"""Build the offline Kaggle bundle for attention-verified counterfactual retrieval KD.
 
 Run this notebook once with Internet enabled to download:
   - Python wheels for offline installation
@@ -11,6 +11,7 @@ input dataset for the offline notebook.
 """
 
 from pathlib import Path
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -20,17 +21,17 @@ import sys
 
 
 WORKING = Path("/kaggle/working")
-BUNDLE = WORKING / "avkd_bundle" / "offline_bundle"
+BUNDLE = WORKING / ("avcrd_bundle_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")) / "offline_bundle"
 WHEELS = BUNDLE / "wheels"
 SOURCE = BUNDLE / "source"
 CLIP_CACHE = BUNDLE / "clip_cache"
 DFN_DIR = BUNDLE / "dfn5b_openclip"
 
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
-BRANCH = "experiment/patch-attention-output-kd"
+BRANCH = "experiment/attention-verified-counterfactual-kd"
 # Pinned training source; this builder is distributed separately.
-COMMIT = "570754181baaa8a650a3a04aebf3a138885234b0"
-TASK = "patch_attention_output_kd"
+COMMIT = None
+TASK = "attention_verified_counterfactual_kd"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
 
@@ -62,8 +63,6 @@ def file_sha256(path):
 
 WORKING.mkdir(parents=True, exist_ok=True)
 os.chdir(WORKING)
-if BUNDLE.exists():
-    shutil.rmtree(BUNDLE)
 for directory in (WHEELS, SOURCE, CLIP_CACHE, DFN_DIR):
     directory.mkdir(parents=True, exist_ok=True)
 print("[1/6] Clean bundle created:", BUNDLE)
@@ -228,10 +227,21 @@ required_paths = (
     project / "src" / "train.py",
     project / "src" / "attention_output_kd.py",
     project / "src" / "attention_output_cache.py",
+    project / "src" / "counterfactual_retrieval_kd.py",
+    project / "src" / "counterfactual_cache.py",
+    project / "src" / "counterfactual_diagnostics.py",
     project / "src" / "av_gradient_audit.py",
     project / "tests" / "test_attention_output_kd.py",
     project / "tests" / "test_av_sketch_only.py",
+    project / "tests" / "test_counterfactual_retrieval.py",
+    project / "tests" / "test_counterfactual_commands.py",
     project / "test" / "kaggle_av_sketch_only_cell.py",
+    project / "test" / "RUN_ORDER.txt",
+    project / "test" / "kaggle_avcrd_audit.ipy",
+    project / "test" / "kaggle_avcrd_train.ipy",
+    project / "test" / "kaggle_avcrd_report.py",
+    project / "test" / "kaggle_avcrd_unverified_control.ipy",
+    project / "docs" / "avcrd.md",
     dfn_target,
     student_target,
 )
@@ -268,7 +278,7 @@ bundle_size = sum(
 )
 print("[6/6] Bundle validated")
 print("=" * 70)
-print("ONLINE PATCH ATTENTION OUTPUT KD BUNDLE COMPLETE")
+print("ONLINE AVCRD BUNDLE COMPLETE")
 print("=" * 70)
 print("Bundle:", BUNDLE)
 print("Branch:", BRANCH)

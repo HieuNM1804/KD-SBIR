@@ -1,4 +1,4 @@
-"""Restore patch attention output KD on offline Kaggle; setup only."""
+"""Restore attention-verified counterfactual retrieval KD on offline Kaggle; setup only."""
 
 from pathlib import Path
 from datetime import datetime
@@ -12,9 +12,9 @@ import sys
 
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
-EXPECTED_BRANCH = "experiment/patch-attention-output-kd"
-EXPECTED_COMMIT = "570754181baaa8a650a3a04aebf3a138885234b0"
-EXPECTED_TASK = "patch_attention_output_kd"
+EXPECTED_BRANCH = "experiment/attention-verified-counterfactual-kd"
+EXPECTED_COMMIT = None
+EXPECTED_TASK = "attention_verified_counterfactual_kd"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
 
@@ -85,7 +85,7 @@ for manifest_path in manifest_paths:
 
 if not matching_bundles:
     raise FileNotFoundError(
-        "Cannot find the required patch attention output KD bundle.\n\n"
+        "Cannot find the required attention-verified counterfactual retrieval KD bundle.\n\n"
         f"Expected branch: {EXPECTED_BRANCH}\n"
         f"Expected task: {EXPECTED_TASK}\n\n"
         "Manifest files inspected:\n"
@@ -120,10 +120,21 @@ required_bundle_paths = (
     source_project / "src" / "train.py",
     source_project / "src" / "attention_output_kd.py",
     source_project / "src" / "attention_output_cache.py",
+    source_project / "src" / "counterfactual_retrieval_kd.py",
+    source_project / "src" / "counterfactual_cache.py",
+    source_project / "src" / "counterfactual_diagnostics.py",
     source_project / "src" / "av_gradient_audit.py",
     source_project / "tests" / "test_attention_output_kd.py",
     source_project / "tests" / "test_av_sketch_only.py",
+    source_project / "tests" / "test_counterfactual_retrieval.py",
+    source_project / "tests" / "test_counterfactual_commands.py",
     source_project / "test" / "kaggle_av_sketch_only_cell.py",
+    source_project / "test" / "RUN_ORDER.txt",
+    source_project / "test" / "kaggle_avcrd_audit.ipy",
+    source_project / "test" / "kaggle_avcrd_train.ipy",
+    source_project / "test" / "kaggle_avcrd_report.py",
+    source_project / "test" / "kaggle_avcrd_unverified_control.ipy",
+    source_project / "docs" / "avcrd.md",
     dfn_source,
     student_source,
 )
@@ -270,10 +281,12 @@ print('Matplotlib:', matplotlib.__version__)
 import unittest
 suite = unittest.defaultTestLoader.discover('tests', pattern='test_attention_output_kd.py')
 suite.addTests(unittest.defaultTestLoader.discover('tests', pattern='test_av_sketch_only.py'))
+suite.addTests(unittest.defaultTestLoader.discover('tests', pattern='test_counterfactual_retrieval.py'))
+suite.addTests(unittest.defaultTestLoader.discover('tests', pattern='test_counterfactual_commands.py'))
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 if not result.wasSuccessful():
-    raise SystemExit('Attention output KD smoke test failed')
-print('AV extraction, prompt gradients, cached targets and ablations: OK')
+    raise SystemExit('AVCRD smoke test failed')
+print('AVCRD erasure, teacher response targets, prompt gradients, controls and non-mutating diagnostics: OK')
 """
 subprocess.run(
     [sys.executable, "-c", smoke_test],
@@ -290,5 +303,5 @@ print("=" * 70)
 
 os.chdir(WORKING_PROJECT)
 print("Project:", WORKING_PROJECT)
-print("Ready: python -m src.train with --av_objective cosine --av_modality sketch_only")
-print("Keep --lambda_av 1 and --lambda_modality 1 for the sketch-only ablation.")
+print("Ready: python -m src.train with --lambda_avcrd 1")
+print("Run test/kaggle_avcrd_audit.ipy first; see test/RUN_ORDER.txt.")

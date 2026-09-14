@@ -1,0 +1,49 @@
+NHÁNH: experiment/attention-verified-counterfactual-kd
+PHƯƠNG PHÁP: AVCRD — attention đề xuất vùng mực sketch, global teacher retrieval
+response kiểm chứng, student học thay đổi trường tương đồng sketch→photo.
+
+1. ONLINE (Internet ON): paste toàn bộ kaggle_online.py vào một cell.
+   Save Version -> Save & Run All -> Always save output.
+   Attach output avcrd_bundle_*/offline_bundle vào notebook GPU offline + Sketchy.
+
+2. OFFLINE (Internet OFF): paste toàn bộ kaggle_offline.py vào một cell.
+   Setup chỉ restore/install/test. Source/checkpoint cũ được backup nếu khác.
+   Teacher cache ngoài project /kaggle/working/teacher_cache được giữ để tái dùng.
+
+3. AUDIT TRƯỚC: chạy kaggle_avcrd_audit.ipy (2 sketches/seen class).
+   Không train student. Chạy kaggle_avcrd_report.py để xem/download teacher probe.
+   Xem first-proposal median ratio, win fraction, ink matching và montage.
+   Gate exploratory: >=1.20 median ratio và >=65% wins trước verification.
+   Gate fail: gửi ZIP, kiểm tra hypothesis/proposal trước khi build full targets.
+   Gate pass chưa chứng minh metrics; cần các control tiếp theo.
+
+4. FULL PREP: kaggle_avcrd_prepare.ipy. Cache full khác cache audit.
+   Lần đầu encode 1+2K teacher views/sketch; K=3. Về sau reuse cache, không load DFN.
+   avcrd_window=4 là cửa sổ 4x4 teacher patches trên grid 16x16, 56x56px.
+   Nó KHÔNG phải av_region_grid của regional pooling cũ.
+
+5. COMPARISON ƯU TIÊN (mỗi cell là fresh student, seed42, tên run riêng):
+   a. kaggle_avcrd_main_baseline.ipy: main = 3 domain + 1 modality.
+   b. kaggle_avcrd_train.ipy: main + counterfactual effect; clean_weight=0.
+   c. kaggle_avcrd_random_control.ipy: cùng loss, random ink shortlist, cùng budget.
+   d. kaggle_avcrd_unverified_control.ipy: first attention region, không verify.
+   e. kaggle_avcrd_shuffle_control.ipy: cùng masks, effect targets bị cyclic shuffle.
+
+6. STANDALONE (sau matched main comparison hoặc chạy song song trong notebook riêng):
+   a. kaggle_avcrd_geometry_control.ipy: clean geometry only; domain=modality=0.
+   b. kaggle_avcrd_standalone.ipy: clean geometry + counterfactual effect.
+   Phần clean geometry là control chung, không claim novelty.
+
+7. REPORT: kaggle_avcrd_report.py gom các run avcrd_*, xuất ZIP + comparison chart/CSV.
+   Gửi tôi ZIP. Không đưa checkpoints/teacher tensors vào diagnostics ZIP.
+   Checkpoints: /kaggle/working/KD-SBIR-AVKD/saved_models/<run>/final.ckpt và best.
+
+ĐÁNH GIÁ: chỉ coi contribution hữu ích khi main+effect > main và hơn controls;
+standalone phải hơn geometry-only. Giảm loss không bảo đảm tăng mAP.
+Unseen full-gallery metrics, fixed SEEN-batch effects/gradients được ghi rõ scope.
+Để kiểm tra robustness, đổi student seed (43/44) ở các cell so sánh cùng nhau.
+Giữ teacher_prompt_seed=42, dùng teacher cache tương ứng teacher config/seed main;
+main teacher metadata hiện cũng chứa seed nên cần cache mới nếu đổi --seed.
+Không tái dùng cache AVCRD khi đổi ink/window/K/bank/seed/config. Chọn tên cache mới.
+Không dùng --ckpt_path cho fresh ablation; inherited flag chỉ warm-start weights.
+Xem docs/avcrd.md để biết loss, storage, provenance và giới hạn claim/protocol.

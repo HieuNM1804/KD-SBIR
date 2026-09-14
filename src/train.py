@@ -3,6 +3,7 @@ import os
 # Required by deterministic CUDA matrix multiplication. It must be set before
 # importing torch and before CUDA is initialized.
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+os.environ.setdefault("MPLBACKEND", "Agg")
 
 import argparse
 import random
@@ -347,7 +348,28 @@ if __name__ == "__main__":
                         help='Teacher batch size when building AV targets')
     parser.add_argument('--prepare_kd_cache_only', action='store_true',
                         help='Prepare teacher/AV caches and exit before student training')
+    from src.counterfactual_cache import add_arguments, validate_arguments
+    add_arguments(parser)
+    parser.add_argument('--no_avcrd_diagnostics', dest='avcrd_diagnostics', action='store_false', default=True,
+                        help='Disable fixed-batch probes, initial full validation and covariance diagnostics.')
     args = parser.parse_args()
+    validate_arguments(parser, args)
+    import hashlib
+    source_files = ('clip/model.py', 'src/model.py', 'src/train.py', 'src/dataset.py',
+                    'src/losses.py', 'src/teacher_prompts.py', 'src/attention_output_kd.py',
+                    'src/counterfactual_retrieval_kd.py', 'src/counterfactual_cache.py',
+                    'src/counterfactual_diagnostics.py')
+    from pathlib import Path
+    project_dir = Path(__file__).resolve().parent.parent
+    import subprocess
+    try:
+        args.source_git_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=project_dir, text=True).strip()
+    except (OSError, subprocess.CalledProcessError):
+        args.source_git_commit = "unavailable"
+    args.training_source_sha256 = {
+        name: hashlib.sha256((project_dir / name).read_bytes()).hexdigest()
+        for name in source_files
+    }
     import math
     if any(not math.isfinite(x) or x < 0 for x in (args.lambda_av, args.lambda_global_feature)):
         parser.error('New KD weights must be finite and nonnegative')
@@ -449,9 +471,14 @@ if __name__ == "__main__":
         from src.av_gradient_audit import AVGradientAudit
         callbacks.append(AVGradientAudit())
 
+    if args.avcrd_diagnostics:
+        from src.counterfactual_diagnostics import CounterfactualDiagnostics
+        callbacks.append(CounterfactualDiagnostics())
+
     trainer = Trainer(
         accelerator="gpu",
         devices=1,
+        num_sanity_val_steps=0 if args.avcrd_diagnostics else 2,
         min_epochs=1,
         max_epochs=args.epochs,
         benchmark=False,
@@ -482,8 +509,18 @@ if __name__ == "__main__":
         # Building/loading auxiliary caches must not change training randomness.
         with torch.random.fork_rng(devices=list(range(torch.cuda.device_count()))):
             prepare_av_cache(args, train_loader.dataset)
-    if args.prepare_kd_cache_only:
+    if args.lambda_avcrd > 0 or args.avcrd_prepare_only:
+        from src.counterfactual_cache import prepare_cache
+        with torch.random.fork_rng(devices=list(range(torch.cuda.device_count()))):
+            prepare_cache(args, train_loader.dataset, Path(logger.log_dir) / 'avcrd_teacher_probe')
+        print('[AVCRD] native global descriptors; '
+              f'clean/effect weights={args.avcrd_clean_weight}/{args.avcrd_effect_weight}; '
+              f'selection={args.avcrd_selection}; lambda={args.lambda_avcrd}', flush=True)
+    if args.prepare_kd_cache_only or args.avcrd_prepare_only:
         print('[KD Cache] preparation complete; student training skipped')
     else:
+        if args.avcrd_diagnostics:
+            # Full-set initial reference; skip partial sanity metrics in diagnostics.
+            trainer.validate(model, [val_sketch_loader, val_photo_loader], verbose=False)
         trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])
         save_final_checkpoint(trainer, args.exp_name)

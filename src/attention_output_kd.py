@@ -88,6 +88,86 @@ class PatchOutputCapture(AbstractContextManager):
         return False
 
 
+def patch_attention_contributions(attn, query, key, value, patch_count):
+    """Return per-patch A[CLS,patch] V_patch W_O and mean head attention.
+
+    Contributions have shape [batch, patches, width]. Summing over patches is
+    the patch-only CLS attention output used by ``patch_attention_output``.
+    The softmax denominator still contains CLS, image, and prompt tokens.
+    """
+    if not isinstance(attn, nn.MultiheadAttention):
+        raise TypeError("Patch contribution capture requires nn.MultiheadAttention")
+    if attn.bias_k is not None or attn.bias_v is not None or attn.add_zero_attn:
+        raise ValueError("Extra MHA bias/zero tokens are unsupported")
+    if attn.training and attn.dropout:
+        raise ValueError("Stochastic attention dropout is unsupported")
+    if not attn.batch_first:
+        query, key, value = (x.transpose(0, 1) for x in (query, key, value))
+    if key.shape[1] != value.shape[1] or not 0 < patch_count <= key.shape[1] - 1:
+        raise ValueError("Invalid image patch span")
+    width, heads = attn.embed_dim, attn.num_heads
+    dim = width // heads
+    if attn.in_proj_weight is None:
+        wq, wk, wv = attn.q_proj_weight, attn.k_proj_weight, attn.v_proj_weight
+    else:
+        wq, wk, wv = attn.in_proj_weight.chunk(3, dim=0)
+    bq, bk, bv = ((None,) * 3 if attn.in_proj_bias is None else attn.in_proj_bias.chunk(3))
+    with torch.autocast(device_type=query.device.type, enabled=False):
+        def linear(x, w, b):
+            return F.linear(x.float(), w.float(), None if b is None else b.float())
+        batch = query.shape[0]
+        q = linear(query[:, :1], wq, bq).reshape(batch, 1, heads, dim).transpose(1, 2)
+        k = linear(key, wk, bk).reshape(batch, -1, heads, dim).transpose(1, 2)
+        v = linear(value[:, 1:1 + patch_count], wv, bv).reshape(
+            batch, patch_count, heads, dim
+        ).transpose(1, 2)
+        attention = (q @ k.transpose(-1, -2) / math.sqrt(dim)).softmax(-1)
+        patch_attention = attention[..., 0, 1:1 + patch_count]
+        weighted = (patch_attention.unsqueeze(-1) * v).permute(0, 2, 1, 3).reshape(
+            batch, patch_count, width
+        )
+        contributions = F.linear(weighted, attn.out_proj.weight.float(), None)
+        return contributions, patch_attention.mean(dim=1)
+
+
+class PatchContributionCapture(AbstractContextManager):
+    """Scoped final-block capture of per-patch AVWO contributions."""
+
+    def __init__(self, visual):
+        self.attn = visual.transformer.resblocks[-1].attn
+        self.patch_count = visual.positional_embedding.shape[0] - 1
+        self.values = []
+        self.attention = []
+        self.handle = None
+
+    def __enter__(self):
+        if self.handle is not None:
+            raise RuntimeError("Capture cannot be nested on itself")
+        self.values.clear()
+        self.attention.clear()
+
+        def hook(module, args, kwargs):
+            if (kwargs.get("attn_mask") is not None
+                    or kwargs.get("key_padding_mask") is not None
+                    or kwargs.get("is_causal", False)):
+                raise ValueError("Masked visual attention is unsupported")
+            q, k, v = [args[i] if len(args) > i else kwargs[name]
+                       for i, name in enumerate(("query", "key", "value"))]
+            contributions, attention = patch_attention_contributions(
+                module, q, k, v, self.patch_count
+            )
+            self.values.append(contributions)
+            self.attention.append(attention)
+
+        self.handle = self.attn.register_forward_pre_hook(hook, with_kwargs=True)
+        return self
+
+    def __exit__(self, *args):
+        self.handle.remove()
+        self.handle = None
+        return False
+
+
 def make_projector(input_dim, output_dim, seed):
     # Auxiliary heads must not perturb the baseline's RNG stream.
     with torch.random.fork_rng(devices=[]):

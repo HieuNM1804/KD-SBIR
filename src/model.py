@@ -45,6 +45,7 @@ def _retrieval_metrics(
     query_labels,
     gallery_labels,
     dataset,
+    per_query=None,
 ):
     query_labels = query_labels.cpu()
     gallery_labels = gallery_labels.cpu()
@@ -79,6 +80,10 @@ def _retrieval_metrics(
             target,
             top_k=p_k,
         )
+
+        if per_query is not None:
+            per_query.append({'query_index':index,'label':int(query_labels[index]),
+                              'AP':float(ap[index]),'precision':float(precision_at_k[index])})
 
     return ap.mean(), precision_at_k.mean(), map_k, p_k
 
@@ -920,6 +925,7 @@ class ZS_SBIR(pl.LightningModule):
             teacher=teacher,
         )
 
+        self.lambda_avcrd = getattr(args, "lambda_avcrd", 0.0)
         self.lambda_av = getattr(args, "lambda_av", 0.0)
         self.lambda_global_feature = getattr(args, "lambda_global_feature", 0.0)
         self.av_objective = getattr(args, "av_objective", "cosine")
@@ -1019,14 +1025,44 @@ class ZS_SBIR(pl.LightningModule):
         )
 
     def on_save_checkpoint(self, checkpoint):
+        checkpoint.setdefault("hyper_parameters", {}).update(args=dict(vars(self.args)), classnames=list(getattr(self.model, "classnames", ())))
         checkpoint["experiment_config"] = {
             "args": dict(vars(self.args)),
             "av_objective": getattr(self, "av_objective", "cosine"),
             "av_modality": getattr(self, "av_modality", "both"),
             "av_temperature": getattr(self, "av_temperature", 0.07),
             "av_target_metadata": getattr(self.args, "av_target_metadata", None),
+            "method": "AVCRD" if getattr(self, "lambda_avcrd", 0) > 0 else "main",
+            "avcrd_target_metadata": getattr(self.args, "avcrd_target_metadata", None),
+            "training_source_sha256": getattr(self.args, "training_source_sha256", {}),
         }
     
+    def counterfactual_loss(self, batch, features, return_masked=False):
+        from src.counterfactual_retrieval_kd import erase_ink_batch, avcrd_loss
+        if not isinstance(batch[-1], dict) or 'masked' not in batch[-1]:
+            raise RuntimeError('AVCRD targets missing; prepare the complete counterfactual cache before fitting')
+        target = batch[-1]
+        selection = {'verified': 0, 'random': 1, 'attention_first': 2, 'random_first': 3}[self.args.avcrd_selection]
+        # Counterfactual views use the exact main normalized sketch transform.
+        images = erase_ink_batch(batch[1], target['boxes'][:, selection],
+                                self.args.avcrd_ink_threshold, self.args.avcrd_ink_softness)
+        if self.args.avcrd_effect_weight > 0:
+            masked = self.model.encode_student_image(images, 'sketch')
+        else:
+            # Geometry-only control adds no extra student forward.
+            masked = features[1]
+        loss, statistics = avcrd_loss(
+            features[1], masked, features[0], target['clean'],
+            target['masked'][:, selection], features[2],
+            clean_weight=self.args.avcrd_clean_weight,
+            effect_weight=self.args.avcrd_effect_weight,
+            magnitude_weight=self.args.avcrd_magnitude_weight,
+            shuffle_effect=self.args.avcrd_objective == 'shuffled_effect',
+        )
+        if return_masked:
+            return loss, statistics, masked
+        return loss, statistics
+
     def training_step(self, batch, batch_idx):
         from src.attention_output_kd import PatchOutputCapture, feature_cosine_kd
         if self.lambda_av > 0:
@@ -1054,6 +1090,12 @@ class ZS_SBIR(pl.LightningModule):
             )
             loss = loss + self.lambda_global_feature * global_loss
             self.log('GLOBAL_FEATURE_KD', global_loss, on_step=False, on_epoch=True, prog_bar=True)
+        if getattr(self, 'lambda_avcrd', 0) > 0:
+            cf_loss, cf_statistics = self.counterfactual_loss(batch, features)
+            loss = loss + self.lambda_avcrd * cf_loss
+            self.log('AVCRD', cf_loss, on_step=False, on_epoch=True, prog_bar=True)
+            for name, value in cf_statistics.items():
+                self.log('CF_' + name, value, on_step=False, on_epoch=True)
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         bar_names = {
             "domain_kd": "DOMAIN",
@@ -1092,13 +1134,16 @@ class ZS_SBIR(pl.LightningModule):
             [labels for _, labels in self.val_step_outputs_ph]
         ).cpu()
 
+        diagnostic_rows = [] if getattr(self.args, 'avcrd_diagnostics', False) else None
         mAP, precision, map_k, p_k = _retrieval_metrics(
             query_features,
             gallery_features,
             sketch_labels,
             photo_labels,
             self.args.dataset,
+            per_query=diagnostic_rows,
         )
+        self._avcrd_retrieval_rows = diagnostic_rows
         self.log("mAP", mAP, on_step=False, on_epoch=True)
         self.log("precision", precision, on_step=False, on_epoch=True)
         if self.global_step > 0:
@@ -1121,5 +1166,11 @@ class ZS_SBIR(pl.LightningModule):
         if train_loss is not None:
             print(f"Train loss (epoch avg): {train_loss.item():.6f}")
 
+        if getattr(self.args, 'avcrd_diagnostics', False):
+            from src.counterfactual_diagnostics import feature_statistics
+            self._avcrd_validation_statistics = {
+                'sketch': feature_statistics(query_features, sketch_labels),
+                'photo': feature_statistics(gallery_features, photo_labels),
+            }
         self.val_step_outputs_sk.clear()
         self.val_step_outputs_ph.clear()
