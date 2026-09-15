@@ -61,6 +61,11 @@ def cache_report(payload, dataset, out, args):
             for index, name in enumerate(TARGET_NAMES)
         },
         "preparation_seconds": payload.get("preparation_seconds"),
+        "teacher_compatibility_preflight": payload.get("teacher_compatibility_preflight"),
+        "teacher_compatibility_full": payload.get("teacher_compatibility_full"),
+        "teacher_compatibility_full_acceptable": payload.get(
+            "teacher_compatibility_full_acceptable"
+        ),
         "notes": [
             "Retrieval evidence is gradient-times-residual for similarity to the seen-class photo prototype, gated by final CLS attention and ink mass.",
             "Attention is a raw CLS-attention control; random uses the same ink support and erasure budget.",

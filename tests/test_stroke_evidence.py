@@ -90,6 +90,18 @@ class StrokeEvidenceTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(erased).all())
         self.assertEqual(tuple(patch_ink_mass(images, 2).shape), (1, 4))
 
+    def test_teacher_compatibility_uses_distribution_not_single_outlier(self):
+        from src.stroke_evidence_cache import (
+            _compatibility_is_acceptable,
+            _compatibility_statistics,
+        )
+        values = torch.ones(1000)
+        values[0] = 0.90
+        statistics = _compatibility_statistics(values)
+        self.assertTrue(_compatibility_is_acceptable(statistics))
+        systematic = _compatibility_statistics(torch.full((1000,), 0.98))
+        self.assertFalse(_compatibility_is_acceptable(systematic))
+
     def test_main_head_matches_original_prompted_visual_path(self):
         from argparse import Namespace
         from clip.model import CLIP

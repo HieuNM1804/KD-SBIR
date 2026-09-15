@@ -16,6 +16,8 @@ BASELINE: main gốc = 3*domain KD + 1*modality KD, descriptor global CLIP.
    local teacher evidence và exact-budget masked teacher descriptors.
    Cache chung: /kaggle/working/teacher_cache/sketchy1_rsed_s42_m10_g1.pt.
    Xem teacher_target_summary.png và teacher_evidence_examples.png trong log dir.
+   Nếu đang dùng bundle cũ pin commit cdf68b4 và gặp guard cosine sau khi chạy 100%,
+   chạy một lần kaggle_rsed_cache_hotfix.py rồi retry prep. Setup mới không cần hotfix.
 
 4. MATCHED COMPARISON ƯU TIÊN, mỗi cell là fresh student seed 42:
    a. kaggle_main_baseline_train.ipy

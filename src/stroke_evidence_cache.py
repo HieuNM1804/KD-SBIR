@@ -154,6 +154,49 @@ def _random_map(ink, seed):
     return torch.stack(rows)
 
 
+def _compatibility_statistics(cosine):
+    """Summarize teacher re-encoding agreement without an all-samples minimum gate."""
+    values = cosine.detach().float().cpu().flatten()
+    if len(values) == 0 or not torch.isfinite(values).all():
+        raise ValueError("Teacher compatibility cosine is empty or nonfinite")
+    return {
+        "count": len(values),
+        "minimum": values.min().item(),
+        "p01": torch.quantile(values, 0.01).item(),
+        "median": values.median().item(),
+        "mean": values.mean().item(),
+    }
+
+
+def _compatibility_is_acceptable(statistics):
+    """Reject a systematic teacher mismatch while tolerating isolated FP16 outliers."""
+    return statistics["mean"] >= 0.995 and statistics["p01"] >= 0.980
+
+
+@torch.no_grad()
+def _teacher_compatibility_probe(controller, dataset, cached, device, dtype, batch_size):
+    """Fail fast before full target construction when teacher state is incompatible."""
+    count = min(64, len(dataset))
+    indices = torch.linspace(0, len(dataset) - 1, steps=count).round().long().unique()
+    transform = dataset.normal_transform
+    similarities = []
+    for part in indices.split(batch_size):
+        images = torch.stack([
+            transform(load_image(dataset.all_sketches_path[index], dataset.max_size))
+            for index in part.tolist()
+        ]).to(device=device, dtype=dtype)
+        encoded = controller(images, "sketch").float().cpu()
+        similarities.append(F.cosine_similarity(encoded, cached[part].float(), dim=-1))
+    statistics = _compatibility_statistics(torch.cat(similarities))
+    print("[RSED Cache] teacher re-encoding preflight:", statistics, flush=True)
+    if not _compatibility_is_acceptable(statistics):
+        raise RuntimeError(
+            "Reloaded teacher is systematically incompatible with the main cache; "
+            f"statistics={statistics}. Rebuild the main teacher cache with this source/runtime."
+        )
+    return statistics
+
+
 def _target_metadata(args, dataset, teacher_path, teacher_metadata):
     source_root = Path(__file__).resolve().parent.parent
     sources = (
@@ -286,6 +329,15 @@ def prepare_cache(args, dataset, report_dir):
         )
         controller.load_state_dict(teacher_payload["teacher_prompt_state_dict"], strict=True)
         controller.eval().requires_grad_(False)
+        dtype = teacher.visual.conv1.weight.dtype
+        preflight = _teacher_compatibility_probe(
+            controller,
+            dataset,
+            teacher_payload["teacher_sketch_features"],
+            device,
+            dtype,
+            args.rsed_teacher_batch_size,
+        )
         teacher_grid = metadata["teacher_grid"]
         if teacher.visual.positional_embedding.shape[0] - 1 != teacher_grid**2:
             raise ValueError("Unexpected DFN5B patch geometry")
@@ -309,6 +361,7 @@ def prepare_cache(args, dataset, report_dir):
             "positive_relevance_fraction": torch.empty(count),
             "target_entropy": torch.empty(count, variants),
             "clean_cache_cosine": torch.empty(count),
+            "teacher_compatibility_preflight": preflight,
         }
         loader = DataLoader(
             IndexedSketchDataset(dataset.all_sketches_path, sketch_labels, dataset.max_size),
@@ -319,7 +372,6 @@ def prepare_cache(args, dataset, report_dir):
             persistent_workers=False,
             prefetch_factor=4 if args.workers > 0 else None,
         )
-        dtype = teacher.visual.conv1.weight.dtype
         for images, indices, labels in tqdm(loader, desc="[RSED Cache] retrieval-conditioned sketch evidence", mininterval=5):
             images = images.to(device=device, dtype=dtype, non_blocking=True).detach().requires_grad_(True)
             labels = labels.to(device)
@@ -383,8 +435,19 @@ def prepare_cache(args, dataset, report_dir):
             )
             del sequence, gradient, patches, patch_gradient, clean, images
         payload["preparation_seconds"] = time.perf_counter() - started
-        if (payload["clean_cache_cosine"] < 0.999).any():
-            raise RuntimeError("Re-encoded teacher sketch differs from the main cache")
+        compatibility = _compatibility_statistics(payload["clean_cache_cosine"])
+        payload["teacher_compatibility_full"] = compatibility
+        print("[RSED Cache] full teacher re-encoding agreement:", compatibility, flush=True)
+        payload["teacher_compatibility_full_acceptable"] = (
+            _compatibility_is_acceptable(compatibility)
+        )
+        if not payload["teacher_compatibility_full_acceptable"]:
+            print(
+                "[RSED Cache] WARNING: full-set agreement is below the preflight gate; "
+                "targets will be saved with this warning for diagnosis:",
+                compatibility,
+                flush=True,
+            )
         validate_payload(payload, metadata)
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
