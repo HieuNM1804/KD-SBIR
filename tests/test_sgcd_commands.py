@@ -1,0 +1,52 @@
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+TEST = ROOT / 'test'
+CACHE = '/kaggle/working/teacher_cache/sketchy1_sgcd_s42_k4_m10.pt'
+
+
+class SgcdCommandTest(unittest.TestCase):
+    def read(self, name):
+        return (TEST / name).read_text(encoding='utf-8')
+
+    def test_main_is_exact_baseline(self):
+        text = self.read('kaggle_main_baseline_train.ipy')
+        self.assertIn('--retrieval_head main', text)
+        self.assertIn('--lambda_domain 3.0', text)
+        self.assertIn('--lambda_modality 1.0', text)
+        self.assertNotIn('--lambda_sgcd ', text)
+
+    def test_audit_precedes_full_preparation(self):
+        audit = self.read('kaggle_sgcd_audit.ipy')
+        prepare = self.read('kaggle_sgcd_prepare.ipy')
+        self.assertIn('--sgcd_audit_only', audit)
+        self.assertNotIn('--sgcd_force_prepare', audit)
+        self.assertIn('--sgcd_prepare_only', prepare)
+        for text in (audit, prepare):
+            self.assertIn(CACHE, text)
+            self.assertIn('--sgcd_min_effect_ratio 1.15', text)
+            self.assertIn('--sgcd_min_win_rate 0.60', text)
+            self.assertIn('--sgcd_max_random_map_cosine 0.75', text)
+
+    def test_primary_and_controls_share_all_non_target_settings(self):
+        expected = {
+            'kaggle_sgcd_train.ipy': 'verified',
+            'kaggle_sgcd_local_control.ipy': 'local',
+            'kaggle_sgcd_random_control.ipy': 'random',
+            'kaggle_sgcd_shuffle_control.ipy': 'shuffled',
+        }
+        for name, target in expected.items():
+            text = self.read(name)
+            self.assertIn(CACHE, text)
+            self.assertIn(f'--sgcd_target {target}', text)
+            self.assertIn('--lambda_domain 3.0', text)
+            self.assertIn('--lambda_modality 1.0', text)
+            self.assertIn('--lambda_sgcd_where 1.0', text)
+        standalone = self.read('kaggle_sgcd_standalone.ipy')
+        self.assertIn('--lambda_domain 0.0', standalone)
+        self.assertIn('--lambda_modality 0.0', standalone)
+
+
+if __name__ == '__main__':
+    unittest.main()

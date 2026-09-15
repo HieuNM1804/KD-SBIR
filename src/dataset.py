@@ -63,6 +63,7 @@ class TrainDataset(torch.utils.data.Dataset):
         self.photo_path_to_index = {}
         self.teacher_sketch_features = None
         self.teacher_photo_features = None
+        self.stroke_graph_targets = None
 
         for category in self.all_categories:
             sketch_paths = sorted(
@@ -84,6 +85,16 @@ class TrainDataset(torch.utils.data.Dataset):
             raise ValueError("Photo feature cache has the wrong length.")
         self.teacher_sketch_features = sketch_features
         self.teacher_photo_features = photo_features
+
+    def set_stroke_graph_targets(self, payload):
+        expected = len(self.all_sketches_path)
+        required = (
+            "maps", "mask_priorities", "teacher_evidence",
+            "teacher_masked", "confidence",
+        )
+        if any(key not in payload or len(payload[key]) != expected for key in required):
+            raise ValueError("Stroke-graph cache has the wrong length or fields.")
+        self.stroke_graph_targets = {key: payload[key] for key in required}
 
     def __len__(self):
         return len(self.all_sketches_path)
@@ -116,13 +127,19 @@ class TrainDataset(torch.utils.data.Dataset):
                 self.photo_path_to_index[img_path]
             ]
 
-        return (
+        result = (
             img_tensor,
             sk_tensor,
             teacher_photo_feature,
             teacher_sketch_feature,
             self.category_to_label[category],
         )
+        if self.stroke_graph_targets is None:
+            return result
+        return result + ({
+            key: value[index]
+            for key, value in self.stroke_graph_targets.items()
+        },)
 
 
 class TeacherFeatureDataset(torch.utils.data.Dataset):

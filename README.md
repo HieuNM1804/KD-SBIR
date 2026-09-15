@@ -60,3 +60,9 @@ checkpoints are also ranked by unseen P@K instead of mAP. Ties keep the earlier
 teacher epoch. Neither state cloning nor checkpoint serialization consumes RNG.
 Because unseen labels determine both selections, this setting has test-set
 model-selection leakage and is not a strict inductive ZS-SBIR protocol.
+
+# SGCD experiment branch
+
+This branch adds photo-conditioned, causally verified stroke-graph distillation while preserving the original main path under `--retrieval_head main`.
+
+See `docs/sgcd.md` and `test/RUN_ORDER.txt`.

@@ -1,0 +1,66 @@
+from datetime import datetime
+
+RUN_NAME = "sgcd_shuffle_control_s42_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+%cd /kaggle/working/KD-SBIR-AVKD
+
+!python -m src.train \
+    --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
+    --dataset sketchy_1 \
+    --epochs 5 \
+    --workers 8 \
+    --batch_size 64 \
+    --test_batch_size 1024 \
+    --n_ctx_visual 3 \
+    --prompt_depth 12 \
+    --teacher_pretrain_epochs 1 \
+    --teacher_cache_path /kaggle/working/teacher_cache/sketchy1_teacher_1ep.pt \
+    --teacher_pretrain_batch_size 64 \
+    --teacher_n_ctx_visual 10 \
+    --teacher_prompt_depth 12 \
+    --teacher_prompt_std 0.02 \
+    --teacher_prompt_lr 3e-2 \
+    --teacher_prompt_seed 42 \
+    --teacher_prompt_gradient_checkpointing \
+    --teacher_momentum 0.9 \
+    --teacher_weight_decay 1e-3 \
+    --lambda_teacher_retrieval 1.5 \
+    --teacher_triplet_margin 0.2 \
+    --photo_text_kd_temperature 0.15 \
+    --sketch_text_kd_temperature 0.02 \
+    --lr 1e-2 \
+    --momentum 0.9 \
+    --weight_decay 5e-4 \
+    --seed 42 \
+    --retrieval_head sgcd \
+    --sgcd_cache_path /kaggle/working/teacher_cache/sketchy1_sgcd_s42_k4_m10.pt \
+    --sgcd_skeleton_grid 28 \
+    --sgcd_max_paths 4 \
+    --sgcd_photo_representatives 2 \
+    --sgcd_local_topk_patches 4 \
+    --sgcd_proposal_topk 3 \
+    --sgcd_teacher_batch_size 4 \
+    --sgcd_mask_fraction 0.10 \
+    --sgcd_audit_samples 512 \
+    --sgcd_min_effect_ratio 1.15 \
+    --sgcd_min_win_rate 0.60 \
+    --sgcd_max_random_map_cosine 0.75 \
+    --lambda_sgcd 1.0 \
+    --lambda_sgcd_where 1.0 \
+    --lambda_sgcd_what 0.25 \
+    --lambda_sgcd_effect 0.25 \
+    --lambda_sgcd_anchor 0.20 \
+    --sgcd_effect_magnitude_weight 0.25 \
+    --sgcd_beta 0.10 \
+    --sgcd_bottleneck 128 \
+    --sgcd_head_lr 3e-3 \
+    --sgcd_temperature 0.07 \
+    --sgcd_graph_steps 0 \
+    --sgcd_graph_mix 0.0 \
+    --sgcd_warmup_epochs 0.5 \
+    --sgcd_decay_start_epoch 3.0 \
+    --sgcd_diagnostics \
+    --sgcd_target shuffled \
+    --lambda_domain 3.0 \
+    --lambda_modality 1.0 \
+    --exp_name {RUN_NAME} \
+    --progress
