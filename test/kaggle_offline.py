@@ -13,7 +13,7 @@ import sys
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/retrieval-conditioned-stroke-evidence-distillation"
-EXPECTED_COMMIT = "cdf68b4c707fbaf86f45fad505f292364b304bbc"
+EXPECTED_COMMIT = "2533cc70f0cce24ebbba97ae936a1190151fb890"
 EXPECTED_TASK = "retrieval_conditioned_stroke_evidence_distillation"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
@@ -132,6 +132,7 @@ required_bundle_paths = (
     source_project / "test" / "kaggle_rsed_shuffle_control.ipy",
     source_project / "test" / "kaggle_rsed_standalone.ipy",
     source_project / "test" / "kaggle_rsed_report.py",
+    source_project / "test" / "kaggle_rsed_cache_hotfix.py",
     source_project / "docs" / "rsed.md",
     dfn_source,
     student_source,

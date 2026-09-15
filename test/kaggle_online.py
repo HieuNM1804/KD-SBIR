@@ -25,7 +25,7 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/retrieval-conditioned-stroke-evidence-distillation"
 # Pinned training source; this builder is distributed separately.
-COMMIT = "cdf68b4c707fbaf86f45fad505f292364b304bbc"
+COMMIT = "2533cc70f0cce24ebbba97ae936a1190151fb890"
 TASK = "retrieval_conditioned_stroke_evidence_distillation"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
@@ -234,6 +234,7 @@ required_paths = (
     project / "test" / "kaggle_rsed_shuffle_control.ipy",
     project / "test" / "kaggle_rsed_standalone.ipy",
     project / "test" / "kaggle_rsed_report.py",
+    project / "test" / "kaggle_rsed_cache_hotfix.py",
     project / "docs" / "rsed.md",
     dfn_target,
     student_target,
