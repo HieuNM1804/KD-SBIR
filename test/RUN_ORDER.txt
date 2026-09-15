@@ -1,0 +1,50 @@
+NHÁNH: experiment/retrieval-conditioned-stroke-evidence-distillation
+PHƯƠNG PHÁP: RSED — Retrieval-Conditioned Stroke Evidence Distillation
+BASELINE: main gốc = 3*domain KD + 1*modality KD, descriptor global CLIP.
+
+1. ONLINE (Internet ON): paste toàn bộ kaggle_online.py vào một cell.
+   Save Version -> Save & Run All -> Always save output.
+   Attach output rsed_bundle_*/offline_bundle vào notebook GPU offline cùng Sketchy.
+
+2. OFFLINE (Internet OFF): paste toàn bộ kaggle_offline.py vào một cell.
+   Setup restore đúng source commit, cài wheels, model cache và chạy smoke tests.
+   Project/checkpoint cũ được backup nếu source khác; /kaggle/working/teacher_cache được giữ.
+
+3. PREP TARGET: chạy kaggle_rsed_prepare.ipy.
+   Lần đầu sẽ reuse hoặc tạo main teacher cache, sau đó reload tuned DFN5B để tạo:
+   retrieval-conditioned gradient×residual evidence, attention/random controls,
+   local teacher evidence và exact-budget masked teacher descriptors.
+   Cache chung: /kaggle/working/teacher_cache/sketchy1_rsed_s42_m10_g1.pt.
+   Xem teacher_target_summary.png và teacher_evidence_examples.png trong log dir.
+
+4. MATCHED COMPARISON ƯU TIÊN, mỗi cell là fresh student seed 42:
+   a. kaggle_main_baseline_train.ipy
+   b. kaggle_rsed_train.ipy                  (main + retrieval evidence)
+   c. kaggle_rsed_attention_control.ipy      (raw attention, cùng loss/budget)
+   d. kaggle_rsed_random_control.ipy         (random ink evidence)
+   e. kaggle_rsed_shuffle_control.ipy        (retrieval target khác sketch)
+
+5. STANDALONE: kaggle_rsed_standalone.ipy đặt domain=modality=0.
+   Đây là kiểm tra attention/evidence branch có đủ mạnh riêng cho retrieval hay không.
+   Không dùng standalone thay cho matched main comparison.
+
+6. REPORT: chạy kaggle_rsed_report.py rồi gửi rsed_diagnostics_*.zip.
+   ZIP chứa comparison, scalar curves, fixed-batch diagnostics, gradient interactions,
+   teacher/student heatmaps và checkpoint inventory; không chứa checkpoint lớn.
+
+TIÊU CHÍ:
+- Contribution chính chỉ được hỗ trợ nếu main+retrieval RSED > matched main và > controls.
+- RSED loss giảm nhưng deployed mAP không tăng là thất bại retrieval.
+- Deployed mAP tăng trong khi native mAP không tăng cho thấy evidence residual tạo hiệu quả.
+- Retrieval target phải tốt hơn raw attention/random/shuffled để chứng minh conditioning hữu ích.
+- Standalone nên ít nhất vượt CLIP/no-train reference nếu muốn claim loss độc lập mạnh.
+
+TUNING SAU RUN ĐẦU:
+- Nếu correction gần 0, map/what tốt nhưng metrics không đổi: beta 0.15 hoặc head_lr 3e-3.
+- Nếu deployed kém native nhanh: beta 0.05, anchor 0.4 hoặc warmup 1.0.
+- Nếu map tốt nhưng effect cosine thấp: effect 0.2, mask fraction 0.15 (cache mới).
+- Nếu gradient RSED xung đột mạnh main: giảm lambda_rsed hoặc decay sớm hơn.
+- Mọi run so sánh phải cùng seed, teacher config, epochs và main weights.
+- Đổi mask/graph/ink/seed/source thì dùng tên cache mới; metadata ngăn reuse sai.
+
+Đọc docs/rsed.md để xem công thức, diagnostics và giới hạn pseudo-stroke graph.

@@ -5,6 +5,7 @@ import os
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 import argparse
+from pathlib import Path
 import random
 
 import numpy as np
@@ -17,6 +18,8 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from src.dataset import TrainDataset, ValidDataset, WorkerInvariantSampler
 from src.data_config import UNSEEN_CLASSES
 from src.model import ZS_SBIR, default_teacher_cache_path
+from src.stroke_evidence_cache import add_arguments as add_rsed_arguments
+from src.stroke_evidence_cache import validate_arguments as validate_rsed_arguments
 
 
 def seed_everything(seed):
@@ -321,6 +324,7 @@ if __name__ == "__main__":
         type=str,
         default="teacher_visual_student_visual_only",
     )
+    add_rsed_arguments(parser)
 
     args = parser.parse_args()
     if args.teacher_prompt_seed is None:
@@ -369,6 +373,7 @@ if __name__ == "__main__":
         parser.error("--photo_text_kd_temperature must be greater than 0.")
     if args.sketch_text_kd_temperature <= 0:
         parser.error("--sketch_text_kd_temperature must be greater than 0.")
+    validate_rsed_arguments(parser, args)
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
 
     checkpoint_callback = ModelCheckpoint(
@@ -406,6 +411,10 @@ if __name__ == "__main__":
             "--teacher_pretrain_epochs greater than 0."
         )
     progress_bar = TQDMProgressBar(refresh_rate=20)
+    callbacks = [checkpoint_callback, progress_bar]
+    if args.retrieval_head == "rsed" and args.rsed_diagnostics and not args.rsed_prepare_only:
+        from src.stroke_evidence_diagnostics import StrokeEvidenceDiagnostics
+        callbacks.append(StrokeEvidenceDiagnostics())
 
     trainer = Trainer(
         accelerator="gpu",
@@ -417,7 +426,7 @@ if __name__ == "__main__":
         logger=logger,
         check_val_every_n_epoch=1,
         enable_progress_bar=args.progress,
-        callbacks=[checkpoint_callback, progress_bar],
+        callbacks=callbacks,
     )
 
     model = ZS_SBIR(args=args, classnames=train_loader.dataset.all_categories)
@@ -434,5 +443,12 @@ if __name__ == "__main__":
         workers=args.workers,
         show_progress=args.progress,
     )
+    if args.retrieval_head == "rsed":
+        from src.stroke_evidence_cache import prepare_cache as prepare_rsed_cache
+        prepare_rsed_cache(args, train_loader.dataset, Path(logger.log_dir) / "rsed_diagnostics")
+        model.hparams["args"] = dict(vars(args))
+        if args.rsed_prepare_only:
+            print("[RSED] target preparation complete; student training skipped")
+            raise SystemExit(0)
 
     trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])

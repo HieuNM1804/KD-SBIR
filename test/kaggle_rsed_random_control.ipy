@@ -1,0 +1,57 @@
+# Main + RSED.
+from datetime import datetime
+
+RSED_RUN = "rsed_random_control_s42_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+%cd /kaggle/working/KD-SBIR-AVKD
+
+!python -m src.train \
+    --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
+    --dataset sketchy_1 \
+    --epochs 5 \
+    --workers 8 \
+    --batch_size 64 \
+    --test_batch_size 1024 \
+    --n_ctx_visual 3 \
+    --prompt_depth 12 \
+    --teacher_pretrain_epochs 1 \
+    --teacher_cache_path /kaggle/working/teacher_cache/sketchy1_teacher_1ep.pt \
+    --teacher_pretrain_batch_size 64 \
+    --teacher_n_ctx_visual 10 \
+    --teacher_prompt_depth 12 \
+    --teacher_prompt_std 0.02 \
+    --teacher_prompt_lr 3e-2 \
+    --teacher_prompt_seed 42 \
+    --teacher_prompt_gradient_checkpointing \
+    --teacher_momentum 0.9 \
+    --teacher_weight_decay 1e-3 \
+    --lambda_teacher_retrieval 1.5 \
+    --teacher_triplet_margin 0.2 \
+    --retrieval_head rsed \
+    --lambda_rsed 1.0 \
+    --lambda_rsed_where 0.10 \
+    --lambda_rsed_what 0.25 \
+    --lambda_rsed_effect 0.10 \
+    --lambda_rsed_anchor 0.20 \
+    --rsed_effect_magnitude_weight 0.25 \
+    --rsed_beta 0.10 \
+    --rsed_bottleneck 128 \
+    --rsed_head_lr 1e-3 \
+    --rsed_temperature 0.07 \
+    --rsed_graph_steps 1 \
+    --rsed_graph_mix 0.25 \
+    --rsed_mask_fraction 0.10 \
+    --rsed_cache_path /kaggle/working/teacher_cache/sketchy1_rsed_s42_m10_g1.pt \
+    --rsed_warmup_epochs 0.5 \
+    --rsed_decay_start_epoch 3.0 \
+    --rsed_diagnostics \
+    --photo_text_kd_temperature 0.15 \
+    --sketch_text_kd_temperature 0.02 \
+    --lr 1e-2 \
+    --momentum 0.9 \
+    --weight_decay 5e-4 \
+    --seed 42 \
+    --rsed_target random \
+    --lambda_domain 3.0 \
+    --lambda_modality 1.0 \
+    --exp_name {RSED_RUN} \
+    --progress

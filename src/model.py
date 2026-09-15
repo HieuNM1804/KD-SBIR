@@ -1,4 +1,5 @@
 import hashlib
+import math
 import json
 import os
 from pathlib import Path
@@ -296,6 +297,25 @@ class CustomCLIP(nn.Module):
             cfg.seed + 202,
             prompt_depth,
         )
+        self.retrieval_head = getattr(cfg, "retrieval_head", "main")
+        self.stroke_evidence_head = None
+        if self.retrieval_head == "rsed":
+            from src.stroke_evidence import StrokeEvidenceHead
+            patch_count = clip_model.visual.positional_embedding.shape[0] - 1
+            patch_grid = int(round(patch_count ** 0.5))
+            if patch_grid * patch_grid != patch_count:
+                raise ValueError("RSED requires a square student patch lattice")
+            cfg.rsed_student_grid = patch_grid
+            output_width = clip_model.visual.proj.shape[1]
+            self.stroke_evidence_head = StrokeEvidenceHead(
+                width=output_width,
+                grid=patch_grid,
+                bottleneck=cfg.rsed_bottleneck,
+                beta=cfg.rsed_beta,
+                temperature=cfg.rsed_temperature,
+                graph_steps=cfg.rsed_graph_steps,
+                graph_mix=cfg.rsed_graph_mix,
+            )
         photo_texts = [
             f"a photo of a {name.replace('_', ' ')}."
             for name in self.classnames
@@ -352,6 +372,13 @@ class CustomCLIP(nn.Module):
             f"photo_temperature={cfg.photo_text_kd_temperature}, "
             f"sketch_temperature={cfg.sketch_text_kd_temperature}"
         )
+        if self.stroke_evidence_head is not None:
+            print(
+                "[RSED] retrieval-conditioned ink evidence -> "
+                f"grid={cfg.rsed_student_grid}x{cfg.rsed_student_grid}, "
+                f"target={cfg.rsed_target}, beta={cfg.rsed_beta}, "
+                f"lambda={cfg.lambda_rsed}"
+            )
 
     @staticmethod
     def _path_fingerprint(paths, root):
@@ -843,25 +870,42 @@ class CustomCLIP(nn.Module):
             setattr(self, feature_name, features)
         return features
 
-    def encode_student_image(self, image, modality):
+    def encode_student_image_details(self, image, modality):
         visual_prompt, compound_prompts = self.get_visual_prompt(modality)
-        features = self.clip_model.visual(
-            image.type(self.dtype),
-            visual_prompt,
-            compound_prompts,
+        if self.stroke_evidence_head is None or modality != "sketch":
+            native = self.clip_model.visual(
+                image.type(self.dtype), visual_prompt, compound_prompts
+            )
+            native = F.normalize(native.float(), dim=-1)
+            return {
+                "descriptor": native,
+                "native": native,
+                "dense": None,
+                "weights": None,
+                "evidence": native,
+                "correction": torch.zeros_like(native),
+                "ink_mass": None,
+            }
+        from src.stroke_evidence import FinalBlockInputCapture, projected_patch_features, patch_ink_mass
+        with FinalBlockInputCapture(self.clip_model.visual) as capture:
+            native = self.clip_model.visual(
+                image.type(self.dtype), visual_prompt, compound_prompts
+            )
+        native = F.normalize(native.float(), dim=-1)
+        dense = projected_patch_features(self.clip_model.visual, capture.residual())
+        ink = patch_ink_mass(
+            image,
+            self.cfg.rsed_student_grid,
+            self.cfg.rsed_ink_threshold,
+            self.cfg.rsed_ink_softness,
         )
-        return features / features.norm(dim=-1, keepdim=True)
+        return self.stroke_evidence_head(native, dense, ink)
 
-    def forward(self, x):
-        (
-            photo_tensor,
-            sk_tensor,
-            teacher_photo_base,
-            teacher_sketch_base,
-            _label,
-        ) = x
-        photo_features = self.encode_student_image(photo_tensor, "photo")
-        sketch_features = self.encode_student_image(sk_tensor, "sketch")
+    def encode_student_image(self, image, modality):
+        return self.encode_student_image_details(image, modality)["descriptor"]
+
+    def _assemble_features(self, photo_features, sketch_features,
+                           teacher_photo_base, teacher_sketch_base):
         student_photo_text = (
             F.normalize(self.get_student_text_features("photo"), dim=-1)
             if self.photo_text_active
@@ -880,10 +924,7 @@ class CustomCLIP(nn.Module):
             teacher_photo_features = teacher_photo_base
             teacher_sketch_features = teacher_sketch_base
             if self.image_text_kd_active:
-                teacher_sketch_text, teacher_photo_text = (
-                    self.get_teacher_text_features()
-                )
-
+                teacher_sketch_text, teacher_photo_text = self.get_teacher_text_features()
         return (
             photo_features,
             sketch_features,
@@ -896,8 +937,30 @@ class CustomCLIP(nn.Module):
             teacher_photo_text,
         )
 
-    def extract_feature(self, image, modality):
-        return self.encode_student_image(image, modality)
+    def forward_with_stroke_evidence(self, x):
+        photo_tensor, sketch_tensor, teacher_photo_base, teacher_sketch_base, _label = x
+        photo = self.encode_student_image_details(photo_tensor, "photo")
+        sketch = self.encode_student_image_details(sketch_tensor, "sketch")
+        features = self._assemble_features(
+            photo["descriptor"], sketch["descriptor"],
+            teacher_photo_base, teacher_sketch_base,
+        )
+        return features, sketch
+
+    def forward(self, x):
+        if self.stroke_evidence_head is not None:
+            return self.forward_with_stroke_evidence(x)[0]
+        photo_tensor, sketch_tensor, teacher_photo_base, teacher_sketch_base, _label = x
+        photo_features = self.encode_student_image(photo_tensor, "photo")
+        sketch_features = self.encode_student_image(sketch_tensor, "sketch")
+        return self._assemble_features(
+            photo_features, sketch_features, teacher_photo_base, teacher_sketch_base
+        )
+
+    def extract_feature(self, image, modality, return_details=False):
+        output = self.encode_student_image_details(image, modality)
+        return output if return_details else output["descriptor"]
+
 
 
 class ZS_SBIR(pl.LightningModule):
@@ -917,8 +980,11 @@ class ZS_SBIR(pl.LightningModule):
             teacher=teacher,
         )
 
+        self.lambda_rsed = getattr(args, "lambda_rsed", 0.0)
         self.val_step_outputs_sk = []
         self.val_step_outputs_ph = []
+        self._rsed_last_validation = {}
+        self.save_hyperparameters({"args": dict(vars(args)), "classnames": list(classnames)})
 
     def cache_teacher_features(
         self,
@@ -939,118 +1005,230 @@ class ZS_SBIR(pl.LightningModule):
         )
         
     def configure_optimizers(self):
-        student_params = [
-            parameter
-            for parameter in self.model.parameters()
-            if parameter.requires_grad
-        ]
-        param_groups = [
-            {
-                "params": student_params,
+        named = [(name, parameter) for name, parameter in self.model.named_parameters()
+                 if parameter.requires_grad]
+        head = [parameter for name, parameter in named if "stroke_evidence_head." in name]
+        base = [parameter for name, parameter in named if "stroke_evidence_head." not in name]
+        param_groups = []
+        if base:
+            param_groups.append({
+                "params": base,
                 "lr": self.args.lr,
                 "momentum": self.args.momentum,
                 "weight_decay": self.args.weight_decay,
-            }
-        ]
+            })
+        if head:
+            param_groups.append({
+                "params": head,
+                "lr": self.args.rsed_head_lr,
+                "momentum": self.args.momentum,
+                "weight_decay": self.args.weight_decay,
+            })
         optimizer = torch.optim.SGD(
             params=param_groups,
             lr=self.args.lr,
             weight_decay=self.args.weight_decay,
             momentum=self.args.momentum,
         )
-        trainable = sum(
-            parameter.numel()
-            for group in optimizer.param_groups
-            for parameter in group["params"]
-            if parameter.requires_grad
-        )
+        trainable = sum(parameter.numel() for _, parameter in named)
         print(
             "[Optimizer] SGD "
-            f"lr={self.args.lr}, momentum={self.args.momentum}, "
-            f"weight_decay={self.args.weight_decay}, "
+            f"prompt_lr={self.args.lr}, "
+            f"head_lr={getattr(self.args, 'rsed_head_lr', self.args.lr)}, "
+            f"momentum={self.args.momentum}, weight_decay={self.args.weight_decay}, "
             f"trainable_params={trainable:,}"
         )
-        
         scheduler = torch.optim.lr_scheduler.StepLR(
             optimizer=optimizer,
             step_size=5,
             gamma=0.1,
         )
-
         return [optimizer], [scheduler]
 
     def forward(self, data):
         return self.model(data)
     
-    def training_step(self, batch, batch_idx):
-        features = self(batch)
-        loss, loss_dict = loss_fn(self.args, features)
-        self.log('train_loss', loss, on_step=False, on_epoch=True)
-        bar_names = {
-            "domain_kd": "DOMAIN",
-            "modality_kd": "MODALITY",
+    def _rsed_schedule_factor(self, batch_idx):
+        if self.lambda_rsed <= 0:
+            return 0.0
+        batches = max(1, int(getattr(self.trainer, "num_training_batches", 1)))
+        progress = float(self.current_epoch) + batch_idx / batches
+        warmup = self.args.rsed_warmup_epochs
+        factor = 1.0 if warmup <= 0 else min(1.0, progress / warmup)
+        decay_start = self.args.rsed_decay_start_epoch
+        total = float(self.trainer.max_epochs)
+        if progress > decay_start and total > decay_start:
+            phase = min(1.0, (progress - decay_start) / (total - decay_start))
+            factor *= 0.5 * (1.0 + math.cos(math.pi * phase))
+        return factor
+
+    def _select_rsed_target(self, target):
+        names = ("retrieval", "attention", "random")
+        name = self.args.rsed_target
+        shuffled = name == "shuffled"
+        index = 0 if shuffled else names.index(name)
+        selected = {
+            "map": target["maps"][:, index],
+            "teacher_evidence": target["teacher_evidence"][:, index],
+            "teacher_masked": target["teacher_masked"][:, index],
+            "confidence": target["confidence"][:, index],
         }
-        for key, bar_name in bar_names.items():
-            self.log(
-                bar_name,
-                loss_dict[key],
-                on_step=True,
-                on_epoch=False,
-                prog_bar=True,
+        if shuffled:
+            selected = {key: value.roll(1, 0) for key, value in selected.items()}
+        return selected
+
+    def stroke_evidence_loss(self, batch, features, output):
+        from src.stroke_evidence import (
+            counterfactual_field_alignment,
+            centered_field_alignment,
+            erase_by_patch_evidence,
+            evidence_entropy,
+            hellinger_loss,
+        )
+        if len(batch) != 6 or not isinstance(batch[5], dict):
+            raise RuntimeError("RSED targets are missing; prepare the complete cache before fitting")
+        target = self._select_rsed_target(batch[5])
+        confidence = target["confidence"].to(self.device).float().clamp(0.05, 1.0)
+        teacher_map = target["map"].to(self.device).float()
+        where = hellinger_loss(output["weights"], teacher_map, confidence)
+        what, what_cosine = centered_field_alignment(
+            output["evidence"], features[0].detach(),
+            target["teacher_evidence"], features[2], confidence,
+        )
+        anchor = (1 - F.cosine_similarity(
+            output["descriptor"], output["native"].detach(), dim=-1
+        )).mean()
+        effect = output["descriptor"].sum() * 0
+        effect_stats = {
+            "effect_cosine": effect.detach(),
+            "student_effect_rms": effect.detach(),
+            "teacher_effect_rms": effect.detach(),
+            "effect_magnitude_ratio": effect.detach(),
+        }
+        masked_output = None
+        if self.args.lambda_rsed_effect > 0:
+            masked_images, removed = erase_by_patch_evidence(
+                batch[1], teacher_map, self.args.rsed_mask_fraction,
+                self.args.rsed_ink_threshold, self.args.rsed_ink_softness,
             )
+            masked_output = self.model.encode_student_image_details(masked_images, "sketch")
+            effect, effect_stats = counterfactual_field_alignment(
+                output["descriptor"], masked_output["descriptor"], features[0].detach(),
+                features[3], target["teacher_masked"], features[2], confidence,
+                self.args.rsed_effect_magnitude_weight,
+            )
+            effect_stats["removed_ink_fraction"] = removed.mean().detach()
+        values = {
+            "where": where,
+            "what": what,
+            "effect": effect,
+            "anchor": anchor,
+        }
+        total = (
+            self.args.lambda_rsed_where * where
+            + self.args.lambda_rsed_what * what
+            + self.args.lambda_rsed_effect * effect
+            + self.args.lambda_rsed_anchor * anchor
+        )
+        statistics = {
+            **{name: value.detach() for name, value in values.items()},
+            "what_cosine": what_cosine.detach(),
+            "student_entropy": evidence_entropy(output["weights"]).mean().detach(),
+            "teacher_entropy": evidence_entropy(teacher_map).mean().detach(),
+            "map_cosine": F.cosine_similarity(output["weights"], teacher_map, dim=-1).mean().detach(),
+            "descriptor_native_cosine": F.cosine_similarity(
+                output["descriptor"], output["native"], dim=-1
+            ).mean().detach(),
+            "correction_norm": output["correction"].norm(dim=-1).mean().detach(),
+            "confidence": confidence.mean().detach(),
+            **effect_stats,
+        }
+        return total, statistics, masked_output
+
+    def training_step(self, batch, batch_idx):
+        if self.model.stroke_evidence_head is not None:
+            features, output = self.model.forward_with_stroke_evidence(batch[:5])
+        else:
+            features, output = self(batch[:5]), None
+        main_loss, loss_dict = loss_fn(self.args, features)
+        loss = main_loss
+        if self.lambda_rsed > 0:
+            rsed_loss, statistics, _masked = self.stroke_evidence_loss(batch, features, output)
+            schedule = self._rsed_schedule_factor(batch_idx)
+            weighted = self.lambda_rsed * schedule * rsed_loss
+            loss = loss + weighted
+            self.log("RSED", rsed_loss, on_step=False, on_epoch=True, prog_bar=True)
+            self.log("RSED_WEIGHTED", weighted, on_step=False, on_epoch=True)
+            self.log("RSED_SCHEDULE", schedule, on_step=False, on_epoch=True)
+            for name, value in statistics.items():
+                self.log("RSED_" + name, value, on_step=False, on_epoch=True)
+        self.log("train_loss", loss, on_step=False, on_epoch=True)
+        self.log("main_loss", main_loss, on_step=False, on_epoch=True)
+        for key, bar_name in {"domain_kd": "DOMAIN", "modality_kd": "MODALITY"}.items():
+            self.log(bar_name, loss_dict[key], on_step=True, on_epoch=False, prog_bar=True)
         return loss
-    
+
     def validation_step(self, batch, batch_idx, dataloader_idx):
         image_tensor, label = batch
+        modality = "sketch" if dataloader_idx == 0 else "photo"
+        output = self.model.extract_feature(image_tensor, modality, return_details=True)
+        record = (output["descriptor"], output["native"], label)
         if dataloader_idx == 0:
-            feat = self.model.extract_feature(image_tensor, "sketch")
-            self.val_step_outputs_sk.append((feat, label))
+            self.val_step_outputs_sk.append(record)
         else:
-            feat = self.model.extract_feature(image_tensor, "photo")
-            self.val_step_outputs_ph.append((feat, label))
+            self.val_step_outputs_ph.append(record)
 
     def on_validation_epoch_end(self):
-        query_features = torch.cat(
-            [features for features, _ in self.val_step_outputs_sk]
-        )
-        gallery_features = torch.cat(
-            [features for features, _ in self.val_step_outputs_ph]
-        )
-        sketch_labels = torch.cat(
-            [labels for _, labels in self.val_step_outputs_sk]
-        ).cpu()
-        photo_labels = torch.cat(
-            [labels for _, labels in self.val_step_outputs_ph]
-        ).cpu()
-
+        if not self.val_step_outputs_sk or not self.val_step_outputs_ph:
+            return
+        query_features = torch.cat([value[0] for value in self.val_step_outputs_sk])
+        gallery_features = torch.cat([value[0] for value in self.val_step_outputs_ph])
+        query_native = torch.cat([value[1] for value in self.val_step_outputs_sk])
+        gallery_native = torch.cat([value[1] for value in self.val_step_outputs_ph])
+        sketch_labels = torch.cat([value[2] for value in self.val_step_outputs_sk]).cpu()
+        photo_labels = torch.cat([value[2] for value in self.val_step_outputs_ph]).cpu()
         mAP, precision, map_k, p_k = _retrieval_metrics(
-            query_features,
-            gallery_features,
-            sketch_labels,
-            photo_labels,
-            self.args.dataset,
+            query_features, gallery_features, sketch_labels, photo_labels, self.args.dataset
+        )
+        native_mAP, native_precision, _native_map_k, _native_p_k = _retrieval_metrics(
+            query_native, gallery_native, sketch_labels, photo_labels, self.args.dataset
         )
         self.log("mAP", mAP, on_step=False, on_epoch=True)
         self.log("precision", precision, on_step=False, on_epoch=True)
+        self.log("native_mAP", native_mAP, on_step=False, on_epoch=True)
+        self.log("native_precision", native_precision, on_step=False, on_epoch=True)
+        self._rsed_last_validation = {
+            "mAP": mAP.item(),
+            "precision": precision.item(),
+            "native_mAP": native_mAP.item(),
+            "native_precision": native_precision.item(),
+            "descriptor_native_cosine_sketch": F.cosine_similarity(
+                query_features.float(), query_native.float(), dim=-1
+            ).mean().item(),
+            "descriptor_native_cosine_photo": F.cosine_similarity(
+                gallery_features.float(), gallery_native.float(), dim=-1
+            ).mean().item(),
+        }
         if self.global_step > 0:
-            self.best_precision = max(
-                self.best_precision,
-                precision.item(),
-            )
-
-        if map_k:
-            print(
-                f"mAP@{map_k}: {mAP.item()}, P@{p_k}: {precision}, "
-                f"Best P@{p_k}: {self.best_precision}"
-            )
-        else:
-            print(
-                f"mAP@all: {mAP.item()}, P@{p_k}: {precision}, "
-                f"Best P@{p_k}: {self.best_precision}"
-            )
+            self.best_precision = max(self.best_precision, precision.item())
+        label = f"mAP@{map_k}" if map_k else "mAP@all"
+        print(
+            f"{label}: {mAP.item()}, P@{p_k}: {precision}, Best P@{p_k}: {self.best_precision}; "
+            f"native mAP: {native_mAP.item()}, native P@{p_k}: {native_precision}"
+        )
         train_loss = self.trainer.callback_metrics.get("train_loss")
         if train_loss is not None:
             print(f"Train loss (epoch avg): {train_loss.item():.6f}")
-
         self.val_step_outputs_sk.clear()
         self.val_step_outputs_ph.clear()
+
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint.setdefault("hyper_parameters", {}).update(
+            args=dict(vars(self.args)), classnames=list(self.model.classnames)
+        )
+        checkpoint["experiment_config"] = {
+            "method": "RSED" if self.model.stroke_evidence_head is not None else "main",
+            "retrieval_head": getattr(self.args, "retrieval_head", "main"),
+            "args": dict(vars(self.args)),
+            "teacher_target_metadata": getattr(self.args, "rsed_target_metadata", None),
+        }
