@@ -10,8 +10,14 @@ from pytorch_lightning import Callback
 from torch.nn import functional as F
 from torch.utils.data import default_collate
 
-from src.stroke_graph import CLIP_MEAN, CLIP_STD, erase_by_patch_evidence
 from src.losses import loss_fn
+from src.stroke_graph import (
+    CLIP_MEAN,
+    CLIP_STD,
+    erase_by_patch_evidence,
+    hellinger_loss,
+    normalize_evidence,
+)
 
 
 def write_csv(path, rows):
@@ -48,11 +54,15 @@ class StrokeGraphDiagnostics(Callback):
     def _setup(self, trainer, module):
         if hasattr(self, "out"):
             return
-        self.out = Path(trainer.log_dir or trainer.default_root_dir) / "sgcd_diagnostics"
+        self.out = (
+            Path(trainer.log_dir or trainer.default_root_dir) / "sgcd_diagnostics"
+        )
         self.out.mkdir(parents=True, exist_ok=True)
         self.epochs = []
         self.fixed = []
         self.gradients = []
+        self.component_gradients = []
+        self.initial_weights = None
         (self.out / "configuration.json").write_text(
             json.dumps(vars(module.args), indent=2), encoding="utf-8"
         )
@@ -62,17 +72,27 @@ class StrokeGraphDiagnostics(Callback):
         dataset = trainer.train_dataloader.dataset
         generator = torch.Generator().manual_seed(module.args.seed + 9400)
         count = min(module.args.sgcd_diagnostic_batch_size, len(dataset))
-        self.indices = torch.randperm(len(dataset), generator=generator)[:count].tolist()
+        self.indices = torch.randperm(len(dataset), generator=generator)[
+            :count
+        ].tolist()
         self.batch = default_collate([dataset[(0, index)] for index in self.indices])
         (self.out / "fixed_batch.json").write_text(
-            json.dumps({"indices": self.indices, "sample_epoch": 0,
-                        "notes": "Fixed seen training batch; measurements do not update parameters."}, indent=2),
+            json.dumps(
+                {
+                    "indices": self.indices,
+                    "sample_epoch": 0,
+                    "notes": "Fixed seen training batch; measurements do not update parameters.",
+                },
+                indent=2,
+            ),
             encoding="utf-8",
         )
         self.measure(trainer, module, "initial")
 
     def on_validation_end(self, trainer, module):
-        if trainer.sanity_checking or not getattr(module, "_sgcd_last_validation", None):
+        if trainer.sanity_checking or not getattr(
+            module, "_sgcd_last_validation", None
+        ):
             return
         self._setup(trainer, module)
         row = {
@@ -95,37 +115,109 @@ class StrokeGraphDiagnostics(Callback):
     def measure(self, trainer, module, stage):
         self._setup(trainer, module)
         with torch.random.fork_rng(devices=list(range(torch.cuda.device_count()))):
-            batch = module.transfer_batch_to_device(self.batch, module.device, 0)
-            named = [(name, parameter) for name, parameter in module.named_parameters() if parameter.requires_grad]
+            named = [
+                (name, parameter)
+                for name, parameter in module.named_parameters()
+                if parameter.requires_grad
+            ]
             params = [parameter for _, parameter in named]
-            with torch.enable_grad():
+            with torch.inference_mode(False), torch.enable_grad():
+                # Validation may run under Lightning inference_mode.
+                batch = module.transfer_batch_to_device(self.batch, module.device, 0)
                 features, output = module.model.forward_with_stroke_graph(batch[:5])
                 main, _ = loss_fn(module.args, features)
-                sgcd, statistics, masked = module.stroke_graph_loss(batch, features, output)
+                sgcd, statistics, masked, components = module.stroke_graph_loss(
+                    batch, features, output, return_components=True
+                )
                 # Use nominal weighting here so the initial gradient audit is meaningful even during warm-up.
                 weighted = sgcd * module.lambda_sgcd
 
                 def gradients(loss):
-                    values = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=True)
-                    return [torch.zeros_like(parameter) if value is None else value.detach()
-                            for parameter, value in zip(params, values)]
+                    values = torch.autograd.grad(
+                        loss, params, retain_graph=True, allow_unused=True
+                    )
+                    return [
+                        torch.zeros_like(parameter) if value is None else value.detach()
+                        for parameter, value in zip(params, values)
+                    ]
 
                 grad_main = gradients(main)
                 grad_sgcd = gradients(weighted)
                 groups = {
                     "all": list(range(len(named))),
-                    "sketch_prompts": [i for i, (name, _) in enumerate(named) if "sketch_visual_prompt." in name],
-                    "photo_prompts": [i for i, (name, _) in enumerate(named) if "photo_visual_prompt." in name],
-                    "evidence_head": [i for i, (name, _) in enumerate(named) if "stroke_graph_head." in name],
+                    "sketch_prompts": [
+                        i
+                        for i, (name, _) in enumerate(named)
+                        if "sketch_visual_prompt." in name
+                    ],
+                    "photo_prompts": [
+                        i
+                        for i, (name, _) in enumerate(named)
+                        if "photo_visual_prompt." in name
+                    ],
+                    "evidence_head": [
+                        i
+                        for i, (name, _) in enumerate(named)
+                        if "stroke_graph_head." in name
+                    ],
                 }
+                for index, (name, _) in enumerate(named):
+                    if "sketch_visual_prompt." in name:
+                        groups[name] = [index]
                 for group, indices in groups.items():
                     if indices:
-                        self.gradients.append({
-                            "stage": stage,
-                            "global_step": int(trainer.global_step),
-                            "group": group,
-                            **_gradient_stats([grad_main[i] for i in indices], [grad_sgcd[i] for i in indices]),
-                        })
+                        self.gradients.append(
+                            {
+                                "stage": stage,
+                                "global_step": int(trainer.global_step),
+                                "group": group,
+                                **_gradient_stats(
+                                    [grad_main[i] for i in indices],
+                                    [grad_sgcd[i] for i in indices],
+                                ),
+                            }
+                        )
+                for component, value in components.items():
+                    coefficient = getattr(module.args, "lambda_sgcd_" + component)
+                    if coefficient <= 0:
+                        continue
+                    current = gradients(value * coefficient * module.lambda_sgcd)
+                    for group, indices in groups.items():
+                        if indices:
+                            self.component_gradients.append(
+                                {
+                                    "stage": stage,
+                                    "global_step": int(trainer.global_step),
+                                    "component": component,
+                                    "group": group,
+                                    **_gradient_stats(
+                                        [grad_main[i] for i in indices],
+                                        [current[i] for i in indices],
+                                    ),
+                                }
+                            )
+                teacher_map = module._select_sgcd_target(batch[5])["map"].float()
+                prior = normalize_evidence(
+                    torch.ones_like(output["weights"]), output["ink_mass"]
+                )
+                weights = output["weights"].detach()
+                if self.initial_weights is None:
+                    self.initial_weights = weights.cpu()
+                statistics.update(
+                    {
+                        "map_initial_cosine": F.cosine_similarity(
+                            weights, self.initial_weights.to(weights.device), dim=-1
+                        ).mean(),
+                        "ink_prior_teacher_cosine": F.cosine_similarity(
+                            prior, teacher_map, dim=-1
+                        ).mean(),
+                        "map_teacher_cosine_gain_over_ink": (
+                            F.cosine_similarity(weights, teacher_map, dim=-1)
+                            - F.cosine_similarity(prior, teacher_map, dim=-1)
+                        ).mean(),
+                        "ink_prior_where": hellinger_loss(prior, teacher_map),
+                    }
+                )
             record = {
                 "stage": stage,
                 "global_step": int(trainer.global_step),
@@ -137,11 +229,61 @@ class StrokeGraphDiagnostics(Callback):
             self.fixed.append(record)
             write_csv(self.out / "fixed_batch.csv", self.fixed)
             write_csv(self.out / "gradient_interaction.csv", self.gradients)
+            write_csv(self.out / "component_gradients.csv", self.component_gradients)
             self.evidence_figure(module, batch, output, masked, stage)
+            self.prompt_figure()
             print("[SGCD Fixed Batch]", json.dumps(record, allow_nan=False), flush=True)
+
+    def prompt_figure(self):
+        """Separate map learning from gradient routing into trainable heads."""
+        import matplotlib.pyplot as plt
+
+        fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+        steps = [row["global_step"] for row in self.fixed]
+        for key in ("map_cosine", "map_initial_cosine", "ink_prior_teacher_cosine"):
+            axes[0].plot(steps, [row[key] for row in self.fixed], "o-", label=key)
+        for component in ("where", "what", "effect", "rank"):
+            rows = [
+                row
+                for row in self.component_gradients
+                if row["component"] == component and row["group"] == "sketch_prompts"
+            ]
+            if rows:
+                axes[1].plot(
+                    [row["global_step"] for row in rows],
+                    [row["weighted_sgcd_norm"] for row in rows],
+                    "o-",
+                    label=component,
+                )
+        for group in ("sketch_prompts", "photo_prompts", "evidence_head"):
+            rows = [row for row in self.gradients if row["group"] == group]
+            if rows:
+                axes[2].plot(
+                    [row["global_step"] for row in rows],
+                    [row["weighted_sgcd_norm"] for row in rows],
+                    "o-",
+                    label=group,
+                )
+        for axis, title in zip(
+            axes,
+            (
+                "Localization and fixed ink prior",
+                "Component gradients to sketch prompts",
+                "Total auxiliary gradient by parameter group",
+            ),
+        ):
+            axis.set(title=title, xlabel="Training step")
+            axis.grid(alpha=0.2)
+            if axis.lines:
+                axis.legend(fontsize=7)
+        fig.suptitle("Fixed seen batch; nominal loss coefficients")
+        fig.tight_layout()
+        fig.savefig(self.out / "prompt_learning.png", dpi=160)
+        plt.close(fig)
 
     def evidence_figure(self, module, batch, output, masked, stage):
         import matplotlib.pyplot as plt
+
         target = module._select_sgcd_target(batch[5])
         teacher = target["map"].detach().float().cpu()
         student = output["weights"].detach().float().cpu()
@@ -152,21 +294,34 @@ class StrokeGraphDiagnostics(Callback):
             image = batch[1][row].detach().cpu()
             axes[row, 0].imshow(_rgb(image))
             axes[row, 0].set_title("clean sketch")
-            for col, values, title in ((1, teacher, "teacher evidence"), (2, student, "student evidence")):
-                heat = F.interpolate(values[row].reshape(1, 1, grid, grid), size=image.shape[-2:],
-                                     mode="bilinear", align_corners=False)[0, 0]
+            for col, values, title in (
+                (1, teacher, "teacher evidence"),
+                (2, student, "student evidence"),
+            ):
+                heat = F.interpolate(
+                    values[row].reshape(1, 1, grid, grid),
+                    size=image.shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )[0, 0]
                 axes[row, col].imshow(_rgb(image))
                 axes[row, col].imshow(heat.numpy(), cmap="inferno", alpha=0.62)
                 axes[row, col].set_title(title)
             difference = (student[row] - teacher[row]).reshape(1, 1, grid, grid)
-            difference = F.interpolate(difference, size=image.shape[-2:], mode="bilinear", align_corners=False)[0, 0]
+            difference = F.interpolate(
+                difference, size=image.shape[-2:], mode="bilinear", align_corners=False
+            )[0, 0]
             limit = max(float(difference.abs().max()), 1e-6)
-            axes[row, 3].imshow(difference.numpy(), cmap="RdBu_r", vmin=-limit, vmax=limit)
+            axes[row, 3].imshow(
+                difference.numpy(), cmap="RdBu_r", vmin=-limit, vmax=limit
+            )
             axes[row, 3].set_title("student - teacher")
             if masked is not None:
                 erased, _ = erase_by_patch_evidence(
-                    batch[1][row:row + 1], target["mask_priority"][row:row + 1],
-                    module.args.sgcd_mask_fraction, module.args.sgcd_ink_threshold,
+                    batch[1][row : row + 1],
+                    target["mask_priority"][row : row + 1],
+                    module.args.sgcd_mask_fraction,
+                    module.args.sgcd_ink_threshold,
                     module.args.sgcd_ink_softness,
                 )
                 axes[row, 4].imshow(_rgb(erased[0]))
@@ -180,10 +335,13 @@ class StrokeGraphDiagnostics(Callback):
 
     def figure(self):
         import matplotlib.pyplot as plt
+
         fig, axes = plt.subplots(2, 3, figsize=(15, 8))
         epochs = [row["epoch"] for row in self.epochs]
         for key in ("mAP", "precision", "native_mAP", "native_precision"):
-            axes[0, 0].plot(epochs, [100 * row[key] for row in self.epochs], "o-", label=key)
+            axes[0, 0].plot(
+                epochs, [100 * row[key] for row in self.epochs], "o-", label=key
+            )
         steps = [row["global_step"] for row in self.fixed]
         for key in ("where", "what", "effect", "anchor", "rank"):
             axes[0, 1].plot(steps, [row[key] for row in self.fixed], "o-", label=key)
@@ -194,10 +352,18 @@ class StrokeGraphDiagnostics(Callback):
         for key in ("descriptor_native_cosine", "correction_norm"):
             axes[1, 1].plot(steps, [row[key] for row in self.fixed], "o-", label=key)
         for group in ("all", "sketch_prompts", "photo_prompts", "evidence_head"):
-            rows = [row for row in self.gradients if row["group"] == group and row["cosine"] is not None]
+            rows = [
+                row
+                for row in self.gradients
+                if row["group"] == group and row["cosine"] is not None
+            ]
             if rows:
-                axes[1, 2].plot([row["global_step"] for row in rows],
-                                [row["cosine"] for row in rows], "o-", label=group)
+                axes[1, 2].plot(
+                    [row["global_step"] for row in rows],
+                    [row["cosine"] for row in rows],
+                    "o-",
+                    label=group,
+                )
         titles = (
             "Full unseen retrieval (%)",
             "Fixed-batch component losses",

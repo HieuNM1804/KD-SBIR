@@ -1,7 +1,5 @@
 """Restore SGCD on offline Kaggle; setup only."""
 
-from pathlib import Path
-from datetime import datetime
 import glob
 import hashlib
 import json
@@ -9,20 +7,19 @@ import os
 import shutil
 import subprocess
 import sys
-
+from datetime import UTC, datetime
+from pathlib import Path
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
-EXPECTED_BRANCH = "experiment/pairwise-counterfactual-stroke-distillation"
-EXPECTED_COMMIT = "739ba9f4749c7fb9afd2eb6508a0c9402471d1cc"
-EXPECTED_TASK = "pairwise_counterfactual_stroke_distillation"
+EXPECTED_BRANCH = "experiment/sgcd-native-prompt-learning"
+EXPECTED_COMMIT = None  # Set to the release commit after this branch is pushed.
+EXPECTED_TASK = "sgcd_native_prompt_learning"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
 
 WORKING_ROOT = Path("/kaggle/working")
 WORKING_PROJECT = WORKING_ROOT / "KD-SBIR-AVKD"
-SKETCHY_ROOT = Path(
-    "/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy"
-)
+SKETCHY_ROOT = Path("/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy")
 
 
 def file_sha256(path):
@@ -54,10 +51,9 @@ manifest_reports = []
 for manifest_path in manifest_paths:
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except Exception as error:
+    except (OSError, TypeError, json.JSONDecodeError) as error:
         manifest_reports.append(
-            f"- {manifest_path}\n"
-            f"  unreadable: {type(error).__name__}: {error}"
+            f"- {manifest_path}\n  unreadable: {type(error).__name__}: {error}"
         )
         continue
 
@@ -69,10 +65,7 @@ for manifest_path in manifest_paths:
         f"  entrypoint: {manifest.get('entrypoint')}\n"
         f"  dataset: {manifest.get('dataset')}"
     )
-    commit_ok = (
-        EXPECTED_COMMIT is None
-        or manifest.get("commit") == EXPECTED_COMMIT
-    )
+    commit_ok = EXPECTED_COMMIT is None or manifest.get("commit") == EXPECTED_COMMIT
     if (
         manifest.get("repository") == EXPECTED_REPOSITORY
         and manifest.get("branch") == EXPECTED_BRANCH
@@ -122,6 +115,13 @@ required_bundle_paths = (
     source_project / "src" / "stroke_graph_cache.py",
     source_project / "src" / "stroke_graph_reports.py",
     source_project / "src" / "stroke_graph_diagnostics.py",
+    source_project / "src" / "stroke_prompt.py",
+    source_project / "src" / "stroke_prompt_probe.py",
+    source_project / "src" / "stroke_prompt_probe_cli.py",
+    source_project / "src" / "stroke_prompt.py",
+    source_project / "src" / "stroke_prompt_probe.py",
+    source_project / "src" / "stroke_prompt_probe_cli.py",
+    source_project / "test" / "kaggle_sgcd_prompt_preflight.py",
     source_project / "tests" / "test_stroke_graph.py",
     source_project / "tests" / "test_sgcd_commands.py",
     source_project / "test" / "RUN_ORDER.txt",
@@ -129,18 +129,19 @@ required_bundle_paths = (
     source_project / "test" / "kaggle_sgcd_audit.ipy",
     source_project / "test" / "kaggle_sgcd_prepare.ipy",
     source_project / "test" / "kaggle_sgcd_train.ipy",
+    source_project / "test" / "kaggle_sgcd_native_prompt_train.ipy",
+    source_project / "test" / "kaggle_sgcd_prompt_preflight.py",
     source_project / "test" / "kaggle_sgcd_local_control.ipy",
     source_project / "test" / "kaggle_sgcd_random_control.ipy",
     source_project / "test" / "kaggle_sgcd_shuffle_control.ipy",
     source_project / "test" / "kaggle_sgcd_standalone.ipy",
     source_project / "test" / "kaggle_sgcd_report.py",
     source_project / "docs" / "sgcd.md",
+    source_project / "docs" / "sgcd_native_prompt.md",
     dfn_source,
     student_source,
 )
-missing_paths = [
-    str(path) for path in required_bundle_paths if not path.exists()
-]
+missing_paths = [str(path) for path in required_bundle_paths if not path.exists()]
 if missing_paths:
     raise FileNotFoundError(
         "Offline bundle is incomplete. Missing:\n" + "\n".join(missing_paths)
@@ -240,12 +241,20 @@ print("DFN5B checkpoint:", dfn_target)
 
 os.chdir(WORKING_ROOT)
 if WORKING_PROJECT.exists():
-    existing = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=WORKING_PROJECT, text=True).strip()
-    changed = subprocess.run(["git", "diff", "--quiet", "HEAD", "--"], cwd=WORKING_PROJECT).returncode
+    existing = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=WORKING_PROJECT, text=True
+    ).strip()
+    changed = subprocess.run(
+        ["git", "diff", "--quiet", "HEAD", "--"],
+        cwd=WORKING_PROJECT,
+        check=False,
+    ).returncode
     if existing != manifest["commit"] or changed:
-        backup = WORKING_ROOT / ('KD-SBIR-AVKD_backup_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
+        backup = WORKING_ROOT / (
+            "KD-SBIR-AVKD_backup_" + datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
+        )
         WORKING_PROJECT.rename(backup)
-        print('Previous project and checkpoints preserved:', backup)
+        print("Previous project and checkpoints preserved:", backup)
 if WORKING_PROJECT.exists():
     print("Reusing existing project:", WORKING_PROJECT)
 else:

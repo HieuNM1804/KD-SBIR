@@ -5,43 +5,38 @@ wheels, ViT-B/32 and DFN5B. Save the output and attach it as an input dataset
 to the offline GPU notebook.
 """
 
-from pathlib import Path
-from datetime import datetime
 import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
-
+from datetime import UTC, datetime
+from pathlib import Path
 
 WORKING = Path("/kaggle/working")
-BUNDLE = WORKING / ("sgcd_bundle_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")) / "offline_bundle"
+BUNDLE = WORKING / (
+    "sgcd_bundle_" + datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
+) / "offline_bundle"
 WHEELS = BUNDLE / "wheels"
 SOURCE = BUNDLE / "source"
 CLIP_CACHE = BUNDLE / "clip_cache"
 DFN_DIR = BUNDLE / "dfn5b_openclip"
 
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
-BRANCH = "experiment/pairwise-counterfactual-stroke-distillation"
+BRANCH = "experiment/sgcd-native-prompt-learning"
 # Pinned training source; this builder is distributed separately.
-COMMIT = "739ba9f4749c7fb9afd2eb6508a0c9402471d1cc"
-TASK = "pairwise_counterfactual_stroke_distillation"
+COMMIT = None  # Set to the release commit after this branch is pushed.
+TASK = "sgcd_native_prompt_learning"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
 
 DFN_REPO = "apple/DFN5B-CLIP-ViT-H-14"
 DFN_FILENAME = "open_clip_pytorch_model.bin"
 DFN_REVISION = "11738501a1db6d5e0a3451a71ba100be02e577e6"
-DFN_SHA256 = (
-    "d67de50faa7f3ddce52fbab4f4656b046"
-    "86a0bb15c26ebd0144d375cfa08b8ae"
-)
+DFN_SHA256 = "d67de50faa7f3ddce52fbab4f4656b04686a0bb15c26ebd0144d375cfa08b8ae"
 STUDENT_FILENAME = "ViT-B-32.pt"
-STUDENT_SHA256 = (
-    "40d365715913c9da98579312b702a82c1"
-    "8be219cc2a73407c4526f58eba950af"
-)
+STUDENT_SHA256 = "40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af"
 
 
 def run(command, cwd):
@@ -121,9 +116,7 @@ missing_wheels = [
     pattern for pattern in required_wheels if not list(WHEELS.glob(pattern))
 ]
 if missing_wheels:
-    raise FileNotFoundError(
-        "Missing required wheels:\n" + "\n".join(missing_wheels)
-    )
+    raise FileNotFoundError("Missing required wheels:\n" + "\n".join(missing_wheels))
 print("[2/6] Wheels downloaded:", len(list(WHEELS.glob("*.whl"))))
 
 # These lightweight packages are needed by this online builder itself.
@@ -159,13 +152,10 @@ actual_commit = subprocess.check_output(
     ["git", "rev-parse", "HEAD"], cwd=project, text=True
 ).strip()
 if COMMIT is not None and actual_commit != COMMIT:
-    raise RuntimeError(
-        f"Repository commit mismatch: {actual_commit} != {COMMIT}"
-    )
+    raise RuntimeError(f"Repository commit mismatch: {actual_commit} != {COMMIT}")
 print("[3/6] Source commit:", actual_commit)
 
 from huggingface_hub import hf_hub_download
-
 
 downloaded_dfn = Path(
     hf_hub_download(
@@ -178,9 +168,7 @@ dfn_target = DFN_DIR / DFN_FILENAME
 shutil.copy2(downloaded_dfn, dfn_target)
 actual_dfn_sha = file_sha256(dfn_target)
 if actual_dfn_sha != DFN_SHA256:
-    raise RuntimeError(
-        f"DFN5B checksum mismatch: {actual_dfn_sha} != {DFN_SHA256}"
-    )
+    raise RuntimeError(f"DFN5B checksum mismatch: {actual_dfn_sha} != {DFN_SHA256}")
 print(
     "[4/6] DFN5B downloaded:",
     dfn_target,
@@ -194,15 +182,13 @@ for module_name in list(sys.modules):
 sys.path.insert(0, str(project))
 from clip import clip as project_clip
 
-
 downloaded_student = Path(project_clip.download_model("ViT-B/32"))
 student_target = CLIP_CACHE / STUDENT_FILENAME
 shutil.copy2(downloaded_student, student_target)
 actual_student_sha = file_sha256(student_target)
 if actual_student_sha != STUDENT_SHA256:
     raise RuntimeError(
-        "ViT-B/32 checksum mismatch: "
-        f"{actual_student_sha} != {STUDENT_SHA256}"
+        f"ViT-B/32 checksum mismatch: {actual_student_sha} != {STUDENT_SHA256}"
     )
 print(
     "[5/6] ViT-B/32 downloaded:",
@@ -224,6 +210,9 @@ required_paths = (
     project / "src" / "stroke_graph_cache.py",
     project / "src" / "stroke_graph_reports.py",
     project / "src" / "stroke_graph_diagnostics.py",
+    project / "src" / "stroke_prompt.py",
+    project / "src" / "stroke_prompt_probe.py",
+    project / "src" / "stroke_prompt_probe_cli.py",
     project / "tests" / "test_stroke_graph.py",
     project / "tests" / "test_sgcd_commands.py",
     project / "test" / "RUN_ORDER.txt",
@@ -231,12 +220,15 @@ required_paths = (
     project / "test" / "kaggle_sgcd_audit.ipy",
     project / "test" / "kaggle_sgcd_prepare.ipy",
     project / "test" / "kaggle_sgcd_train.ipy",
+    project / "test" / "kaggle_sgcd_native_prompt_train.ipy",
+    project / "test" / "kaggle_sgcd_prompt_preflight.py",
     project / "test" / "kaggle_sgcd_local_control.ipy",
     project / "test" / "kaggle_sgcd_random_control.ipy",
     project / "test" / "kaggle_sgcd_shuffle_control.ipy",
     project / "test" / "kaggle_sgcd_standalone.ipy",
     project / "test" / "kaggle_sgcd_report.py",
     project / "docs" / "sgcd.md",
+    project / "docs" / "sgcd_native_prompt.md",
     dfn_target,
     student_target,
 )
@@ -268,9 +260,7 @@ manifest = {
     encoding="utf-8",
 )
 
-bundle_size = sum(
-    path.stat().st_size for path in BUNDLE.rglob("*") if path.is_file()
-)
+bundle_size = sum(path.stat().st_size for path in BUNDLE.rglob("*") if path.is_file())
 print("[6/6] Bundle validated")
 print("=" * 70)
 print("ONLINE SGCD BUNDLE COMPLETE")

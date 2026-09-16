@@ -1,20 +1,20 @@
 import hashlib
-import math
 import json
+import math
 import os
 from pathlib import Path
 
-import torch
-import torch.nn as nn
+import open_clip
 import pytorch_lightning as pl
+import torch
+from torch import nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
+from torch.utils.data import DataLoader
 from torchmetrics.functional.retrieval import (
     retrieval_average_precision,
     retrieval_precision,
 )
-import open_clip
-from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from clip import clip
@@ -59,9 +59,7 @@ def _retrieval_metrics(
         p_k = 200 if dataset == "quickdraw" else 100
 
     for index, query_feature in enumerate(query_features):
-        cosine = F.cosine_similarity(
-            query_feature.unsqueeze(0), gallery_features
-        ).cpu()
+        cosine = F.cosine_similarity(query_feature.unsqueeze(0), gallery_features).cpu()
         score = ((cosine + 1.0) * 0.5).clamp(
             min=torch.finfo(cosine.dtype).eps,
             max=1.0,
@@ -196,10 +194,7 @@ def _build_teacher_prompts(args, teacher):
 
 def _load_teacher(args):
     if _persistent_teacher_cache_available(args):
-        print(
-            "[Teacher Cache] persistent cache found; "
-            "skipping DFN5B loading."
-        )
+        print("[Teacher Cache] persistent cache found; skipping DFN5B loading.")
         return None
 
     if (
@@ -298,31 +293,32 @@ class CustomCLIP(nn.Module):
             prompt_depth,
         )
         self.retrieval_head = getattr(cfg, "retrieval_head", "main")
+        self.sgcd_student_mode = getattr(cfg, "sgcd_student_mode", "legacy_head")
         self.stroke_graph_head = None
         if self.retrieval_head == "sgcd":
             from src.stroke_graph import StrokeGraphEvidenceHead
+
             patch_count = clip_model.visual.positional_embedding.shape[0] - 1
-            patch_grid = int(round(patch_count ** 0.5))
+            patch_grid = round(patch_count**0.5)
             if patch_grid * patch_grid != patch_count:
                 raise ValueError("SGCD requires a square student patch lattice")
             cfg.sgcd_student_grid = patch_grid
-            output_width = clip_model.visual.proj.shape[1]
-            self.stroke_graph_head = StrokeGraphEvidenceHead(
-                width=output_width,
-                grid=patch_grid,
-                bottleneck=cfg.sgcd_bottleneck,
-                beta=cfg.sgcd_beta,
-                temperature=cfg.sgcd_temperature,
-                graph_steps=cfg.sgcd_graph_steps,
-                graph_mix=cfg.sgcd_graph_mix,
-            )
+            if self.sgcd_student_mode == "legacy_head":
+                output_width = clip_model.visual.proj.shape[1]
+                self.stroke_graph_head = StrokeGraphEvidenceHead(
+                    width=output_width,
+                    grid=patch_grid,
+                    bottleneck=cfg.sgcd_bottleneck,
+                    beta=cfg.sgcd_beta,
+                    temperature=cfg.sgcd_temperature,
+                    graph_steps=cfg.sgcd_graph_steps,
+                    graph_mix=cfg.sgcd_graph_mix,
+                )
         photo_texts = [
-            f"a photo of a {name.replace('_', ' ')}."
-            for name in self.classnames
+            f"a photo of a {name.replace('_', ' ')}." for name in self.classnames
         ]
         sketch_texts = [
-            f"a sketch of a {name.replace('_', ' ')}."
-            for name in self.classnames
+            f"a sketch of a {name.replace('_', ' ')}." for name in self.classnames
         ]
         self.register_buffer(
             "_student_photo_tokens",
@@ -372,9 +368,10 @@ class CustomCLIP(nn.Module):
             f"photo_temperature={cfg.photo_text_kd_temperature}, "
             f"sketch_temperature={cfg.sketch_text_kd_temperature}"
         )
-        if self.stroke_graph_head is not None:
+        if self.retrieval_head == "sgcd":
             print(
                 "[SGCD] photo-conditioned, causally verified stroke paths -> "
+                f"student_mode={self.sgcd_student_mode}, "
                 f"grid={cfg.sgcd_student_grid}x{cfg.sgcd_student_grid}, "
                 f"target={cfg.sgcd_target}, beta={cfg.sgcd_beta}, "
                 f"lambda={cfg.lambda_sgcd}"
@@ -466,10 +463,7 @@ class CustomCLIP(nn.Module):
         def encode(current_images):
             return self.teacher_prompts(current_images, modality)
 
-        if (
-            self.cfg.teacher_prompt_gradient_checkpointing
-            and torch.is_grad_enabled()
-        ):
+        if self.cfg.teacher_prompt_gradient_checkpointing and torch.is_grad_enabled():
             return checkpoint(encode, images, use_reentrant=False)
         return encode(images)
 
@@ -483,8 +477,7 @@ class CustomCLIP(nn.Module):
     ):
         if self.teacher_prompts is None:
             raise RuntimeError(
-                "Teacher prompt pretraining requires "
-                "teacher_pretrain_epochs > 0."
+                "Teacher prompt pretraining requires teacher_pretrain_epochs > 0."
             )
 
         cfg = self.cfg
@@ -529,8 +522,7 @@ class CustomCLIP(nn.Module):
             batches = tqdm(
                 loader,
                 desc=(
-                    "Teacher prompt pretrain "
-                    f"{epoch + 1}/{cfg.teacher_pretrain_epochs}"
+                    f"Teacher prompt pretrain {epoch + 1}/{cfg.teacher_pretrain_epochs}"
                 ),
                 disable=not show_progress,
             )
@@ -548,12 +540,8 @@ class CustomCLIP(nn.Module):
                         dtype=torch.float16,
                         enabled=teacher_device.type == "cuda",
                     ):
-                        photo_features = self._encode_teacher_image(
-                            photo, "photo"
-                        )
-                        sketch_features = self._encode_teacher_image(
-                            sketch, "sketch"
-                        )
+                        photo_features = self._encode_teacher_image(photo, "photo")
+                        sketch_features = self._encode_teacher_image(sketch, "sketch")
                         retrieval = batch_hard_teacher_triplet_loss(
                             sketch_features,
                             photo_features,
@@ -574,9 +562,7 @@ class CustomCLIP(nn.Module):
                         )
             scheduler.step()
             if steps == 0:
-                raise RuntimeError(
-                    "Teacher pretraining produced no complete batches."
-                )
+                raise RuntimeError("Teacher pretraining produced no complete batches.")
             print(
                 f"[Teacher Pretrain] epoch={epoch + 1}, "
                 f"retrieval={retrieval_total / steps:.6f}"
@@ -633,19 +619,13 @@ class CustomCLIP(nn.Module):
                     dtype=teacher_dtype,
                     non_blocking=True,
                 )
-                current_features = self._encode_teacher_image(
-                    images, modality
-                )
+                current_features = self._encode_teacher_image(images, modality)
                 features.append(current_features.float().cpu())
                 labels.append(current_labels.cpu())
             return torch.cat(features), torch.cat(labels)
 
-        sketch_features, sketch_labels = encode_loader(
-            val_sketch_loader, "sketch"
-        )
-        photo_features, photo_labels = encode_loader(
-            val_photo_loader, "photo"
-        )
+        sketch_features, sketch_labels = encode_loader(val_sketch_loader, "sketch")
+        photo_features, photo_labels = encode_loader(val_photo_loader, "photo")
         mean_ap, precision, map_k, p_k = _retrieval_metrics(
             sketch_features,
             photo_features,
@@ -695,9 +675,7 @@ class CustomCLIP(nn.Module):
             disable=not show_progress,
         )
         for images in batches:
-            images = images.to(
-                teacher_device, dtype=teacher_dtype, non_blocking=True
-            )
+            images = images.to(teacher_device, dtype=teacher_dtype, non_blocking=True)
             features = self._encode_teacher_image(images, modality)
             end = offset + len(features)
             output[offset:end].copy_(features.to(dtype=torch.float16).cpu())
@@ -734,9 +712,7 @@ class CustomCLIP(nn.Module):
         torch.save(payload, temporary_path)
         os.replace(temporary_path, cache_path)
         cache_size_mb = cache_path.stat().st_size / 1024**2
-        print(
-            f"[Teacher Cache] saved {cache_path} ({cache_size_mb:.1f} MB)."
-        )
+        print(f"[Teacher Cache] saved {cache_path} ({cache_size_mb:.1f} MB).")
 
     def cache_teacher_features(
         self,
@@ -753,9 +729,8 @@ class CustomCLIP(nn.Module):
         if self._teacher is None:
             return
 
-        image_count = (
-            len(train_dataset.all_sketches_path)
-            + len(train_dataset.all_photo_paths)
+        image_count = len(train_dataset.all_sketches_path) + len(
+            train_dataset.all_photo_paths
         )
         cache_size_mb = (
             image_count
@@ -829,17 +804,15 @@ class CustomCLIP(nn.Module):
             return self._teacher_sketch_text, self._teacher_photo_text
 
         sketch_texts = [
-            f"a sketch of a {name.replace('_', ' ')}."
-            for name in self.classnames
+            f"a sketch of a {name.replace('_', ' ')}." for name in self.classnames
         ]
         photo_texts = [
-            f"a photo of a {name.replace('_', ' ')}."
-            for name in self.classnames
+            f"a photo of a {name.replace('_', ' ')}." for name in self.classnames
         ]
         teacher_device = next(self._teacher.parameters()).device
-        tokens = self._teacher.text_tokenizer(
-            sketch_texts + photo_texts
-        ).to(teacher_device)
+        tokens = self._teacher.text_tokenizer(sketch_texts + photo_texts).to(
+            teacher_device
+        )
         with torch.no_grad():
             text_features = F.normalize(
                 self._teacher.encode_text(tokens).float(), dim=-1
@@ -872,12 +845,9 @@ class CustomCLIP(nn.Module):
 
     def encode_student_image_details(self, image, modality):
         visual_prompt, compound_prompts = self.get_visual_prompt(modality)
-        if self.stroke_graph_head is None or modality != "sketch":
+        if self.retrieval_head != "sgcd" or modality != "sketch":
             # Keep the original main-retrieval path byte-for-byte compatible:
             # CLIP's half-precision output is normalized in its native dtype.
-            # The SGCD sketch path below intentionally promotes to FP32 before
-            # its evidence head, but main/photo descriptors must retain the
-            # baseline dtype and ranking behavior.
             native = self.clip_model.visual(
                 image.type(self.dtype), visual_prompt, compound_prompts
             )
@@ -891,26 +861,39 @@ class CustomCLIP(nn.Module):
                 "correction": torch.zeros_like(native),
                 "ink_mass": None,
             }
-        from src.stroke_graph import FinalBlockInputCapture, projected_patch_features, patch_ink_mass
+        from src.stroke_graph import (
+            FinalBlockInputCapture,
+            patch_ink_mass,
+            projected_patch_features,
+        )
+
         with FinalBlockInputCapture(self.clip_model.visual) as capture:
             native = self.clip_model.visual(
                 image.type(self.dtype), visual_prompt, compound_prompts
             )
-        native = F.normalize(native.float(), dim=-1)
-        dense = projected_patch_features(self.clip_model.visual, capture.residual())
         ink = patch_ink_mass(
             image,
             self.cfg.sgcd_student_grid,
             self.cfg.sgcd_ink_threshold,
             self.cfg.sgcd_ink_softness,
         )
+        if self.sgcd_student_mode == "native_prompt":
+            from src.stroke_prompt import native_prompt_evidence
+
+            native = native / native.norm(dim=-1, keepdim=True)
+            return native_prompt_evidence(
+                self.clip_model.visual, capture.residual(), native, ink
+            )
+        native = F.normalize(native.float(), dim=-1)
+        dense = projected_patch_features(self.clip_model.visual, capture.residual())
         return self.stroke_graph_head(native, dense, ink)
 
     def encode_student_image(self, image, modality):
         return self.encode_student_image_details(image, modality)["descriptor"]
 
-    def _assemble_features(self, photo_features, sketch_features,
-                           teacher_photo_base, teacher_sketch_base):
+    def _assemble_features(
+        self, photo_features, sketch_features, teacher_photo_base, teacher_sketch_base
+    ):
         student_photo_text = (
             F.normalize(self.get_student_text_features("photo"), dim=-1)
             if self.photo_text_active
@@ -929,7 +912,9 @@ class CustomCLIP(nn.Module):
             teacher_photo_features = teacher_photo_base
             teacher_sketch_features = teacher_sketch_base
             if self.image_text_kd_active:
-                teacher_sketch_text, teacher_photo_text = self.get_teacher_text_features()
+                teacher_sketch_text, teacher_photo_text = (
+                    self.get_teacher_text_features()
+                )
         return (
             photo_features,
             sketch_features,
@@ -947,13 +932,15 @@ class CustomCLIP(nn.Module):
         photo = self.encode_student_image_details(photo_tensor, "photo")
         sketch = self.encode_student_image_details(sketch_tensor, "sketch")
         features = self._assemble_features(
-            photo["descriptor"], sketch["descriptor"],
-            teacher_photo_base, teacher_sketch_base,
+            photo["descriptor"],
+            sketch["descriptor"],
+            teacher_photo_base,
+            teacher_sketch_base,
         )
         return features, sketch
 
     def forward(self, x):
-        if self.stroke_graph_head is not None:
+        if self.retrieval_head == "sgcd":
             return self.forward_with_stroke_graph(x)[0]
         photo_tensor, sketch_tensor, teacher_photo_base, teacher_sketch_base, _label = x
         photo_features = self.encode_student_image(photo_tensor, "photo")
@@ -965,7 +952,6 @@ class CustomCLIP(nn.Module):
     def extract_feature(self, image, modality, return_details=False):
         output = self.encode_student_image_details(image, modality)
         return output if return_details else output["descriptor"]
-
 
 
 class ZS_SBIR(pl.LightningModule):
@@ -989,7 +975,9 @@ class ZS_SBIR(pl.LightningModule):
         self.val_step_outputs_sk = []
         self.val_step_outputs_ph = []
         self._sgcd_last_validation = {}
-        self.save_hyperparameters({"args": dict(vars(args)), "classnames": list(classnames)})
+        self.save_hyperparameters(
+            {"args": dict(vars(args)), "classnames": list(classnames)}
+        )
 
     def cache_teacher_features(
         self,
@@ -1008,27 +996,36 @@ class ZS_SBIR(pl.LightningModule):
             workers,
             show_progress,
         )
-        
+
     def configure_optimizers(self):
-        named = [(name, parameter) for name, parameter in self.model.named_parameters()
-                 if parameter.requires_grad]
+        named = [
+            (name, parameter)
+            for name, parameter in self.model.named_parameters()
+            if parameter.requires_grad
+        ]
         head = [parameter for name, parameter in named if "stroke_graph_head." in name]
-        base = [parameter for name, parameter in named if "stroke_graph_head." not in name]
+        base = [
+            parameter for name, parameter in named if "stroke_graph_head." not in name
+        ]
         param_groups = []
         if base:
-            param_groups.append({
-                "params": base,
-                "lr": self.args.lr,
-                "momentum": self.args.momentum,
-                "weight_decay": self.args.weight_decay,
-            })
+            param_groups.append(
+                {
+                    "params": base,
+                    "lr": self.args.lr,
+                    "momentum": self.args.momentum,
+                    "weight_decay": self.args.weight_decay,
+                }
+            )
         if head:
-            param_groups.append({
-                "params": head,
-                "lr": self.args.sgcd_head_lr,
-                "momentum": self.args.momentum,
-                "weight_decay": self.args.weight_decay,
-            })
+            param_groups.append(
+                {
+                    "params": head,
+                    "lr": self.args.sgcd_head_lr,
+                    "momentum": self.args.momentum,
+                    "weight_decay": self.args.weight_decay,
+                }
+            )
         optimizer = torch.optim.SGD(
             params=param_groups,
             lr=self.args.lr,
@@ -1052,7 +1049,7 @@ class ZS_SBIR(pl.LightningModule):
 
     def forward(self, data):
         return self.model(data)
-    
+
     def _sgcd_schedule_factor(self, batch_idx):
         if self.lambda_sgcd <= 0:
             return 0.0
@@ -1086,31 +1083,43 @@ class ZS_SBIR(pl.LightningModule):
             selected = {key: value.roll(1, 0) for key, value in selected.items()}
         return selected
 
-    def stroke_graph_loss(self, batch, features, output):
+    def stroke_graph_loss(self, batch, features, output, return_components=False):
         from src.stroke_graph import (
+            centered_field_alignment,
             class_aware_hard_negative_ranking,
             counterfactual_field_alignment,
-            centered_field_alignment,
             erase_by_patch_evidence,
             evidence_entropy,
             hellinger_loss,
         )
+
         if len(batch) != 6 or not isinstance(batch[5], dict):
-            raise RuntimeError("SGCD targets are missing; prepare the complete cache before fitting")
+            raise RuntimeError(
+                "SGCD targets are missing; prepare the complete cache before fitting"
+            )
         target = self._select_sgcd_target(batch[5])
         confidence = target["confidence"].to(self.device).float().clamp(0, 1.0)
         teacher_map = target["map"].to(self.device).float()
         where = hellinger_loss(output["weights"], teacher_map, confidence)
         what, what_cosine = centered_field_alignment(
-            output["evidence"], features[0].detach(),
-            target["teacher_evidence"], features[2], confidence,
+            output["evidence"],
+            features[0].detach(),
+            target["teacher_evidence"],
+            features[2],
+            confidence,
         )
-        anchor = (1 - F.cosine_similarity(
-            output["descriptor"], output["native"].detach(), dim=-1
-        )).mean()
+        anchor = (
+            1
+            - F.cosine_similarity(
+                output["descriptor"], output["native"].detach(), dim=-1
+            )
+        ).mean()
         rank, rank_stats = class_aware_hard_negative_ranking(
-            output["descriptor"], features[0].detach(), batch[4],
-            self.args.sgcd_rank_margin, confidence,
+            output["descriptor"],
+            features[0].detach(),
+            batch[4],
+            self.args.sgcd_rank_margin,
+            confidence,
         )
         effect = output["descriptor"].sum() * 0
         effect_stats = {
@@ -1122,14 +1131,23 @@ class ZS_SBIR(pl.LightningModule):
         masked_output = None
         if self.args.lambda_sgcd_effect > 0:
             masked_images, removed = erase_by_patch_evidence(
-                batch[1], target["mask_priority"].to(self.device).float(),
+                batch[1],
+                target["mask_priority"].to(self.device).float(),
                 self.args.sgcd_mask_fraction,
-                self.args.sgcd_ink_threshold, self.args.sgcd_ink_softness,
+                self.args.sgcd_ink_threshold,
+                self.args.sgcd_ink_softness,
             )
-            masked_output = self.model.encode_student_image_details(masked_images, "sketch")
+            masked_output = self.model.encode_student_image_details(
+                masked_images, "sketch"
+            )
             effect, effect_stats = counterfactual_field_alignment(
-                output["descriptor"], masked_output["descriptor"], features[0].detach(),
-                features[3], target["teacher_masked"], features[2], confidence,
+                output["descriptor"],
+                masked_output["descriptor"],
+                features[0].detach(),
+                features[3],
+                target["teacher_masked"],
+                features[2],
+                confidence,
                 self.args.sgcd_effect_magnitude_weight,
             )
             effect_stats["removed_ink_fraction"] = removed.mean().detach()
@@ -1152,30 +1170,41 @@ class ZS_SBIR(pl.LightningModule):
             "what_cosine": what_cosine.detach(),
             "student_entropy": evidence_entropy(output["weights"]).mean().detach(),
             "teacher_entropy": evidence_entropy(teacher_map).mean().detach(),
-            "map_cosine": F.cosine_similarity(output["weights"], teacher_map, dim=-1).mean().detach(),
+            "map_cosine": F.cosine_similarity(output["weights"], teacher_map, dim=-1)
+            .mean()
+            .detach(),
             "descriptor_native_cosine": F.cosine_similarity(
                 output["descriptor"], output["native"], dim=-1
-            ).mean().detach(),
+            )
+            .mean()
+            .detach(),
             "correction_norm": output["correction"].norm(dim=-1).mean().detach(),
             "confidence": confidence.mean().detach(),
             "confidence_nonzero": (confidence > 0).float().mean().detach(),
-            "teacher_selected_effect": target["selected_effect"].float().mean().detach(),
+            "teacher_selected_effect": target["selected_effect"]
+            .float()
+            .mean()
+            .detach(),
             "teacher_clean_margin": target["clean_margin"].float().mean().detach(),
             "teacher_masked_margin": target["masked_margin"].float().mean().detach(),
             **rank_stats,
             **effect_stats,
         }
+        if return_components:
+            return total, statistics, masked_output, values
         return total, statistics, masked_output
 
     def training_step(self, batch, batch_idx):
-        if self.model.stroke_graph_head is not None:
+        if self.model.retrieval_head == "sgcd":
             features, output = self.model.forward_with_stroke_graph(batch[:5])
         else:
             features, output = self(batch[:5]), None
         main_loss, loss_dict = loss_fn(self.args, features)
         loss = main_loss
         if self.lambda_sgcd > 0:
-            sgcd_loss, statistics, _masked = self.stroke_graph_loss(batch, features, output)
+            sgcd_loss, statistics, _masked = self.stroke_graph_loss(
+                batch, features, output
+            )
             schedule = self._sgcd_schedule_factor(batch_idx)
             weighted = self.lambda_sgcd * schedule * sgcd_loss
             loss = loss + weighted
@@ -1187,7 +1216,9 @@ class ZS_SBIR(pl.LightningModule):
         self.log("train_loss", loss, on_step=False, on_epoch=True)
         self.log("main_loss", main_loss, on_step=False, on_epoch=True)
         for key, bar_name in {"domain_kd": "DOMAIN", "modality_kd": "MODALITY"}.items():
-            self.log(bar_name, loss_dict[key], on_step=True, on_epoch=False, prog_bar=True)
+            self.log(
+                bar_name, loss_dict[key], on_step=True, on_epoch=False, prog_bar=True
+            )
         return loss
 
     def validation_step(self, batch, batch_idx, dataloader_idx):
@@ -1207,10 +1238,16 @@ class ZS_SBIR(pl.LightningModule):
         gallery_features = torch.cat([value[0] for value in self.val_step_outputs_ph])
         query_native = torch.cat([value[1] for value in self.val_step_outputs_sk])
         gallery_native = torch.cat([value[1] for value in self.val_step_outputs_ph])
-        sketch_labels = torch.cat([value[2] for value in self.val_step_outputs_sk]).cpu()
+        sketch_labels = torch.cat(
+            [value[2] for value in self.val_step_outputs_sk]
+        ).cpu()
         photo_labels = torch.cat([value[2] for value in self.val_step_outputs_ph]).cpu()
         mAP, precision, map_k, p_k = _retrieval_metrics(
-            query_features, gallery_features, sketch_labels, photo_labels, self.args.dataset
+            query_features,
+            gallery_features,
+            sketch_labels,
+            photo_labels,
+            self.args.dataset,
         )
         native_mAP, native_precision, _native_map_k, _native_p_k = _retrieval_metrics(
             query_native, gallery_native, sketch_labels, photo_labels, self.args.dataset
@@ -1226,10 +1263,14 @@ class ZS_SBIR(pl.LightningModule):
             "native_precision": native_precision.item(),
             "descriptor_native_cosine_sketch": F.cosine_similarity(
                 query_features.float(), query_native.float(), dim=-1
-            ).mean().item(),
+            )
+            .mean()
+            .item(),
             "descriptor_native_cosine_photo": F.cosine_similarity(
                 gallery_features.float(), gallery_native.float(), dim=-1
-            ).mean().item(),
+            )
+            .mean()
+            .item(),
         }
         if self.global_step > 0:
             self.best_precision = max(self.best_precision, precision.item())
@@ -1249,8 +1290,10 @@ class ZS_SBIR(pl.LightningModule):
             args=dict(vars(self.args)), classnames=list(self.model.classnames)
         )
         checkpoint["experiment_config"] = {
-            "method": "SGCD" if self.model.stroke_graph_head is not None else "main",
+            "method": "SGCD" if self.model.retrieval_head == "sgcd" else "main",
             "retrieval_head": getattr(self.args, "retrieval_head", "main"),
             "args": dict(vars(self.args)),
-            "stroke_graph_target_metadata": getattr(self.args, "sgcd_target_metadata", None),
+            "stroke_graph_target_metadata": getattr(
+                self.args, "sgcd_target_metadata", None
+            ),
         }

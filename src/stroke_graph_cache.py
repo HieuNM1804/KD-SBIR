@@ -4,9 +4,9 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import shutil
 import time
+from pathlib import Path
 
 import torch
 from torch.nn import functional as F
@@ -40,6 +40,12 @@ def file_sha256(path):
 
 def add_arguments(parser):
     parser.add_argument("--retrieval_head", choices=("main", "sgcd"), default="main")
+    parser.add_argument(
+        "--sgcd_student_mode",
+        choices=("legacy_head", "native_prompt"),
+        default="legacy_head",
+        help="Use the historical evidence head or supervise CLIP prompts directly.",
+    )
     parser.add_argument("--lambda_sgcd", type=float, default=0.0)
     parser.add_argument("--lambda_sgcd_where", type=float, default=1.0)
     parser.add_argument("--lambda_sgcd_what", type=float, default=0.25)
@@ -47,7 +53,9 @@ def add_arguments(parser):
     parser.add_argument("--lambda_sgcd_anchor", type=float, default=0.20)
     parser.add_argument("--lambda_sgcd_rank", type=float, default=0.50)
     parser.add_argument("--sgcd_effect_magnitude_weight", type=float, default=0.25)
-    parser.add_argument("--sgcd_target", choices=TARGET_NAMES + ("shuffled",), default="verified")
+    parser.add_argument(
+        "--sgcd_target", choices=TARGET_NAMES + ("shuffled",), default="verified"
+    )
     parser.add_argument("--sgcd_beta", type=float, default=0.10)
     parser.add_argument("--sgcd_bottleneck", type=int, default=128)
     parser.add_argument("--sgcd_head_lr", type=float, default=3e-3)
@@ -63,7 +71,9 @@ def add_arguments(parser):
     parser.add_argument("--sgcd_local_topk_patches", type=int, default=4)
     parser.add_argument("--sgcd_proposal_topk", type=int, default=3)
     parser.add_argument(
-        "--sgcd_effect_mode", choices=("positive", "pairwise"), default="pairwise",
+        "--sgcd_effect_mode",
+        choices=("positive", "pairwise"),
+        default="pairwise",
         help="Verify paths by positive-similarity drop or positive-vs-negative margin drop.",
     )
     parser.add_argument("--sgcd_negative_topk", type=int, default=3)
@@ -86,33 +96,74 @@ def add_arguments(parser):
 
 
 def validate_arguments(parser, args):
+    if args.retrieval_head == "sgcd" and args.sgcd_student_mode == "native_prompt":
+        if args.n_ctx_visual < 1 or args.prompt_depth < 2:
+            parser.error(
+                "Native prompt localization requires prompts in at least two layers"
+            )
+        if args.sgcd_beta != 0 or args.lambda_sgcd_anchor != 0:
+            parser.error(
+                "Native prompt mode requires --sgcd_beta 0 --lambda_sgcd_anchor 0"
+            )
     nonnegative = (
-        args.lambda_sgcd, args.lambda_sgcd_where, args.lambda_sgcd_what,
-        args.lambda_sgcd_effect, args.lambda_sgcd_anchor, args.lambda_sgcd_rank,
-        args.sgcd_effect_magnitude_weight, args.sgcd_beta, args.sgcd_head_lr,
-        args.sgcd_warmup_epochs, args.sgcd_decay_start_epoch, args.sgcd_rank_margin,
+        args.lambda_sgcd,
+        args.lambda_sgcd_where,
+        args.lambda_sgcd_what,
+        args.lambda_sgcd_effect,
+        args.lambda_sgcd_anchor,
+        args.lambda_sgcd_rank,
+        args.sgcd_effect_magnitude_weight,
+        args.sgcd_beta,
+        args.sgcd_head_lr,
+        args.sgcd_warmup_epochs,
+        args.sgcd_decay_start_epoch,
+        args.sgcd_rank_margin,
     )
     if any(not math.isfinite(value) or value < 0 for value in nonnegative):
-        parser.error("SGCD weights, beta, learning rate and schedule must be finite and nonnegative")
+        parser.error(
+            "SGCD weights, beta, learning rate and schedule must be finite and nonnegative"
+        )
     if args.retrieval_head == "main" and (
-            args.lambda_sgcd > 0 or args.sgcd_prepare_only or args.sgcd_audit_only):
+        args.lambda_sgcd > 0 or args.sgcd_prepare_only or args.sgcd_audit_only
+    ):
         parser.error("SGCD preparation/training requires --retrieval_head sgcd")
-    if (args.retrieval_head == "sgcd" and args.lambda_sgcd <= 0
-            and not args.sgcd_prepare_only and not args.sgcd_audit_only):
+    if (
+        args.retrieval_head == "sgcd"
+        and args.lambda_sgcd <= 0
+        and not args.sgcd_prepare_only
+        and not args.sgcd_audit_only
+    ):
         parser.error("Use positive --lambda_sgcd or select --retrieval_head main")
-    if args.lambda_sgcd > 0 and sum((args.lambda_sgcd_where, args.lambda_sgcd_what,
-                                     args.lambda_sgcd_effect, args.lambda_sgcd_anchor,
-                                     args.lambda_sgcd_rank)) <= 0:
+    if (
+        args.lambda_sgcd > 0
+        and sum(
+            (
+                args.lambda_sgcd_where,
+                args.lambda_sgcd_what,
+                args.lambda_sgcd_effect,
+                args.lambda_sgcd_anchor,
+                args.lambda_sgcd_rank,
+            )
+        )
+        <= 0
+    ):
         parser.error("At least one SGCD component must be positive")
     positive_ints = (
-        args.sgcd_bottleneck, args.sgcd_teacher_batch_size, args.sgcd_max_paths,
-        args.sgcd_photo_representatives, args.sgcd_local_topk_patches,
-        args.sgcd_proposal_topk, args.sgcd_audit_samples, args.sgcd_negative_topk,
+        args.sgcd_bottleneck,
+        args.sgcd_teacher_batch_size,
+        args.sgcd_max_paths,
+        args.sgcd_photo_representatives,
+        args.sgcd_local_topk_patches,
+        args.sgcd_proposal_topk,
+        args.sgcd_audit_samples,
+        args.sgcd_negative_topk,
     )
     if any(value < 1 for value in positive_ints):
         parser.error("SGCD dimensions and batch/audit sizes must be positive")
     if args.sgcd_photo_representatives < 2:
-        parser.error("SGCD requires at least two representative photos for proposal/verification separation")
+        parser.error(
+            "SGCD requires at least two representative photos for proposal/verification separation"
+        )
     if args.sgcd_proposal_topk > args.sgcd_max_paths:
         parser.error("--sgcd_proposal_topk cannot exceed --sgcd_max_paths")
     if args.sgcd_skeleton_grid < 7:
@@ -120,7 +171,9 @@ def validate_arguments(parser, args):
     if args.sgcd_graph_steps < 0 or not 0 <= args.sgcd_graph_mix <= 1:
         parser.error("SGCD graph steps/mix are out of range")
     if args.sgcd_temperature <= 0 or not 0 < args.sgcd_mask_fraction < 1:
-        parser.error("SGCD temperature must be positive and mask fraction must be in (0,1)")
+        parser.error(
+            "SGCD temperature must be positive and mask fraction must be in (0,1)"
+        )
     if args.sgcd_target_temperature <= 0:
         parser.error("--sgcd_target_temperature must be positive")
     if not 0 <= args.sgcd_ink_threshold < 1 or not 0 < args.sgcd_ink_softness <= 1:
@@ -131,8 +184,9 @@ def validate_arguments(parser, args):
         parser.error("Invalid SGCD teacher-only gate")
     if not 0 <= args.sgcd_max_random_map_cosine <= 1:
         parser.error("--sgcd_max_random_map_cosine must lie in [0,1]")
-    if (args.lambda_sgcd > 0 or args.sgcd_prepare_only or args.sgcd_audit_only) \
-            and args.teacher_pretrain_epochs < 1:
+    if (
+        args.lambda_sgcd > 0 or args.sgcd_prepare_only or args.sgcd_audit_only
+    ) and args.teacher_pretrain_epochs < 1:
         parser.error("SGCD requires the prompt-tuned main teacher cache")
 
 
@@ -175,17 +229,21 @@ def _path_fingerprint(paths, root):
 
 
 def _photo_labels(dataset):
-    return torch.tensor([
-        dataset.category_to_label[Path(path).parent.name]
-        for path in dataset.all_photo_paths
-    ])
+    return torch.tensor(
+        [
+            dataset.category_to_label[Path(path).parent.name]
+            for path in dataset.all_photo_paths
+        ]
+    )
 
 
 def _sketch_labels(dataset):
-    return torch.tensor([
-        dataset.category_to_label[Path(path).parent.name]
-        for path in dataset.all_sketches_path
-    ])
+    return torch.tensor(
+        [
+            dataset.category_to_label[Path(path).parent.name]
+            for path in dataset.all_sketches_path
+        ]
+    )
 
 
 def select_photo_representatives(features, labels, class_count, count):
@@ -199,7 +257,7 @@ def select_photo_representatives(features, labels, class_count, count):
         current = features[indices]
         centroid = F.normalize(current.mean(0), dim=-1)
         order = torch.argsort(current @ centroid, descending=True, stable=True)
-        chosen = indices[order[:min(count, len(order))]].tolist()
+        chosen = indices[order[: min(count, len(order))]].tolist()
         while len(chosen) < count:
             chosen.append(chosen[len(chosen) % len(chosen)])
         output.append(chosen)
@@ -211,9 +269,11 @@ def _compatibility_statistics(cosine):
     if len(values) == 0 or not torch.isfinite(values).all():
         raise ValueError("Teacher compatibility cosine is empty or nonfinite")
     return {
-        "count": len(values), "minimum": values.min().item(),
+        "count": len(values),
+        "minimum": values.min().item(),
         "p01": torch.quantile(values, 0.01).item(),
-        "median": values.median().item(), "mean": values.mean().item(),
+        "median": values.median().item(),
+        "mean": values.mean().item(),
     }
 
 
@@ -222,16 +282,22 @@ def _compatibility_is_acceptable(values):
 
 
 @torch.no_grad()
-def _teacher_compatibility_probe(controller, dataset, cached, device, dtype, batch_size):
+def _teacher_compatibility_probe(
+    controller, dataset, cached, device, dtype, batch_size
+):
     count = min(64, len(dataset))
     indices = torch.linspace(0, len(dataset) - 1, steps=count).round().long().unique()
     similarities = []
     transform = dataset.normal_transform
     for part in indices.split(batch_size):
-        images = torch.stack([
-            transform(load_image(dataset.all_sketches_path[index], dataset.max_size))
-            for index in part.tolist()
-        ]).to(device=device, dtype=dtype)
+        images = torch.stack(
+            [
+                transform(
+                    load_image(dataset.all_sketches_path[index], dataset.max_size)
+                )
+                for index in part.tolist()
+            ]
+        ).to(device=device, dtype=dtype)
         encoded = controller(images, "sketch").float().cpu()
         similarities.append(F.cosine_similarity(encoded, cached[part].float(), dim=-1))
     statistics = _compatibility_statistics(torch.cat(similarities))
@@ -247,8 +313,13 @@ def _teacher_compatibility_probe(controller, dataset, cached, device, dtype, bat
 def _metadata(args, dataset, teacher_path, teacher_metadata, representative_indices):
     root = Path(__file__).resolve().parent.parent
     sources = (
-        "clip/model.py", "src/dataset.py", "src/model.py", "src/losses.py",
-        "src/teacher_prompts.py", "src/stroke_graph.py", "src/stroke_graph_cache.py",
+        "clip/model.py",
+        "src/dataset.py",
+        "src/model.py",
+        "src/losses.py",
+        "src/teacher_prompts.py",
+        "src/stroke_graph.py",
+        "src/stroke_graph_cache.py",
     )
     return {
         "format_version": CACHE_FORMAT_VERSION,
@@ -258,7 +329,8 @@ def _metadata(args, dataset, teacher_path, teacher_metadata, representative_indi
             "held_out_positive_vs_hard_negative_margin_verification;"
             "soft_multi_path_target;fixed_ink_budget"
         ),
-        "dataset": args.dataset, "max_size": dataset.max_size,
+        "dataset": args.dataset,
+        "max_size": dataset.max_size,
         "classnames": list(dataset.all_categories),
         "sketch_count": len(dataset.all_sketches_path),
         "photo_count": len(dataset.all_photo_paths),
@@ -292,7 +364,9 @@ def _metadata(args, dataset, teacher_path, teacher_metadata, representative_indi
 def _cache_path(args, metadata, teacher_path):
     if args.sgcd_cache_path:
         return Path(args.sgcd_cache_path)
-    key = hashlib.sha256(json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
+    key = hashlib.sha256(
+        json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:16]
     return teacher_path.parent / f"{args.dataset}_sgcd_{key}.pt"
 
 
@@ -300,16 +374,28 @@ def validate_payload(payload, metadata):
     if payload.get("metadata") != metadata:
         raise ValueError("SGCD cache metadata differs; use a new --sgcd_cache_path")
     n, variants = metadata["sketch_count"], len(TARGET_NAMES)
-    grid, width, paths = metadata["student_grid"]**2, metadata["teacher_metadata"]["teacher_output_dim"], metadata["max_paths"]
+    grid, width, paths = (
+        metadata["student_grid"] ** 2,
+        metadata["teacher_metadata"]["teacher_output_dim"],
+        metadata["max_paths"],
+    )
     shapes = {
-        "maps": (n, variants, grid), "mask_priorities": (n, variants, grid),
-        "teacher_evidence": (n, variants, width), "teacher_masked": (n, variants, width),
-        "confidence": (n, variants), "selected_effect": (n, variants),
-        "clean_margin": (n,), "masked_margin": (n, variants),
-        "removed_ink_fraction": (n, variants), "candidate_effects": (n, paths),
-        "candidate_local_scores": (n, paths), "candidate_weights": (n, paths),
-        "hard_negative_label": (n,), "path_valid": (n, paths),
-        "selected_path_index": (n, variants), "path_count": (n,),
+        "maps": (n, variants, grid),
+        "mask_priorities": (n, variants, grid),
+        "teacher_evidence": (n, variants, width),
+        "teacher_masked": (n, variants, width),
+        "confidence": (n, variants),
+        "selected_effect": (n, variants),
+        "clean_margin": (n,),
+        "masked_margin": (n, variants),
+        "removed_ink_fraction": (n, variants),
+        "candidate_effects": (n, paths),
+        "candidate_local_scores": (n, paths),
+        "candidate_weights": (n, paths),
+        "hard_negative_label": (n,),
+        "path_valid": (n, paths),
+        "selected_path_index": (n, variants),
+        "path_count": (n,),
         "clean_cache_cosine": (n,),
     }
     for name, shape in shapes.items():
@@ -318,15 +404,26 @@ def validate_payload(payload, metadata):
             raise ValueError(f"Invalid SGCD tensor {name}: expected {shape}")
         if value.is_floating_point() and not torch.isfinite(value).all():
             raise ValueError(f"Nonfinite SGCD tensor: {name}")
-    for name in ("maps", "mask_priorities", "teacher_evidence", "teacher_masked",
-                 "candidate_weights"):
+    for name in (
+        "maps",
+        "mask_priorities",
+        "teacher_evidence",
+        "teacher_masked",
+        "candidate_weights",
+    ):
         if payload[name].dtype != torch.float16:
             raise ValueError(f"SGCD {name} must be float16")
-    if not torch.allclose(payload["maps"].float().sum(-1), torch.ones(n, variants), atol=2e-3):
+    if not torch.allclose(
+        payload["maps"].float().sum(-1), torch.ones(n, variants), atol=2e-3
+    ):
         raise ValueError("SGCD maps are not normalized")
-    if not torch.allclose(payload["mask_priorities"].float().sum(-1), torch.ones(n, variants), atol=2e-3):
+    if not torch.allclose(
+        payload["mask_priorities"].float().sum(-1), torch.ones(n, variants), atol=2e-3
+    ):
         raise ValueError("SGCD mask priorities are not normalized")
-    if not torch.allclose(payload["candidate_weights"].float().sum(-1), torch.ones(n), atol=2e-3):
+    if not torch.allclose(
+        payload["candidate_weights"].float().sum(-1), torch.ones(n), atol=2e-3
+    ):
         raise ValueError("SGCD candidate weights are not normalized")
     if metadata.get("effect_mode") == "pairwise":
         labels = payload["hard_negative_label"].long()
@@ -334,28 +431,50 @@ def validate_payload(payload, metadata):
             raise ValueError("SGCD hard-negative labels are out of range")
     if (payload["confidence"] < 0).any() or (payload["confidence"] > 1).any():
         raise ValueError("SGCD confidence must lie in [0,1]")
-    if (payload["removed_ink_fraction"] - metadata["mask_fraction"]).abs().max() > 0.025:
+    if (
+        payload["removed_ink_fraction"] - metadata["mask_fraction"]
+    ).abs().max() > 0.025:
         raise ValueError("SGCD erasure does not respect the ink budget")
 
 
 @torch.no_grad()
-def _encode_photo_representatives(controller, paths, class_count, representatives,
-                                  size, batch_size, workers, device, dtype):
+def _encode_photo_representatives(
+    controller,
+    paths,
+    class_count,
+    representatives,
+    size,
+    batch_size,
+    workers,
+    device,
+    dtype,
+):
     selected_paths = [paths[index] for index in representatives.flatten().tolist()]
-    loader = DataLoader(IndexedImageDataset(selected_paths, size), batch_size=batch_size,
-                        shuffle=False, num_workers=workers, pin_memory=device.type == "cuda",
-                        persistent_workers=False,
-                        prefetch_factor=4 if workers > 0 else None)
+    loader = DataLoader(
+        IndexedImageDataset(selected_paths, size),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=workers,
+        pin_memory=device.type == "cuda",
+        persistent_workers=False,
+        prefetch_factor=4 if workers > 0 else None,
+    )
     dense = []
-    for images in tqdm(loader, desc="[SGCD Cache] representative photo patches", mininterval=3):
+    for images in tqdm(
+        loader, desc="[SGCD Cache] representative photo patches", mininterval=3
+    ):
         images = images.to(device=device, dtype=dtype, non_blocking=True)
         with FinalBlockInputCapture(controller._visual) as capture:
             controller(images, "photo")
-        dense.append(F.normalize(
-            projected_patch_features(controller._visual, capture.residual()), dim=-1
-        ).half())
+        dense.append(
+            F.normalize(
+                projected_patch_features(controller._visual, capture.residual()), dim=-1
+            ).half()
+        )
     result = torch.cat(dense)
-    return result.reshape(class_count, representatives.shape[1], result.shape[1], result.shape[2])
+    return result.reshape(
+        class_count, representatives.shape[1], result.shape[1], result.shape[2]
+    )
 
 
 def _choose_random(valid, indices, seed, exclude=None):
@@ -365,7 +484,9 @@ def _choose_random(valid, indices, seed, exclude=None):
         if exclude is not None and len(choices) > 1:
             choices = choices[choices != int(exclude[row])]
         generator = torch.Generator().manual_seed(seed + int(index) * 104729)
-        selected.append(choices[torch.randint(len(choices), (1,), generator=generator)].item())
+        selected.append(
+            choices[torch.randint(len(choices), (1,), generator=generator)].item()
+        )
     return torch.tensor(selected, device=valid.device, dtype=torch.long)
 
 
@@ -376,16 +497,25 @@ def _target_batch(images, indices, labels, controller, photo_dense, photo_global
         clean = F.normalize(controller(images, "sketch").float(), dim=-1)
     dense = F.normalize(projected_patch_features(visual, capture.residual()), dim=-1)
     path_maps, valid, skeleton = stroke_path_maps(
-        images, args.sgcd_student_grid, args.sgcd_skeleton_grid, args.sgcd_max_paths,
-        args.sgcd_ink_threshold, args.sgcd_ink_softness,
+        images,
+        args.sgcd_student_grid,
+        args.sgcd_skeleton_grid,
+        args.sgcd_max_paths,
+        args.sgcd_ink_threshold,
+        args.sgcd_ink_softness,
     )
     batch, paths, grid = path_maps.shape
     teacher_grid = args.max_size // 14
-    teacher_ink = patch_ink_mass(images, teacher_grid,
-                                 args.sgcd_ink_threshold, args.sgcd_ink_softness)
+    teacher_ink = patch_ink_mass(
+        images, teacher_grid, args.sgcd_ink_threshold, args.sgcd_ink_softness
+    )
     upsampled = F.interpolate(
-        path_maps.reshape(batch * paths, 1, args.sgcd_student_grid, args.sgcd_student_grid),
-        size=(teacher_grid, teacher_grid), mode="bilinear", align_corners=False,
+        path_maps.reshape(
+            batch * paths, 1, args.sgcd_student_grid, args.sgcd_student_grid
+        ),
+        size=(teacher_grid, teacher_grid),
+        mode="bilinear",
+        align_corners=False,
     ).flatten(1)
     upsampled = normalize_evidence(
         upsampled,
@@ -396,19 +526,25 @@ def _target_batch(images, indices, labels, controller, photo_dense, photo_global
         path_features, photo_dense[labels, :-1], args.sgcd_local_topk_patches
     ).masked_fill(~valid, -torch.inf)
 
-    student_ink = patch_ink_mass(images, args.sgcd_student_grid,
-                                 args.sgcd_ink_threshold, args.sgcd_ink_softness)
+    student_ink = patch_ink_mass(
+        images, args.sgcd_student_grid, args.sgcd_ink_threshold, args.sgcd_ink_softness
+    )
     priority = path_priority_maps(path_maps, student_ink, args.sgcd_student_grid, valid)
     priority = normalize_evidence(
         priority.reshape(batch * paths, -1),
         student_ink[:, None].expand(-1, paths, -1).reshape(batch * paths, -1),
     ).reshape(batch, paths, grid)
-    expanded_images = images[:, None].expand(-1, paths, -1, -1, -1).reshape(
-        batch * paths, *images.shape[1:]
+    expanded_images = (
+        images[:, None]
+        .expand(-1, paths, -1, -1, -1)
+        .reshape(batch * paths, *images.shape[1:])
     )
     masked_images, removed = erase_by_patch_evidence(
-        expanded_images, priority.reshape(batch * paths, grid), args.sgcd_mask_fraction,
-        args.sgcd_ink_threshold, args.sgcd_ink_softness,
+        expanded_images,
+        priority.reshape(batch * paths, grid),
+        args.sgcd_mask_fraction,
+        args.sgcd_ink_threshold,
+        args.sgcd_ink_softness,
     )
     masked = []
     for part in masked_images.split(args.sgcd_teacher_batch_size):
@@ -427,9 +563,13 @@ def _target_batch(images, indices, labels, controller, photo_dense, photo_global
         negative_count = min(args.sgcd_negative_topk, photo_global.shape[0] - 1)
         negative_labels = negative_scores.topk(negative_count, dim=-1).indices
         hard_negative_label = negative_labels[:, 0]
-        negative_gallery = F.normalize(photo_global[:, -1].float(), dim=-1)[negative_labels]
+        negative_gallery = F.normalize(photo_global[:, -1].float(), dim=-1)[
+            negative_labels
+        ]
         negative_clean = torch.einsum("bd,bnd->bn", clean, negative_gallery).mean(-1)
-        negative_masked = torch.einsum("bkd,bnd->bkn", masked, negative_gallery).mean(-1)
+        negative_masked = torch.einsum("bkd,bnd->bkn", masked, negative_gallery).mean(
+            -1
+        )
         clean_margin = positive_clean - negative_clean
         candidate_masked_margin = positive_masked - negative_masked
     else:
@@ -466,12 +606,17 @@ def _target_batch(images, indices, labels, controller, photo_dense, photo_global
         torch.einsum("bk,bkd->bd", candidate_weights, path_features), dim=-1
     )
     verified_images, verified_removed = erase_by_patch_evidence(
-        images, verified_priority, args.sgcd_mask_fraction,
-        args.sgcd_ink_threshold, args.sgcd_ink_softness,
+        images,
+        verified_priority,
+        args.sgcd_mask_fraction,
+        args.sgcd_ink_threshold,
+        args.sgcd_ink_softness,
     )
     verified_masked_parts = []
     for part in verified_images.split(args.sgcd_teacher_batch_size):
-        verified_masked_parts.append(F.normalize(controller(part, "sketch").float(), dim=-1))
+        verified_masked_parts.append(
+            F.normalize(controller(part, "sketch").float(), dim=-1)
+        )
     verified_masked = torch.cat(verified_masked_parts)
     verified_positive = torch.einsum("bd,bd->b", verified_masked, positives)
     if negative_gallery is None:
@@ -492,32 +637,47 @@ def _target_batch(images, indices, labels, controller, photo_dense, photo_global
     selected_effect = clean_margin[:, None] - selected_masked_margin
     random_effect = selected_effect[:, 2]
     advantage = selected_effect[:, 0] - random_effect
-    verified_confidence = (advantage.clamp_min(0) / (
-        selected_effect[:, 0].abs() + random_effect.abs() + 1e-3
-    )).clamp(0, 1)
-    confidence = torch.stack((verified_confidence, torch.ones_like(advantage),
-                              torch.ones_like(advantage)), dim=1)
-    maps = torch.stack((
-        verified_map,
-        path_maps[rows_1d, local_choice],
-        path_maps[rows_1d, random_choice],
-    ), dim=1)
-    mask_priorities = torch.stack((
-        verified_priority,
-        priority[rows_1d, local_choice],
-        priority[rows_1d, random_choice],
-    ), dim=1)
-    teacher_evidence = torch.stack((
-        verified_evidence,
-        path_features[rows_1d, local_choice],
-        path_features[rows_1d, random_choice],
-    ), dim=1)
+    verified_confidence = (
+        advantage.clamp_min(0)
+        / (selected_effect[:, 0].abs() + random_effect.abs() + 1e-3)
+    ).clamp(0, 1)
+    confidence = torch.stack(
+        (verified_confidence, torch.ones_like(advantage), torch.ones_like(advantage)),
+        dim=1,
+    )
+    maps = torch.stack(
+        (
+            verified_map,
+            path_maps[rows_1d, local_choice],
+            path_maps[rows_1d, random_choice],
+        ),
+        dim=1,
+    )
+    mask_priorities = torch.stack(
+        (
+            verified_priority,
+            priority[rows_1d, local_choice],
+            priority[rows_1d, random_choice],
+        ),
+        dim=1,
+    )
+    teacher_evidence = torch.stack(
+        (
+            verified_evidence,
+            path_features[rows_1d, local_choice],
+            path_features[rows_1d, random_choice],
+        ),
+        dim=1,
+    )
     teacher_masked = torch.cat((verified_masked[:, None], local_random_masked), dim=1)
-    removed_selected = torch.stack((
-        verified_removed,
-        removed.reshape(batch, paths)[rows_1d, local_choice],
-        removed.reshape(batch, paths)[rows_1d, random_choice],
-    ), dim=1)
+    removed_selected = torch.stack(
+        (
+            verified_removed,
+            removed.reshape(batch, paths)[rows_1d, local_choice],
+            removed.reshape(batch, paths)[rows_1d, random_choice],
+        ),
+        dim=1,
+    )
     return {
         "indices": indices,
         "maps": maps,
@@ -554,7 +714,9 @@ def _audit_summary(parts, args):
     maps = torch.cat([part["maps"].float().cpu() for part in parts])
     weights = torch.cat([part["candidate_weights"].float().cpu() for part in parts])
     clean_margin = torch.cat([part["clean_margin"].float().cpu() for part in parts])
-    random_map_cosine = F.cosine_similarity(maps[:, 0], maps[:, 2], dim=-1).mean().item()
+    random_map_cosine = (
+        F.cosine_similarity(maps[:, 0], maps[:, 2], dim=-1).mean().item()
+    )
     summary = {
         "samples": len(effects),
         "verified_positive_effect_mean": verified_positive.mean().item(),
@@ -563,14 +725,17 @@ def _audit_summary(parts, args):
         "verified_random_effect_ratio": ratio,
         "verified_beats_random_rate": win,
         "verified_positive_rate": positive,
-        "verified_differs_from_local_rate": (selections[:, 0] != selections[:, 1]).float().mean().item(),
+        "verified_differs_from_local_rate": (selections[:, 0] != selections[:, 1])
+        .float()
+        .mean()
+        .item(),
         "mean_path_count": path_counts.mean().item(),
         "verified_random_map_cosine_mean": random_map_cosine,
         "effect_mode": args.sgcd_effect_mode,
         "clean_retrieval_margin_mean": clean_margin.mean().item(),
-        "soft_target_effective_paths_mean": torch.exp(
-            evidence_entropy(weights)
-        ).mean().item(),
+        "soft_target_effective_paths_mean": torch.exp(evidence_entropy(weights))
+        .mean()
+        .item(),
         "minimum_effect_ratio": args.sgcd_min_effect_ratio,
         "minimum_win_rate": args.sgcd_min_win_rate,
         "maximum_random_map_cosine": args.sgcd_max_random_map_cosine,
@@ -589,20 +754,27 @@ def prepare_cache(args, dataset, report_dir):
         raise ValueError("SGCD requires --teacher_cache_path")
     teacher_path = Path(args.teacher_cache_path)
     if not teacher_path.is_file():
-        raise FileNotFoundError("Prepare the main prompt-tuned teacher cache before SGCD")
+        raise FileNotFoundError(
+            "Prepare the main prompt-tuned teacher cache before SGCD"
+        )
     teacher_payload = torch.load(teacher_path, map_location="cpu", weights_only=True)
     teacher_metadata = teacher_payload.get("metadata", {})
     from src.model import DFN5B_MODEL, DFN5B_PRETRAINED, TEACHER_CACHE_FORMAT_VERSION
-    if (teacher_metadata.get("format_version") != TEACHER_CACHE_FORMAT_VERSION or
-            teacher_metadata.get("teacher_model") != DFN5B_MODEL or
-            teacher_metadata.get("teacher_pretrained") != DFN5B_PRETRAINED or
-            not teacher_payload.get("teacher_prompt_state_dict")):
+
+    if (
+        teacher_metadata.get("format_version") != TEACHER_CACHE_FORMAT_VERSION
+        or teacher_metadata.get("teacher_model") != DFN5B_MODEL
+        or teacher_metadata.get("teacher_pretrained") != DFN5B_PRETRAINED
+        or not teacher_payload.get("teacher_prompt_state_dict")
+    ):
         raise ValueError("SGCD needs the same prompt-tuned DFN5B teacher used by main")
     photo_labels = _photo_labels(dataset)
-    sketch_labels = _sketch_labels(dataset)
+    _sketch_labels(dataset)
     representatives = select_photo_representatives(
-        teacher_payload["teacher_photo_features"], photo_labels,
-        len(dataset.all_categories), args.sgcd_photo_representatives,
+        teacher_payload["teacher_photo_features"],
+        photo_labels,
+        len(dataset.all_categories),
+        args.sgcd_photo_representatives,
     )
     metadata = _metadata(args, dataset, teacher_path, teacher_metadata, representatives)
     path = _cache_path(args, metadata, teacher_path)
@@ -614,56 +786,107 @@ def prepare_cache(args, dataset, report_dir):
         validate_payload(payload, metadata)
         print("[SGCD Cache] reused; teacher extraction skipped:", path, flush=True)
     else:
-        estimate = len(dataset) * (len(TARGET_NAMES) * (2 * 1024 * 2 + 2 * 49 * 2 + 32)
-                                   + args.sgcd_max_paths * 8)
-        free = shutil.disk_usage(path.parent if path.parent.exists() else teacher_path.parent).free
+        estimate = len(dataset) * (
+            len(TARGET_NAMES) * (2 * 1024 * 2 + 2 * 49 * 2 + 32)
+            + args.sgcd_max_paths * 8
+        )
+        free = shutil.disk_usage(
+            path.parent if path.parent.exists() else teacher_path.parent
+        ).free
         if free < estimate + 2 * 1024**3:
-            raise OSError(f"SGCD cache needs about {estimate / 1024**2:.1f} MiB plus 2 GiB reserve")
+            raise OSError(
+                f"SGCD cache needs about {estimate / 1024**2:.1f} MiB plus 2 GiB reserve"
+            )
         import open_clip
+
         from src.teacher_prompts import TeacherPromptController
+
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        teacher = open_clip.create_model(
-            DFN5B_MODEL, pretrained=DFN5B_PRETRAINED,
-            precision="fp16" if device.type == "cuda" else "fp32", device=device,
-        ).eval().requires_grad_(False)
-        if teacher.visual.positional_embedding.shape[0] - 1 != (args.max_size // 14) ** 2:
+        teacher = (
+            open_clip.create_model(
+                DFN5B_MODEL,
+                pretrained=DFN5B_PRETRAINED,
+                precision="fp16" if device.type == "cuda" else "fp32",
+                device=device,
+            )
+            .eval()
+            .requires_grad_(False)
+        )
+        if (
+            teacher.visual.positional_embedding.shape[0] - 1
+            != (args.max_size // 14) ** 2
+        ):
             raise ValueError("Unexpected DFN5B patch geometry for SGCD")
         controller = TeacherPromptController(
-            teacher.visual, teacher_metadata["teacher_n_ctx_visual"],
-            teacher_metadata["teacher_prompt_depth"], teacher_metadata["teacher_prompt_std"],
+            teacher.visual,
+            teacher_metadata["teacher_n_ctx_visual"],
+            teacher_metadata["teacher_prompt_depth"],
+            teacher_metadata["teacher_prompt_std"],
             teacher_metadata["teacher_prompt_seed"],
         )
-        controller.load_state_dict(teacher_payload["teacher_prompt_state_dict"], strict=True)
+        controller.load_state_dict(
+            teacher_payload["teacher_prompt_state_dict"], strict=True
+        )
         controller.eval().requires_grad_(False)
         dtype = teacher.visual.conv1.weight.dtype
         preflight = _teacher_compatibility_probe(
-            controller, dataset, teacher_payload["teacher_sketch_features"],
-            device, dtype, args.sgcd_teacher_batch_size,
+            controller,
+            dataset,
+            teacher_payload["teacher_sketch_features"],
+            device,
+            dtype,
+            args.sgcd_teacher_batch_size,
         )
         photo_dense = _encode_photo_representatives(
-            controller, dataset.all_photo_paths, len(dataset.all_categories), representatives,
-            dataset.max_size, args.sgcd_teacher_batch_size, args.workers, device, dtype,
+            controller,
+            dataset.all_photo_paths,
+            len(dataset.all_categories),
+            representatives,
+            dataset.max_size,
+            args.sgcd_teacher_batch_size,
+            args.workers,
+            device,
+            dtype,
         )
         photo_global = teacher_payload["teacher_photo_features"][representatives].to(
             device=device, dtype=torch.float32
         )
 
-        audit_indices = torch.linspace(0, len(dataset) - 1,
-                                       steps=min(args.sgcd_audit_samples, len(dataset))).round().long().unique()
+        audit_indices = (
+            torch.linspace(
+                0, len(dataset) - 1, steps=min(args.sgcd_audit_samples, len(dataset))
+            )
+            .round()
+            .long()
+            .unique()
+        )
         audit_loader = DataLoader(
             IndexedSketchDataset(dataset, audit_indices.tolist()),
-            batch_size=args.sgcd_teacher_batch_size, shuffle=False, num_workers=args.workers,
-            pin_memory=device.type == "cuda", persistent_workers=False,
+            batch_size=args.sgcd_teacher_batch_size,
+            shuffle=False,
+            num_workers=args.workers,
+            pin_memory=device.type == "cuda",
+            persistent_workers=False,
             prefetch_factor=4 if args.workers > 0 else None,
         )
         audit_parts = []
-        for images, indices, labels in tqdm(audit_loader, desc="[SGCD Audit] teacher-only stroke gate", mininterval=3):
-            audit_parts.append(_target_batch(
-                images.to(device=device, dtype=dtype, non_blocking=True), indices.to(device),
-                labels.to(device), controller, photo_dense, photo_global, args,
-            ))
+        for images, indices, labels in tqdm(
+            audit_loader, desc="[SGCD Audit] teacher-only stroke gate", mininterval=3
+        ):
+            audit_parts.append(
+                _target_batch(
+                    images.to(device=device, dtype=dtype, non_blocking=True),
+                    indices.to(device),
+                    labels.to(device),
+                    controller,
+                    photo_dense,
+                    photo_global,
+                    args,
+                )
+            )
         audit = _audit_summary(audit_parts, args)
         from src.stroke_graph_reports import audit_report
+
         audit_report(audit, audit_parts, dataset, report_dir, args)
         print("[SGCD Audit]", json.dumps(audit), flush=True)
         if not audit["passed"] and not args.sgcd_force_prepare:
@@ -675,21 +898,31 @@ def prepare_cache(args, dataset, report_dir):
             del photo_dense, controller, teacher
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            print("[SGCD Audit] audit-only run complete; full cache construction skipped", flush=True)
+            print(
+                "[SGCD Audit] audit-only run complete; full cache construction skipped",
+                flush=True,
+            )
             return None
         del audit_parts
 
-        n, variants, width = len(dataset), len(TARGET_NAMES), teacher_metadata["teacher_output_dim"]
+        n, variants, width = (
+            len(dataset),
+            len(TARGET_NAMES),
+            teacher_metadata["teacher_output_dim"],
+        )
         grid, paths = args.sgcd_student_grid**2, args.sgcd_max_paths
         payload = {
-            "metadata": metadata, "teacher_audit": audit,
+            "metadata": metadata,
+            "teacher_audit": audit,
             "teacher_compatibility_preflight": preflight,
             "maps": torch.empty(n, variants, grid, dtype=torch.float16),
             "mask_priorities": torch.empty(n, variants, grid, dtype=torch.float16),
             "teacher_evidence": torch.empty(n, variants, width, dtype=torch.float16),
             "teacher_masked": torch.empty(n, variants, width, dtype=torch.float16),
-            "confidence": torch.empty(n, variants), "selected_effect": torch.empty(n, variants),
-            "clean_margin": torch.empty(n), "masked_margin": torch.empty(n, variants),
+            "confidence": torch.empty(n, variants),
+            "selected_effect": torch.empty(n, variants),
+            "clean_margin": torch.empty(n),
+            "masked_margin": torch.empty(n, variants),
             "removed_ink_fraction": torch.empty(n, variants),
             "candidate_effects": torch.empty(n, paths, dtype=torch.float16),
             "candidate_local_scores": torch.empty(n, paths, dtype=torch.float16),
@@ -701,26 +934,53 @@ def prepare_cache(args, dataset, report_dir):
             "clean_cache_cosine": torch.empty(n),
         }
         loader = DataLoader(
-            IndexedSketchDataset(dataset, range(n)), batch_size=args.sgcd_teacher_batch_size,
-            shuffle=False, num_workers=args.workers, pin_memory=device.type == "cuda",
-            persistent_workers=False, prefetch_factor=4 if args.workers > 0 else None,
+            IndexedSketchDataset(dataset, range(n)),
+            batch_size=args.sgcd_teacher_batch_size,
+            shuffle=False,
+            num_workers=args.workers,
+            pin_memory=device.type == "cuda",
+            persistent_workers=False,
+            prefetch_factor=4 if args.workers > 0 else None,
         )
         started = time.perf_counter()
-        for images, indices, labels in tqdm(loader, desc="[SGCD Cache] causal stroke targets", mininterval=5):
+        for images, indices, labels in tqdm(
+            loader, desc="[SGCD Cache] causal stroke targets", mininterval=5
+        ):
             result = _target_batch(
-                images.to(device=device, dtype=dtype, non_blocking=True), indices.to(device),
-                labels.to(device), controller, photo_dense, photo_global, args,
+                images.to(device=device, dtype=dtype, non_blocking=True),
+                indices.to(device),
+                labels.to(device),
+                controller,
+                photo_dense,
+                photo_global,
+                args,
             )
             rows = indices.long()
-            for name in ("maps", "mask_priorities", "teacher_evidence", "teacher_masked",
-                         "candidate_effects", "candidate_local_scores", "candidate_weights"):
+            for name in (
+                "maps",
+                "mask_priorities",
+                "teacher_evidence",
+                "teacher_masked",
+                "candidate_effects",
+                "candidate_local_scores",
+                "candidate_weights",
+            ):
                 payload[name][rows] = result[name].detach().half().cpu()
-            for name in ("confidence", "selected_effect", "clean_margin", "masked_margin",
-                         "removed_ink_fraction"):
+            for name in (
+                "confidence",
+                "selected_effect",
+                "clean_margin",
+                "masked_margin",
+                "removed_ink_fraction",
+            ):
                 payload[name][rows] = result[name].detach().float().cpu()
-            payload["hard_negative_label"][rows] = result["hard_negative_label"].short().cpu()
+            payload["hard_negative_label"][rows] = (
+                result["hard_negative_label"].short().cpu()
+            )
             payload["path_valid"][rows] = result["path_valid"].cpu()
-            payload["selected_path_index"][rows] = result["selected_path_index"].short().cpu()
+            payload["selected_path_index"][rows] = (
+                result["selected_path_index"].short().cpu()
+            )
             payload["path_count"][rows] = result["path_count"].short().cpu()
             cached = teacher_payload["teacher_sketch_features"][rows].float()
             payload["clean_cache_cosine"][rows] = F.cosine_similarity(
@@ -729,7 +989,9 @@ def prepare_cache(args, dataset, report_dir):
         payload["preparation_seconds"] = time.perf_counter() - started
         compatibility = _compatibility_statistics(payload["clean_cache_cosine"])
         payload["teacher_compatibility_full"] = compatibility
-        payload["teacher_compatibility_full_acceptable"] = _compatibility_is_acceptable(compatibility)
+        payload["teacher_compatibility_full_acceptable"] = _compatibility_is_acceptable(
+            compatibility
+        )
         print("[SGCD Cache] full teacher agreement:", compatibility, flush=True)
         validate_payload(payload, metadata)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -745,8 +1007,12 @@ def prepare_cache(args, dataset, report_dir):
         del photo_dense, controller, teacher
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        print(f"[SGCD Cache] saved {path}; {path.stat().st_size / 1024**2:.1f} MiB", flush=True)
+        print(
+            f"[SGCD Cache] saved {path}; {path.stat().st_size / 1024**2:.1f} MiB",
+            flush=True,
+        )
     dataset.set_stroke_graph_targets(payload)
     from src.stroke_graph_reports import cache_report
+
     cache_report(payload, dataset, report_dir, args)
     return payload

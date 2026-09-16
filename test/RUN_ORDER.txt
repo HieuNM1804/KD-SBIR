@@ -1,4 +1,24 @@
-NHÁNH: experiment/pairwise-counterfactual-stroke-distillation
+NHÁNH: experiment/sgcd-native-prompt-learning
+TRƯỚC THỰC NGHIỆM MỚI: đọc docs/sgcd_native_prompt.md.
+1. Cập nhật source bằng kaggle_online.py / kaggle_offline.py của nhánh này.
+2. Giữ cache teacher và target cũ; chỉnh đường dẫn trong
+   kaggle_sgcd_prompt_preflight.py rồi chạy một cell đó.
+3. Gửi summary.json, localization.csv, prompt_gradients.csv, evidence.png.
+   Đây là kiểm tra nhỏ trên batch seen, phục hồi prompt sau khi đo; chưa train full.
+4. Chỉ lên lịch train sau khi xem bản đồ, gradient từng loss và descriptor drift.
+   Chế độ mới: --sgcd_student_mode native_prompt --sgcd_beta 0
+              --lambda_sgcd_anchor 0 (rank là tùy chọn).
+   NATIVE_PROMPT không có key/query/adapter/fusion học được.
+5. Nếu preflight cho thấy map giảm và gradient tới sketch prompts, chạy
+   kaggle_sgcd_native_prompt_train.ipy. Cell này dùng cache pairwise đã xác minh,
+   giữ rank=0 để cô lập việc học vị trí/nội dung qua prompt, và bật diagnostics.
+6. Sau khi train, chạy kaggle_sgcd_report.py. Đọc fixed_batch.csv,
+   component_gradients.csv, prompt_learning.png, comparison_deltas.csv và
+   training curves cùng nhau; probe thành công không tự nó chứng minh retrieval tăng.
+
+Các cell train SGCD cũ bên dưới vẫn dùng legacy_head để tái lập, không phải chế độ mới.
+
+THỨ TỰ CŨ (PC-SGCD LEGACY, giữ để tham chiếu):
 PHƯƠNG PHÁP: PC-SGCD — Pairwise Counterfactual Stroke-Graph Distillation
 BASELINE: main gốc = 3*domain + 1*modality, global CLIP descriptor.
 
