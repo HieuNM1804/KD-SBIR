@@ -9,12 +9,17 @@ TRƯỚC THỰC NGHIỆM MỚI: đọc docs/sgcd_native_prompt.md.
    Chế độ mới: --sgcd_student_mode native_prompt --sgcd_beta 0
               --lambda_sgcd_anchor 0 (rank là tùy chọn).
    NATIVE_PROMPT không có key/query/adapter/fusion học được.
-5. Nếu preflight cho thấy map giảm và gradient tới sketch prompts, chạy
-   kaggle_sgcd_native_prompt_train.ipy. Cell này dùng cache pairwise đã xác minh,
-   giữ rank=0 để cô lập việc học vị trí/nội dung qua prompt, và bật diagnostics.
-6. Sau khi train, chạy kaggle_sgcd_report.py. Đọc fixed_batch.csv,
+5. Nếu preflight cho thấy map giảm và gradient tới sketch prompts, chạy bộ
+   ablation matched sau (cùng seed42, 5 epoch, cache và main loss):
+   a. kaggle_sgcd_native_where_ablation.ipy         (W)
+   b. kaggle_sgcd_native_where_what_ablation.ipy    (W + What)
+   c. kaggle_sgcd_native_where_effect_ablation.ipy  (W + Effect)
+   d. kaggle_sgcd_native_prompt_train.ipy            (W + What + Effect)
+   Nếu mục d đã chạy, không cần chạy lại. Tất cả giữ anchor=rank=beta=0.
+6. Sau khi các ablation hoàn tất, chạy kaggle_sgcd_report.py. Đọc fixed_batch.csv,
    component_gradients.csv, prompt_learning.png, comparison_deltas.csv và
-   training curves cùng nhau; probe thành công không tự nó chứng minh retrieval tăng.
+   scalar_curves.csv cùng nhau. So sánh selected checkpoint và final riêng;
+   probe thành công không tự nó chứng minh retrieval tăng.
 
 Các cell train SGCD cũ bên dưới vẫn dùng legacy_head để tái lập, không phải chế độ mới.
 

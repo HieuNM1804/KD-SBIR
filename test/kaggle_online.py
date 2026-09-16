@@ -15,9 +15,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 WORKING = Path("/kaggle/working")
-BUNDLE = WORKING / (
-    "sgcd_bundle_" + datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
-) / "offline_bundle"
+BUNDLE = (
+    WORKING
+    / ("sgcd_bundle_" + datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f"))
+    / "offline_bundle"
+)
 WHEELS = BUNDLE / "wheels"
 SOURCE = BUNDLE / "source"
 CLIP_CACHE = BUNDLE / "clip_cache"
@@ -215,12 +217,16 @@ required_paths = (
     project / "src" / "stroke_prompt_probe_cli.py",
     project / "tests" / "test_stroke_graph.py",
     project / "tests" / "test_sgcd_commands.py",
+    project / "tests" / "test_stroke_prompt.py",
     project / "test" / "RUN_ORDER.txt",
     project / "test" / "kaggle_main_baseline_train.ipy",
     project / "test" / "kaggle_sgcd_audit.ipy",
     project / "test" / "kaggle_sgcd_prepare.ipy",
     project / "test" / "kaggle_sgcd_train.ipy",
     project / "test" / "kaggle_sgcd_native_prompt_train.ipy",
+    project / "test" / "kaggle_sgcd_native_where_ablation.ipy",
+    project / "test" / "kaggle_sgcd_native_where_what_ablation.ipy",
+    project / "test" / "kaggle_sgcd_native_where_effect_ablation.ipy",
     project / "test" / "kaggle_sgcd_prompt_preflight.py",
     project / "test" / "kaggle_sgcd_local_control.ipy",
     project / "test" / "kaggle_sgcd_random_control.ipy",

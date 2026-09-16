@@ -83,3 +83,20 @@ The earlier teacher and SGCD target caches need not be deleted for this
 student-only change. Native mode accepts only the expected student-source drift
 when reusing the historical target cache; dataset, teacher, loss, and stroke
 geometry fingerprints remain strict.
+
+## Matched component ablations
+
+The first native run uses W + What + Effect. Isolate the three auxiliary paths
+before tuning their magnitudes:
+
+| Cell | Where | What | Effect |
+| --- | ---: | ---: | ---: |
+| `kaggle_sgcd_native_where_ablation.ipy` | 1.0 | 0 | 0 |
+| `kaggle_sgcd_native_where_what_ablation.ipy` | 1.0 | 0.25 | 0 |
+| `kaggle_sgcd_native_where_effect_ablation.ipy` | 1.0 | 0 | 0.25 |
+| `kaggle_sgcd_native_prompt_train.ipy` | 1.0 | 0.25 | 0.25 |
+
+All four use seed 42, five epochs, verified pairwise targets, the same cache and
+main losses, native descriptors, and zero anchor/rank/beta. Run the report only
+after the selected ablations finish. It records final metrics separately from
+mAP and precision at the same precision-selected checkpoint.

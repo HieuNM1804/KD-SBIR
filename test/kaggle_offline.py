@@ -118,18 +118,18 @@ required_bundle_paths = (
     source_project / "src" / "stroke_prompt.py",
     source_project / "src" / "stroke_prompt_probe.py",
     source_project / "src" / "stroke_prompt_probe_cli.py",
-    source_project / "src" / "stroke_prompt.py",
-    source_project / "src" / "stroke_prompt_probe.py",
-    source_project / "src" / "stroke_prompt_probe_cli.py",
-    source_project / "test" / "kaggle_sgcd_prompt_preflight.py",
     source_project / "tests" / "test_stroke_graph.py",
     source_project / "tests" / "test_sgcd_commands.py",
+    source_project / "tests" / "test_stroke_prompt.py",
     source_project / "test" / "RUN_ORDER.txt",
     source_project / "test" / "kaggle_main_baseline_train.ipy",
     source_project / "test" / "kaggle_sgcd_audit.ipy",
     source_project / "test" / "kaggle_sgcd_prepare.ipy",
     source_project / "test" / "kaggle_sgcd_train.ipy",
     source_project / "test" / "kaggle_sgcd_native_prompt_train.ipy",
+    source_project / "test" / "kaggle_sgcd_native_where_ablation.ipy",
+    source_project / "test" / "kaggle_sgcd_native_where_what_ablation.ipy",
+    source_project / "test" / "kaggle_sgcd_native_where_effect_ablation.ipy",
     source_project / "test" / "kaggle_sgcd_prompt_preflight.py",
     source_project / "test" / "kaggle_sgcd_local_control.ipy",
     source_project / "test" / "kaggle_sgcd_random_control.ipy",
@@ -290,6 +290,7 @@ print('Matplotlib:', matplotlib.__version__)
 import unittest
 suite = unittest.defaultTestLoader.discover('tests', pattern='test_stroke_graph.py')
 suite.addTests(unittest.defaultTestLoader.discover('tests', pattern='test_sgcd_commands.py'))
+suite.addTests(unittest.defaultTestLoader.discover('tests', pattern='test_stroke_prompt.py'))
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 if not result.wasSuccessful():
     raise SystemExit('SGCD smoke test failed')
