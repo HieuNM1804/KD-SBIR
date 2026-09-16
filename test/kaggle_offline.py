@@ -12,9 +12,9 @@ import sys
 
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
-EXPECTED_BRANCH = "experiment/stroke-graph-causal-distillation"
-EXPECTED_COMMIT = "5d977bdbd0fd15386da8fc88159ea958ea0da503"
-EXPECTED_TASK = "photo_conditioned_causal_stroke_graph_distillation"
+EXPECTED_BRANCH = "experiment/pairwise-counterfactual-stroke-distillation"
+EXPECTED_COMMIT = "59e48a430c5963f1360d5c2653c713dd32af8093"
+EXPECTED_TASK = "pairwise_counterfactual_stroke_distillation"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
 
