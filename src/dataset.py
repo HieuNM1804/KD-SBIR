@@ -90,7 +90,8 @@ class TrainDataset(torch.utils.data.Dataset):
         expected = len(self.all_sketches_path)
         required = (
             "maps", "mask_priorities", "teacher_evidence",
-            "teacher_masked", "confidence",
+            "teacher_masked", "confidence", "selected_effect",
+            "clean_margin", "masked_margin",
         )
         if any(key not in payload or len(payload[key]) != expected for key in required):
             raise ValueError("Stroke-graph cache has the wrong length or fields.")

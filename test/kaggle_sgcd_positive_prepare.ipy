@@ -1,6 +1,6 @@
 from datetime import datetime
 
-RUN_NAME = "pcsgcd_audit_s42_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+RUN_NAME = "sgcd_positive_prepare_s42_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 %cd /kaggle/working/KD-SBIR-AVKD
 
 !python -m src.train \
@@ -25,29 +25,27 @@ RUN_NAME = "pcsgcd_audit_s42_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     --teacher_weight_decay 1e-3 \
     --lambda_teacher_retrieval 1.5 \
     --teacher_triplet_margin 0.2 \
-    --photo_text_kd_temperature 0.15 \
-    --sketch_text_kd_temperature 0.02 \
     --lr 1e-2 \
     --momentum 0.9 \
     --weight_decay 5e-4 \
     --seed 42 \
     --retrieval_head sgcd \
-    --sgcd_cache_path /kaggle/working/teacher_cache/sketchy1_pcsgcd_pairwise_s42_k4_m10.pt \
+    --sgcd_cache_path /kaggle/working/teacher_cache/sketchy1_sgcd_positive_s42_k4_m10.pt \
+    --sgcd_effect_mode positive \
+    --sgcd_negative_topk 3 \
+    --sgcd_target_temperature 0.05 \
     --sgcd_skeleton_grid 28 \
     --sgcd_max_paths 4 \
     --sgcd_photo_representatives 2 \
     --sgcd_local_topk_patches 4 \
     --sgcd_proposal_topk 3 \
-    --sgcd_effect_mode pairwise \
-    --sgcd_negative_topk 3 \
-    --sgcd_target_temperature 0.05 \
     --sgcd_teacher_batch_size 4 \
     --sgcd_mask_fraction 0.10 \
     --sgcd_audit_samples 512 \
     --sgcd_min_effect_ratio 1.15 \
     --sgcd_min_win_rate 0.60 \
     --sgcd_max_random_map_cosine 0.75 \
-    --sgcd_audit_only \
+    --sgcd_prepare_only \
     --lambda_domain 3.0 \
     --lambda_modality 1.0 \
     --exp_name {RUN_NAME} \

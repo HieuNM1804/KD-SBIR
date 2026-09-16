@@ -185,9 +185,9 @@ class StrokeGraphDiagnostics(Callback):
         for key in ("mAP", "precision", "native_mAP", "native_precision"):
             axes[0, 0].plot(epochs, [100 * row[key] for row in self.epochs], "o-", label=key)
         steps = [row["global_step"] for row in self.fixed]
-        for key in ("where", "what", "effect", "anchor"):
+        for key in ("where", "what", "effect", "anchor", "rank"):
             axes[0, 1].plot(steps, [row[key] for row in self.fixed], "o-", label=key)
-        for key in ("map_cosine", "what_cosine", "effect_cosine"):
+        for key in ("map_cosine", "what_cosine", "effect_cosine", "rank_margin"):
             axes[0, 2].plot(steps, [row[key] for row in self.fixed], "o-", label=key)
         for key in ("student_entropy", "teacher_entropy"):
             axes[1, 0].plot(steps, [row[key] for row in self.fixed], "o-", label=key)

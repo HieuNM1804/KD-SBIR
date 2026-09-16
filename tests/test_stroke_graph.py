@@ -8,6 +8,7 @@ from src.stroke_graph import (
     CLIP_MEAN,
     CLIP_STD,
     StrokeGraphEvidenceHead,
+    class_aware_hard_negative_ranking,
     erase_by_patch_evidence,
     local_photo_correspondence,
     patch_ink_mass,
@@ -95,6 +96,18 @@ class StrokeGraphTest(unittest.TestCase):
         self.assertGreater(head.key.weight.grad.abs().sum().item(), 0)
         self.assertGreater(head.fusion.up.weight.grad.abs().sum().item(), 0)
 
+    def test_pairwise_ranking_uses_different_class_hard_negatives(self):
+        query = F.normalize(torch.tensor([[1.0, 0.0], [0.8, 0.2], [0.0, 1.0]]), dim=-1)
+        gallery = F.normalize(torch.tensor([[1.0, 0.0], [0.9, 0.1], [0.0, 1.0]]), dim=-1)
+        labels = torch.tensor([0, 0, 1])
+        loss, stats = class_aware_hard_negative_ranking(
+            query, gallery, labels, margin=0.2
+        )
+        self.assertTrue(torch.isfinite(loss))
+        self.assertGreaterEqual(loss.item(), 0)
+        self.assertEqual(stats["rank_valid_rate"].item(), 1.0)
+        self.assertGreater(stats["rank_positive"].item(), stats["rank_hard_negative"].item())
+
     def test_main_path_is_unchanged(self):
         from clip.model import CLIP
         from src.model import CustomCLIP
@@ -124,6 +137,9 @@ class StrokeGraphTest(unittest.TestCase):
                                              [0.02, 0.015, 0.005]]),
             'selected_path_index': torch.tensor([[1, 0, 2], [2, 0, 1]]),
             'path_count': torch.tensor([4, 5]),
+            'candidate_weights': torch.tensor([[0.7, 0.3, 0.0, 0.0],
+                                                [0.6, 0.2, 0.2, 0.0]]),
+            'clean_margin': torch.tensor([0.4, 0.5]),
             'maps': torch.tensor([
                 [[1., 0., 0., 0.], [0., 1., 0., 0.], [0., 0., 1., 0.]],
                 [[0., 1., 0., 0.], [1., 0., 0., 0.], [0., 0., 0., 1.]],
@@ -131,6 +147,7 @@ class StrokeGraphTest(unittest.TestCase):
         }]
         args = Namespace(sgcd_min_effect_ratio=1.5, sgcd_min_win_rate=0.5,
                          sgcd_max_random_map_cosine=0.75,
+                         sgcd_effect_mode='pairwise',
                          sgcd_force_prepare=False)
         summary = _audit_summary(parts, args)
         self.assertTrue(summary['passed'])
@@ -158,6 +175,8 @@ class StrokeGraphTest(unittest.TestCase):
             sgcd_ink_threshold=0.08, sgcd_ink_softness=0.12,
             sgcd_local_topk_patches=2, sgcd_mask_fraction=0.10,
             sgcd_teacher_batch_size=2, sgcd_proposal_topk=2,
+            sgcd_effect_mode="pairwise", sgcd_negative_topk=1,
+            sgcd_target_temperature=0.05,
             sgcd_max_random_map_cosine=0.75,
             max_size=56, seed=42,
         )
@@ -177,6 +196,8 @@ class StrokeGraphTest(unittest.TestCase):
             result['removed_ink_fraction'], torch.full((2, 3), 0.10), atol=1e-5
         ))
         self.assertTrue(((result['confidence'] >= 0) & (result['confidence'] <= 1)).all())
+        self.assertTrue(torch.allclose(result['candidate_weights'].sum(-1), torch.ones(2)))
+        self.assertTrue((result['hard_negative_label'] != torch.tensor([0, 1])).all())
         for row in range(2):
             if result['path_count'][row] > 1:
                 self.assertNotEqual(
@@ -200,9 +221,13 @@ class StrokeGraphTest(unittest.TestCase):
             'teacher_masked': torch.zeros(n, variants, width, dtype=torch.float16),
             'confidence': torch.ones(n, variants),
             'selected_effect': torch.zeros(n, variants),
+            'clean_margin': torch.ones(n),
+            'masked_margin': torch.zeros(n, variants),
             'removed_ink_fraction': torch.full((n, variants), 0.10),
             'candidate_effects': torch.zeros(n, paths, dtype=torch.float16),
             'candidate_local_scores': torch.zeros(n, paths, dtype=torch.float16),
+            'candidate_weights': torch.full((n, paths), 1 / paths, dtype=torch.float16),
+            'hard_negative_label': torch.zeros(n, dtype=torch.int16),
             'path_valid': torch.ones(n, paths, dtype=torch.bool),
             'selected_path_index': torch.zeros(n, variants, dtype=torch.int16),
             'path_count': torch.full((n,), paths, dtype=torch.int16),

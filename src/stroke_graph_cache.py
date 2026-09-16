@@ -27,7 +27,7 @@ from src.stroke_graph import (
     stroke_path_maps,
 )
 
-CACHE_FORMAT_VERSION = 1
+CACHE_FORMAT_VERSION = 2
 
 
 def file_sha256(path):
@@ -45,6 +45,7 @@ def add_arguments(parser):
     parser.add_argument("--lambda_sgcd_what", type=float, default=0.25)
     parser.add_argument("--lambda_sgcd_effect", type=float, default=0.25)
     parser.add_argument("--lambda_sgcd_anchor", type=float, default=0.20)
+    parser.add_argument("--lambda_sgcd_rank", type=float, default=0.50)
     parser.add_argument("--sgcd_effect_magnitude_weight", type=float, default=0.25)
     parser.add_argument("--sgcd_target", choices=TARGET_NAMES + ("shuffled",), default="verified")
     parser.add_argument("--sgcd_beta", type=float, default=0.10)
@@ -61,6 +62,13 @@ def add_arguments(parser):
     parser.add_argument("--sgcd_photo_representatives", type=int, default=2)
     parser.add_argument("--sgcd_local_topk_patches", type=int, default=4)
     parser.add_argument("--sgcd_proposal_topk", type=int, default=3)
+    parser.add_argument(
+        "--sgcd_effect_mode", choices=("positive", "pairwise"), default="pairwise",
+        help="Verify paths by positive-similarity drop or positive-vs-negative margin drop.",
+    )
+    parser.add_argument("--sgcd_negative_topk", type=int, default=3)
+    parser.add_argument("--sgcd_target_temperature", type=float, default=0.05)
+    parser.add_argument("--sgcd_rank_margin", type=float, default=0.20)
     parser.add_argument("--sgcd_teacher_batch_size", type=int, default=4)
     parser.add_argument("--sgcd_cache_path", type=str, default="")
     parser.add_argument("--sgcd_prepare_only", action="store_true")
@@ -80,9 +88,9 @@ def add_arguments(parser):
 def validate_arguments(parser, args):
     nonnegative = (
         args.lambda_sgcd, args.lambda_sgcd_where, args.lambda_sgcd_what,
-        args.lambda_sgcd_effect, args.lambda_sgcd_anchor,
+        args.lambda_sgcd_effect, args.lambda_sgcd_anchor, args.lambda_sgcd_rank,
         args.sgcd_effect_magnitude_weight, args.sgcd_beta, args.sgcd_head_lr,
-        args.sgcd_warmup_epochs, args.sgcd_decay_start_epoch,
+        args.sgcd_warmup_epochs, args.sgcd_decay_start_epoch, args.sgcd_rank_margin,
     )
     if any(not math.isfinite(value) or value < 0 for value in nonnegative):
         parser.error("SGCD weights, beta, learning rate and schedule must be finite and nonnegative")
@@ -93,12 +101,13 @@ def validate_arguments(parser, args):
             and not args.sgcd_prepare_only and not args.sgcd_audit_only):
         parser.error("Use positive --lambda_sgcd or select --retrieval_head main")
     if args.lambda_sgcd > 0 and sum((args.lambda_sgcd_where, args.lambda_sgcd_what,
-                                     args.lambda_sgcd_effect, args.lambda_sgcd_anchor)) <= 0:
+                                     args.lambda_sgcd_effect, args.lambda_sgcd_anchor,
+                                     args.lambda_sgcd_rank)) <= 0:
         parser.error("At least one SGCD component must be positive")
     positive_ints = (
         args.sgcd_bottleneck, args.sgcd_teacher_batch_size, args.sgcd_max_paths,
         args.sgcd_photo_representatives, args.sgcd_local_topk_patches,
-        args.sgcd_proposal_topk, args.sgcd_audit_samples,
+        args.sgcd_proposal_topk, args.sgcd_audit_samples, args.sgcd_negative_topk,
     )
     if any(value < 1 for value in positive_ints):
         parser.error("SGCD dimensions and batch/audit sizes must be positive")
@@ -112,6 +121,8 @@ def validate_arguments(parser, args):
         parser.error("SGCD graph steps/mix are out of range")
     if args.sgcd_temperature <= 0 or not 0 < args.sgcd_mask_fraction < 1:
         parser.error("SGCD temperature must be positive and mask fraction must be in (0,1)")
+    if args.sgcd_target_temperature <= 0:
+        parser.error("--sgcd_target_temperature must be positive")
     if not 0 <= args.sgcd_ink_threshold < 1 or not 0 < args.sgcd_ink_softness <= 1:
         parser.error("SGCD ink threshold/softness are out of range")
     if args.sgcd_diagnostic_batch_size < 2 or args.sgcd_diagnostic_examples < 0:
@@ -241,10 +252,11 @@ def _metadata(args, dataset, teacher_path, teacher_metadata, representative_indi
     )
     return {
         "format_version": CACHE_FORMAT_VERSION,
-        "method": "photo_conditioned_causal_stroke_graph_distillation",
+        "method": "pairwise_counterfactual_stroke_distillation",
         "definition": (
             "skeleton_paths;photo_patch_correspondence_proposal;"
-            "held_out_global_teacher_erasure_verification;fixed_ink_budget"
+            "held_out_positive_vs_hard_negative_margin_verification;"
+            "soft_multi_path_target;fixed_ink_budget"
         ),
         "dataset": args.dataset, "max_size": dataset.max_size,
         "classnames": list(dataset.all_categories),
@@ -269,6 +281,9 @@ def _metadata(args, dataset, teacher_path, teacher_metadata, representative_indi
         ).hexdigest(),
         "local_topk_patches": args.sgcd_local_topk_patches,
         "proposal_topk": args.sgcd_proposal_topk,
+        "effect_mode": args.sgcd_effect_mode,
+        "negative_topk": args.sgcd_negative_topk,
+        "target_temperature": args.sgcd_target_temperature,
         "seed": args.seed,
         "source_sha256": {name: file_sha256(root / name) for name in sources},
     }
@@ -290,8 +305,10 @@ def validate_payload(payload, metadata):
         "maps": (n, variants, grid), "mask_priorities": (n, variants, grid),
         "teacher_evidence": (n, variants, width), "teacher_masked": (n, variants, width),
         "confidence": (n, variants), "selected_effect": (n, variants),
+        "clean_margin": (n,), "masked_margin": (n, variants),
         "removed_ink_fraction": (n, variants), "candidate_effects": (n, paths),
-        "candidate_local_scores": (n, paths), "path_valid": (n, paths),
+        "candidate_local_scores": (n, paths), "candidate_weights": (n, paths),
+        "hard_negative_label": (n,), "path_valid": (n, paths),
         "selected_path_index": (n, variants), "path_count": (n,),
         "clean_cache_cosine": (n,),
     }
@@ -301,13 +318,20 @@ def validate_payload(payload, metadata):
             raise ValueError(f"Invalid SGCD tensor {name}: expected {shape}")
         if value.is_floating_point() and not torch.isfinite(value).all():
             raise ValueError(f"Nonfinite SGCD tensor: {name}")
-    for name in ("maps", "mask_priorities", "teacher_evidence", "teacher_masked"):
+    for name in ("maps", "mask_priorities", "teacher_evidence", "teacher_masked",
+                 "candidate_weights"):
         if payload[name].dtype != torch.float16:
             raise ValueError(f"SGCD {name} must be float16")
     if not torch.allclose(payload["maps"].float().sum(-1), torch.ones(n, variants), atol=2e-3):
         raise ValueError("SGCD maps are not normalized")
     if not torch.allclose(payload["mask_priorities"].float().sum(-1), torch.ones(n, variants), atol=2e-3):
         raise ValueError("SGCD mask priorities are not normalized")
+    if not torch.allclose(payload["candidate_weights"].float().sum(-1), torch.ones(n), atol=2e-3):
+        raise ValueError("SGCD candidate weights are not normalized")
+    if metadata.get("effect_mode") == "pairwise":
+        labels = payload["hard_negative_label"].long()
+        if (labels < 0).any() or (labels >= len(metadata["classnames"])).any():
+            raise ValueError("SGCD hard-negative labels are out of range")
     if (payload["confidence"] < 0).any() or (payload["confidence"] > 1).any():
         raise ValueError("SGCD confidence must lie in [0,1]")
     if (payload["removed_ink_fraction"] - metadata["mask_fraction"]).abs().max() > 0.025:
@@ -390,20 +414,82 @@ def _target_batch(images, indices, labels, controller, photo_dense, photo_global
     for part in masked_images.split(args.sgcd_teacher_batch_size):
         masked.append(F.normalize(controller(part, "sketch").float(), dim=-1))
     masked = torch.cat(masked).reshape(batch, paths, -1)
-    positives = F.normalize(photo_global[labels, -1:].float(), dim=-1)
-    clean_field = torch.einsum("bd,bmd->bm", clean, positives)
-    masked_field = torch.einsum("bkd,bmd->bkm", masked, positives)
-    effects = (clean_field[:, None] - masked_field).mean(-1).masked_fill(~valid, -torch.inf)
+    positives = F.normalize(photo_global[:, -1].float(), dim=-1)[labels]
+    positive_clean = torch.einsum("bd,bd->b", clean, positives)
+    positive_masked = torch.einsum("bkd,bd->bk", masked, positives)
+    hard_negative_label = torch.full_like(labels, -1)
+    if args.sgcd_effect_mode == "pairwise":
+        if photo_global.shape[0] < 2:
+            raise ValueError("Pairwise SGCD needs at least two seen classes")
+        class_centroids = F.normalize(photo_global.float().mean(1), dim=-1)
+        negative_scores = clean @ class_centroids.T
+        negative_scores.scatter_(1, labels[:, None], -torch.inf)
+        negative_count = min(args.sgcd_negative_topk, photo_global.shape[0] - 1)
+        negative_labels = negative_scores.topk(negative_count, dim=-1).indices
+        hard_negative_label = negative_labels[:, 0]
+        negative_gallery = F.normalize(photo_global[:, -1].float(), dim=-1)[negative_labels]
+        negative_clean = torch.einsum("bd,bnd->bn", clean, negative_gallery).mean(-1)
+        negative_masked = torch.einsum("bkd,bnd->bkn", masked, negative_gallery).mean(-1)
+        clean_margin = positive_clean - negative_clean
+        candidate_masked_margin = positive_masked - negative_masked
+    else:
+        negative_gallery = None
+        clean_margin = positive_clean
+        candidate_masked_margin = positive_masked
+    effects = (clean_margin[:, None] - candidate_masked_margin).masked_fill(
+        ~valid, -torch.inf
+    )
 
     proposal_count = min(args.sgcd_proposal_topk, paths)
     proposed = local.topk(proposal_count, dim=-1).indices
+    proposed_mask = torch.zeros_like(valid)
+    proposed_mask.scatter_(1, proposed, True)
+    proposed_mask &= valid
     proposed_effects = effects.gather(1, proposed)
     verified = proposed.gather(1, proposed_effects.argmax(-1, keepdim=True))[:, 0]
+    if args.sgcd_effect_mode == "pairwise":
+        target_logits = (effects / args.sgcd_target_temperature).masked_fill(
+            ~proposed_mask, -torch.inf
+        )
+        candidate_weights = target_logits.softmax(-1)
+    else:
+        candidate_weights = F.one_hot(verified, paths).float()
+
     local_choice = local.argmax(-1)
     random_choice = _choose_random(valid, indices, args.seed + 17171, verified)
+    rows_1d = torch.arange(batch, device=images.device)
+    verified_map = torch.einsum("bk,bkp->bp", candidate_weights, path_maps)
+    verified_map = verified_map / verified_map.sum(-1, keepdim=True).clamp_min(1e-8)
+    verified_priority = torch.einsum("bk,bkp->bp", candidate_weights, priority)
+    verified_priority = normalize_evidence(verified_priority, student_ink)
+    verified_evidence = F.normalize(
+        torch.einsum("bk,bkd->bd", candidate_weights, path_features), dim=-1
+    )
+    verified_images, verified_removed = erase_by_patch_evidence(
+        images, verified_priority, args.sgcd_mask_fraction,
+        args.sgcd_ink_threshold, args.sgcd_ink_softness,
+    )
+    verified_masked_parts = []
+    for part in verified_images.split(args.sgcd_teacher_batch_size):
+        verified_masked_parts.append(F.normalize(controller(part, "sketch").float(), dim=-1))
+    verified_masked = torch.cat(verified_masked_parts)
+    verified_positive = torch.einsum("bd,bd->b", verified_masked, positives)
+    if negative_gallery is None:
+        verified_masked_margin = verified_positive
+    else:
+        verified_negative = torch.einsum(
+            "bd,bnd->bn", verified_masked, negative_gallery
+        ).mean(-1)
+        verified_masked_margin = verified_positive - verified_negative
+
     selected = torch.stack((verified, local_choice, random_choice), dim=1)
-    rows = torch.arange(batch, device=images.device)[:, None]
-    selected_effect = effects[rows, selected]
+    local_random = selected[:, 1:]
+    local_random_masked = masked[rows_1d[:, None], local_random]
+    local_random_margin = candidate_masked_margin[rows_1d[:, None], local_random]
+    selected_masked_margin = torch.cat(
+        (verified_masked_margin[:, None], local_random_margin), dim=1
+    )
+    selected_effect = clean_margin[:, None] - selected_masked_margin
     random_effect = selected_effect[:, 2]
     advantage = selected_effect[:, 0] - random_effect
     verified_confidence = (advantage.clamp_min(0) / (
@@ -411,17 +497,42 @@ def _target_batch(images, indices, labels, controller, photo_dense, photo_global
     )).clamp(0, 1)
     confidence = torch.stack((verified_confidence, torch.ones_like(advantage),
                               torch.ones_like(advantage)), dim=1)
+    maps = torch.stack((
+        verified_map,
+        path_maps[rows_1d, local_choice],
+        path_maps[rows_1d, random_choice],
+    ), dim=1)
+    mask_priorities = torch.stack((
+        verified_priority,
+        priority[rows_1d, local_choice],
+        priority[rows_1d, random_choice],
+    ), dim=1)
+    teacher_evidence = torch.stack((
+        verified_evidence,
+        path_features[rows_1d, local_choice],
+        path_features[rows_1d, random_choice],
+    ), dim=1)
+    teacher_masked = torch.cat((verified_masked[:, None], local_random_masked), dim=1)
+    removed_selected = torch.stack((
+        verified_removed,
+        removed.reshape(batch, paths)[rows_1d, local_choice],
+        removed.reshape(batch, paths)[rows_1d, random_choice],
+    ), dim=1)
     return {
         "indices": indices,
-        "maps": path_maps[rows, selected],
-        "mask_priorities": priority[rows, selected],
-        "teacher_evidence": path_features[rows, selected],
-        "teacher_masked": masked[rows, selected],
+        "maps": maps,
+        "mask_priorities": mask_priorities,
+        "teacher_evidence": teacher_evidence,
+        "teacher_masked": teacher_masked,
         "confidence": confidence,
         "selected_effect": selected_effect,
-        "removed_ink_fraction": removed.reshape(batch, paths)[rows, selected],
+        "clean_margin": clean_margin,
+        "masked_margin": selected_masked_margin,
+        "removed_ink_fraction": removed_selected,
         "candidate_effects": effects.masked_fill(~valid, 0),
         "candidate_local_scores": local.masked_fill(~valid, 0),
+        "candidate_weights": candidate_weights,
+        "hard_negative_label": hard_negative_label,
         "candidate_maps": path_maps,
         "path_valid": valid,
         "selected_path_index": selected,
@@ -441,6 +552,8 @@ def _audit_summary(parts, args):
     selections = torch.cat([part["selected_path_index"].cpu() for part in parts])
     path_counts = torch.cat([part["path_count"].cpu() for part in parts]).float()
     maps = torch.cat([part["maps"].float().cpu() for part in parts])
+    weights = torch.cat([part["candidate_weights"].float().cpu() for part in parts])
+    clean_margin = torch.cat([part["clean_margin"].float().cpu() for part in parts])
     random_map_cosine = F.cosine_similarity(maps[:, 0], maps[:, 2], dim=-1).mean().item()
     summary = {
         "samples": len(effects),
@@ -453,6 +566,11 @@ def _audit_summary(parts, args):
         "verified_differs_from_local_rate": (selections[:, 0] != selections[:, 1]).float().mean().item(),
         "mean_path_count": path_counts.mean().item(),
         "verified_random_map_cosine_mean": random_map_cosine,
+        "effect_mode": args.sgcd_effect_mode,
+        "clean_retrieval_margin_mean": clean_margin.mean().item(),
+        "soft_target_effective_paths_mean": torch.exp(
+            evidence_entropy(weights)
+        ).mean().item(),
         "minimum_effect_ratio": args.sgcd_min_effect_ratio,
         "minimum_win_rate": args.sgcd_min_win_rate,
         "maximum_random_map_cosine": args.sgcd_max_random_map_cosine,
@@ -571,9 +689,12 @@ def prepare_cache(args, dataset, report_dir):
             "teacher_evidence": torch.empty(n, variants, width, dtype=torch.float16),
             "teacher_masked": torch.empty(n, variants, width, dtype=torch.float16),
             "confidence": torch.empty(n, variants), "selected_effect": torch.empty(n, variants),
+            "clean_margin": torch.empty(n), "masked_margin": torch.empty(n, variants),
             "removed_ink_fraction": torch.empty(n, variants),
             "candidate_effects": torch.empty(n, paths, dtype=torch.float16),
             "candidate_local_scores": torch.empty(n, paths, dtype=torch.float16),
+            "candidate_weights": torch.empty(n, paths, dtype=torch.float16),
+            "hard_negative_label": torch.empty(n, dtype=torch.int16),
             "path_valid": torch.empty(n, paths, dtype=torch.bool),
             "selected_path_index": torch.empty(n, variants, dtype=torch.int16),
             "path_count": torch.empty(n, dtype=torch.int16),
@@ -592,10 +713,12 @@ def prepare_cache(args, dataset, report_dir):
             )
             rows = indices.long()
             for name in ("maps", "mask_priorities", "teacher_evidence", "teacher_masked",
-                         "candidate_effects", "candidate_local_scores"):
+                         "candidate_effects", "candidate_local_scores", "candidate_weights"):
                 payload[name][rows] = result[name].detach().half().cpu()
-            for name in ("confidence", "selected_effect", "removed_ink_fraction"):
+            for name in ("confidence", "selected_effect", "clean_margin", "masked_margin",
+                         "removed_ink_fraction"):
                 payload[name][rows] = result[name].detach().float().cpu()
+            payload["hard_negative_label"][rows] = result["hard_negative_label"].short().cpu()
             payload["path_valid"][rows] = result["path_valid"].cpu()
             payload["selected_path_index"][rows] = result["selected_path_index"].short().cpu()
             payload["path_count"][rows] = result["path_count"].short().cpu()

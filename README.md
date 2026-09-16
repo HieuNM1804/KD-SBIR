@@ -66,3 +66,12 @@ model-selection leakage and is not a strict inductive ZS-SBIR protocol.
 This branch adds photo-conditioned, causally verified stroke-graph distillation while preserving the original main path under `--retrieval_head main`.
 
 See `docs/sgcd.md` and `test/RUN_ORDER.txt`.
+
+# PC-SGCD extension
+
+This branch verifies stroke evidence with positive-vs-hard-negative retrieval
+margin, builds a soft multi-path teacher target, and adds class-aware
+hard-negative ranking to the student. The original positive-only SGCD target
+remains available through `--sgcd_effect_mode positive` as an ablation.
+
+See `docs/pcsgcd.md` and `test/RUN_ORDER.txt` for the experiment protocol.

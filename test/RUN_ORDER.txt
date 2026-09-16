@@ -1,36 +1,35 @@
-NHÁNH: experiment/stroke-graph-causal-distillation
-PHƯƠNG PHÁP: SGCD — Photo-Conditioned Causal Stroke-Graph Distillation
+NHÁNH: experiment/pairwise-counterfactual-stroke-distillation
+PHƯƠNG PHÁP: PC-SGCD — Pairwise Counterfactual Stroke-Graph Distillation
 BASELINE: main gốc = 3*domain + 1*modality, global CLIP descriptor.
 
 1. ONLINE: chạy kaggle_online.py với Internet ON, save output bundle.
 2. OFFLINE GPU: chạy kaggle_offline.py.
 
-3. AUDIT TRƯỚC: chạy kaggle_sgcd_audit.ipy.
-   Audit 512 sketch, không tạo full cache và không train student.
-   PASS cần đồng thời:
-   - verified/random positive-effect ratio >= 1.15
-   - verified beats random rate >= 60%
-   - verified/random path-map cosine <= 0.75
-   Nếu FAIL: chạy kaggle_sgcd_report.py và gửi ZIP; không full prepare.
-   Không dùng --sgcd_force_prepare cho thí nghiệm chính.
+3. AUDIT PAIRWISE: chạy kaggle_sgcd_audit.ipy.
+   Teacher target đo độ giảm positive-vs-hard-negative retrieval margin.
+   Nếu gate FAIL: chạy kaggle_sgcd_report.py và gửi report; không full prepare.
 
-4. Nếu audit PASS: chạy kaggle_sgcd_prepare.ipy.
-   Nó kiểm tra lại gate rồi tạo full cache. Khi thấy
-   `[SGCD] target preparation complete; student training skipped` thì cache hoàn tất.
+4. Nếu audit PASS: chạy kaggle_sgcd_prepare.ipy để tạo pairwise cache.
 
-5. MATCHED COMPARISON, fresh student seed42:
+5. MATCHED CORE, cùng seed42:
    a. kaggle_main_baseline_train.ipy
-   b. kaggle_sgcd_train.ipy             (main + verified SGCD; phương pháp chính)
-   c. kaggle_sgcd_local_control.ipy     (local proposal, không causal verification)
-   d. kaggle_sgcd_random_control.ipy    (structural random alternative path)
-   e. kaggle_sgcd_shuffle_control.ipy   (verified target của sketch khác)
+   b. kaggle_sgcd_train.ipy                  (pairwise + rank, phương pháp chính)
+   c. kaggle_pcsgcd_no_rank_ablation.ipy     (pairwise target, bỏ rank loss)
+   d. kaggle_sgcd_local_control.ipy
+   e. kaggle_sgcd_random_control.ipy
+   f. kaggle_sgcd_shuffle_control.ipy
 
-6. Chỉ sau khi phương pháp chính thắng controls:
-   kaggle_sgcd_standalone.ipy với domain=modality=0.
+6. ABLATION SGCD CŨ:
+   a. kaggle_sgcd_positive_prepare.ipy
+   b. kaggle_sgcd_positive_ablation.ipy
+   Hai cell này dùng positive-similarity drop thay vì pairwise margin drop.
 
-7. REPORT: chạy kaggle_sgcd_report.py và gửi sgcd_diagnostics_*.zip.
-   Delivery code vẫn để từng file riêng; ZIP này chỉ gom log thực nghiệm.
+7. Chỉ khi phương pháp chính thắng matched baseline và controls:
+   chạy kaggle_sgcd_standalone.ipy với domain=modality=0.
 
-Không tuning student nếu teacher-only gate fail. Nếu gate vừa đủ nhưng map cosine không tăng,
-ưu tiên head_lr/where; nếu map học tốt nhưng deployed kém native, giảm beta hoặc tăng anchor.
-Đọc docs/sgcd.md để xem công thức và giới hạn raster stroke graph.
+8. REPORT: chạy kaggle_sgcd_report.py và gửi pcsgcd_diagnostics_*.zip.
+
+Đọc docs/pcsgcd.md để xem công thức và tiêu chí claim. Không tuning student nếu
+teacher-only pairwise gate fail. Nếu map học tốt nhưng retrieval không tăng,
+ưu tiên giảm beta hoặc lambda_rank; nếu rank margin không đổi, kiểm tra
+rank_valid_rate và tăng đa dạng class trong batch trước khi tăng loss weight.

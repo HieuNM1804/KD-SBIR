@@ -6,7 +6,7 @@ import json
 import zipfile
 
 PROJECT = Path('/kaggle/working/KD-SBIR-AVKD')
-OUT = Path('/kaggle/working') / ('sgcd_diagnostics_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
+OUT = Path('/kaggle/working') / ('pcsgcd_diagnostics_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
 OUT.mkdir(parents=True, exist_ok=False)
 
 
@@ -30,7 +30,7 @@ def scalars(version):
 versions = []
 rows = []
 curves = []
-for pattern in ('main_baseline_*', 'sgcd_*'):
+for pattern in ('main_baseline_*', 'sgcd_*', 'pcsgcd_*'):
     for run in sorted((PROJECT / 'tb_logs').glob(pattern)):
         for version in sorted(run.glob('version_*')):
             diagnostic = version / 'sgcd_diagnostics'
@@ -51,15 +51,36 @@ for pattern in ('main_baseline_*', 'sgcd_*'):
                     'completed_validation_epochs': len(m),
                 })
             for tag in ('mAP', 'precision', 'native_mAP', 'native_precision',
-                        'SGCD', 'SGCD_WEIGHTED', 'main_loss', 'train_loss'):
+                        'SGCD', 'SGCD_WEIGHTED', 'SGCD_rank', 'SGCD_rank_margin',
+                        'SGCD_rank_violation_rate', 'SGCD_teacher_selected_effect',
+                        'main_loss', 'train_loss'):
                 curves.extend({'run': run.name, 'version': version.name, 'tag': tag, **value}
                               for value in metrics.get(tag, []))
 write_csv(OUT / 'comparison_summary.csv', rows)
 write_csv(OUT / 'scalar_curves.csv', curves)
 
+baseline_rows = [row for row in rows if row['run'].startswith('main_baseline_')]
+delta_rows = []
+if baseline_rows:
+    baseline = sorted(baseline_rows, key=lambda row: (row['run'], row['version']))[-1]
+    (OUT / 'baseline_reference.json').write_text(
+        json.dumps(baseline, indent=2), encoding='utf-8'
+    )
+    for row in rows:
+        delta_rows.append({
+            **row,
+            'baseline_run': baseline['run'],
+            'delta_final_mAP': row['final_mAP'] - baseline['final_mAP'],
+            'delta_final_precision': row['final_precision'] - baseline['final_precision'],
+            'delta_best_mAP': row['best_mAP'] - baseline['best_mAP'],
+            'delta_best_precision': row['best_precision'] - baseline['best_precision'],
+        })
+write_csv(OUT / 'comparison_deltas.csv', delta_rows)
+
 checkpoint_rows = []
 for run in sorted((PROJECT / 'saved_models').glob('*')):
-    if not (run.name.startswith('main_baseline_') or run.name.startswith('sgcd_')):
+    if not (run.name.startswith('main_baseline_') or run.name.startswith('sgcd_')
+            or run.name.startswith('pcsgcd_')):
         continue
     for checkpoint in sorted(run.glob('*.ckpt')):
         checkpoint_rows.append({'run': run.name, 'checkpoint': checkpoint.name,
@@ -80,13 +101,24 @@ if rows:
     axes[1].barh(y, [100 * row['final_precision'] for row in ordered])
     axes[1].set_yticks(y, []); axes[1].set_xlabel('Final P@100 (%)')
     fig.tight_layout(); fig.savefig(OUT / 'comparison.png', dpi=160); plt.close(fig)
+if delta_rows:
+    ordered = sorted(delta_rows, key=lambda row: row['delta_final_mAP'])
+    fig, axis = plt.subplots(figsize=(12, max(5, len(ordered) * .42)))
+    names = [row['run'] for row in ordered]
+    values = [100 * row['delta_final_mAP'] for row in ordered]
+    colors = ['#2ca02c' if value >= 0 else '#d62728' for value in values]
+    axis.barh(range(len(ordered)), values, color=colors)
+    axis.set_yticks(range(len(ordered)), names, fontsize=8)
+    axis.axvline(0, color='black', linewidth=.8)
+    axis.set_xlabel('Final mAP change from latest matched baseline (percentage points)')
+    fig.tight_layout(); fig.savefig(OUT / 'comparison_deltas.png', dpi=160); plt.close(fig)
 
 manifest = {
     'created': datetime.now().isoformat(), 'project': str(PROJECT),
     'included_versions': [str(path) for path in versions],
     'runs_with_metrics': len(rows),
     'notes': [
-        'Teacher audit files are included even when the audit gate stops before training.',
+        'Pairwise teacher audit files are included even when the gate stops before training.',
         'Full unseen retrieval metrics and fixed seen-batch diagnostics have different scope.',
         'No model checkpoint, teacher cache or target tensor is copied.',
     ],
@@ -105,7 +137,8 @@ with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as bundle:
                                  'sgcd_diagnostics' / path.relative_to(diagnostic))
 
 from IPython.display import FileLink, Image, display
-if (OUT / 'comparison.png').is_file(): display(Image(filename=str(OUT / 'comparison.png')))
+for name in ('comparison.png', 'comparison_deltas.png'):
+    if (OUT / name).is_file(): display(Image(filename=str(OUT / name)))
 for version in versions:
     for name in ('teacher_audit.png', 'teacher_audit_examples.png',
                  'teacher_stroke_graph_examples.png', 'training_diagnostics.png'):

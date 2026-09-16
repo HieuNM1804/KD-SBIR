@@ -1,6 +1,6 @@
 from datetime import datetime
 
-RUN_NAME = "sgcd_random_control_s42_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+RUN_NAME = "pcsgcd_random_control_s42_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 %cd /kaggle/working/KD-SBIR-AVKD
 
 !python -m src.train \
@@ -32,12 +32,15 @@ RUN_NAME = "sgcd_random_control_s42_" + datetime.now().strftime("%Y%m%d_%H%M%S_%
     --weight_decay 5e-4 \
     --seed 42 \
     --retrieval_head sgcd \
-    --sgcd_cache_path /kaggle/working/teacher_cache/sketchy1_sgcd_s42_k4_m10.pt \
+    --sgcd_cache_path /kaggle/working/teacher_cache/sketchy1_pcsgcd_pairwise_s42_k4_m10.pt \
     --sgcd_skeleton_grid 28 \
     --sgcd_max_paths 4 \
     --sgcd_photo_representatives 2 \
     --sgcd_local_topk_patches 4 \
     --sgcd_proposal_topk 3 \
+    --sgcd_effect_mode pairwise \
+    --sgcd_negative_topk 3 \
+    --sgcd_target_temperature 0.05 \
     --sgcd_teacher_batch_size 4 \
     --sgcd_mask_fraction 0.10 \
     --sgcd_audit_samples 512 \
@@ -49,6 +52,8 @@ RUN_NAME = "sgcd_random_control_s42_" + datetime.now().strftime("%Y%m%d_%H%M%S_%
     --lambda_sgcd_what 0.25 \
     --lambda_sgcd_effect 0.25 \
     --lambda_sgcd_anchor 0.20 \
+    --lambda_sgcd_rank 0.50 \
+    --sgcd_rank_margin 0.20 \
     --sgcd_effect_magnitude_weight 0.25 \
     --sgcd_beta 0.10 \
     --sgcd_bottleneck 128 \

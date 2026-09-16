@@ -107,11 +107,22 @@ def audit_report(summary, parts, dataset, out, args):
     candidate_valid = torch.cat([
         part["path_valid"].detach().cpu() for part in parts
     ])
+    candidate_weights = torch.cat([
+        part["candidate_weights"].detach().float().cpu() for part in parts
+    ])
+    hard_negative = torch.cat([
+        part["hard_negative_label"].detach().cpu() for part in parts
+    ])
+    clean_margin = torch.cat([
+        part["clean_margin"].detach().float().cpu() for part in parts
+    ])
     rows = []
     for row in range(len(indices)):
         rows.append({
             "sketch_index": indices[row].item(),
             "path_count": counts[row].item(),
+            "hard_negative_label": hard_negative[row].item(),
+            "clean_margin": clean_margin[row].item(),
             **{
                 name + "_effect": effects[row, variant].item()
                 for variant, name in enumerate(TARGET_NAMES)
@@ -129,16 +140,20 @@ def audit_report(summary, parts, dataset, out, args):
                 for index in range(candidate_effects.shape[1])
             },
             **{
+                f"path_{index}_weight": candidate_weights[row, index].item()
+                for index in range(candidate_weights.shape[1])
+            },
+            **{
                 f"path_{index}_valid": bool(candidate_valid[row, index])
                 for index in range(candidate_valid.shape[1])
             },
         })
     _write_csv(out / "teacher_audit.csv", rows)
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    fig, axes = plt.subplots(1, 4, figsize=(20, 4))
     for variant, name in enumerate(TARGET_NAMES):
         axes[0].hist(effects[:, variant].numpy(), bins=40, alpha=0.45, label=name)
-    axes[0].set(title="Teacher similarity drop", xlabel="clean - path-erased")
+    axes[0].set(title="Teacher retrieval-margin drop", xlabel="clean - erased margin")
     axes[0].legend()
     axes[1].hist((effects[:, 0] - effects[:, 2]).numpy(), bins=40)
     axes[1].axvline(0, color="black", linewidth=0.8)
@@ -147,6 +162,10 @@ def audit_report(summary, parts, dataset, out, args):
         counts.numpy(), bins=range(1, args.sgcd_max_paths + 2), align="left"
     )
     axes[2].set(title="Stroke graph candidates", xlabel="valid paths")
+    entropy = -(candidate_weights.clamp_min(1e-8) *
+                candidate_weights.clamp_min(1e-8).log()).sum(-1)
+    axes[3].hist(entropy.numpy(), bins=40)
+    axes[3].set(title="Soft target path entropy", xlabel="entropy")
     fig.tight_layout()
     fig.savefig(out / "teacher_audit.png", dpi=160)
     plt.close(fig)
@@ -182,7 +201,8 @@ def audit_report(summary, parts, dataset, out, args):
                     axes[row, 2 + candidate], image, candidates[row, candidate],
                     args.sgcd_student_grid,
                     f"path {candidate}: local={candidate_local[row, candidate]:.3f}\n"
-                    f"effect={candidate_effects[row, candidate]:.4f}",
+                    f"effect={candidate_effects[row, candidate]:.4f}; "
+                    f"weight={candidate_weights[row, candidate]:.3f}",
                 )
             for axis in axes[row]:
                 axis.axis("off")
@@ -223,6 +243,12 @@ def cache_report(payload, dataset, out, args):
         ).float().mean().item(),
         "verified_confidence_mean": payload["confidence"][:, 0].mean().item(),
         "mean_path_count": payload["path_count"].float().mean().item(),
+        "effect_mode": payload["metadata"].get("effect_mode", "positive"),
+        "clean_retrieval_margin_mean": payload["clean_margin"].float().mean().item(),
+        "verified_masked_margin_mean": payload["masked_margin"][:, 0].float().mean().item(),
+        "soft_target_effective_paths_mean": torch.exp(
+            evidence_entropy(payload["candidate_weights"].float())
+        ).mean().item(),
         "selected_effect_mean": {
             name: effects[:, index].mean().item()
             for index, name in enumerate(TARGET_NAMES)
@@ -246,7 +272,8 @@ def cache_report(payload, dataset, out, args):
         "metadata": payload["metadata"],
         "notes": [
             "Local proposal uses sketch-path to representative-photo patch correspondence.",
-            "Global verification uses a different representative photo and exact ink budget.",
+            "Global verification measures positive-vs-hard-negative retrieval-margin drop.",
+            "Verified targets softly mix locally proposed paths by pairwise causal effect.",
             "Random selects another structural path; shuffled is applied during training.",
             "Unseen validation images and labels never enter target construction.",
         ],
@@ -263,6 +290,8 @@ def cache_report(payload, dataset, out, args):
         rows.append({
             "sketch_index": index,
             "path_count": payload["path_count"][index].item(),
+            "hard_negative_label": payload["hard_negative_label"][index].item(),
+            "clean_margin": payload["clean_margin"][index].item(),
             "confidence": payload["confidence"][index, 0].item(),
             "verified_local_cosine": overlap_local[index].item(),
             "verified_random_cosine": overlap_random[index].item(),
@@ -280,7 +309,7 @@ def cache_report(payload, dataset, out, args):
     axes[0].legend()
     for variant, name in enumerate(TARGET_NAMES):
         axes[1].hist(effects[:, variant].numpy(), bins=40, alpha=0.45, label=name)
-    axes[1].set(title="Teacher causal effects", xlabel="clean - erased similarity")
+    axes[1].set(title="Teacher causal effects", xlabel="clean - erased retrieval margin")
     axes[1].legend()
     axes[2].hist(
         payload["path_count"].numpy(), bins=range(1, args.sgcd_max_paths + 2),

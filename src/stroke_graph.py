@@ -428,6 +428,35 @@ def counterfactual_field_alignment(clean_student, masked_student, student_galler
     }
 
 
+def class_aware_hard_negative_ranking(query, gallery, labels, margin=0.2,
+                                      confidence=None, eps=1e-8):
+    """Hinge ranking against the hardest different-class photo in the batch."""
+    if query.shape != gallery.shape or len(query) != len(labels):
+        raise ValueError("Pairwise ranking inputs have incompatible shapes")
+    if margin < 0:
+        raise ValueError("Pairwise ranking margin must be nonnegative")
+    similarity = similarity_field(query, gallery)
+    labels = labels.to(similarity.device)
+    negative_mask = labels[:, None] != labels[None, :]
+    valid = negative_mask.any(-1)
+    hard_negative = similarity.masked_fill(~negative_mask, -torch.inf).max(-1).values
+    hard_negative = torch.where(valid, hard_negative, torch.zeros_like(hard_negative))
+    positive = similarity.diagonal()
+    per_sample = F.relu(margin - positive + hard_negative)
+    weights = valid.float()
+    if confidence is not None:
+        weights = weights * confidence.to(similarity.device).float().clamp_min(0)
+    loss = _weighted_mean(per_sample, weights, eps) if valid.any() else query.sum() * 0
+    pair_margin = positive - hard_negative
+    return loss, {
+        "rank_positive": positive.detach().mean(),
+        "rank_hard_negative": hard_negative[valid].detach().mean() if valid.any() else positive.detach().new_zeros(()),
+        "rank_margin": pair_margin[valid].detach().mean() if valid.any() else positive.detach().new_zeros(()),
+        "rank_violation_rate": (per_sample[valid] > 0).float().mean().detach() if valid.any() else positive.detach().new_zeros(()),
+        "rank_valid_rate": valid.float().mean().detach(),
+    }
+
+
 class ResidualMap(nn.Module):
     def __init__(self, width, bottleneck):
         super().__init__()

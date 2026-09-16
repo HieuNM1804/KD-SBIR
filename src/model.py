@@ -1073,6 +1073,9 @@ class ZS_SBIR(pl.LightningModule):
             "teacher_evidence": target["teacher_evidence"][:, index],
             "teacher_masked": target["teacher_masked"][:, index],
             "confidence": target["confidence"][:, index],
+            "selected_effect": target["selected_effect"][:, index],
+            "clean_margin": target["clean_margin"],
+            "masked_margin": target["masked_margin"][:, index],
         }
         if shuffled:
             selected = {key: value.roll(1, 0) for key, value in selected.items()}
@@ -1080,6 +1083,7 @@ class ZS_SBIR(pl.LightningModule):
 
     def stroke_graph_loss(self, batch, features, output):
         from src.stroke_graph import (
+            class_aware_hard_negative_ranking,
             counterfactual_field_alignment,
             centered_field_alignment,
             erase_by_patch_evidence,
@@ -1099,6 +1103,10 @@ class ZS_SBIR(pl.LightningModule):
         anchor = (1 - F.cosine_similarity(
             output["descriptor"], output["native"].detach(), dim=-1
         )).mean()
+        rank, rank_stats = class_aware_hard_negative_ranking(
+            output["descriptor"], features[0].detach(), batch[4],
+            self.args.sgcd_rank_margin, confidence,
+        )
         effect = output["descriptor"].sum() * 0
         effect_stats = {
             "effect_cosine": effect.detach(),
@@ -1125,12 +1133,14 @@ class ZS_SBIR(pl.LightningModule):
             "what": what,
             "effect": effect,
             "anchor": anchor,
+            "rank": rank,
         }
         total = (
             self.args.lambda_sgcd_where * where
             + self.args.lambda_sgcd_what * what
             + self.args.lambda_sgcd_effect * effect
             + self.args.lambda_sgcd_anchor * anchor
+            + self.args.lambda_sgcd_rank * rank
         )
         statistics = {
             **{name: value.detach() for name, value in values.items()},
@@ -1144,6 +1154,10 @@ class ZS_SBIR(pl.LightningModule):
             "correction_norm": output["correction"].norm(dim=-1).mean().detach(),
             "confidence": confidence.mean().detach(),
             "confidence_nonzero": (confidence > 0).float().mean().detach(),
+            "teacher_selected_effect": target["selected_effect"].float().mean().detach(),
+            "teacher_clean_margin": target["clean_margin"].float().mean().detach(),
+            "teacher_masked_margin": target["masked_margin"].float().mean().detach(),
+            **rank_stats,
             **effect_stats,
         }
         return total, statistics, masked_output
