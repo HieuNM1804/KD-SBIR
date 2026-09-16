@@ -40,6 +40,7 @@ versions = []
 rows = []
 curves = []
 fixed_summaries = []
+run_warnings = []
 for pattern in ("main_baseline_*", "sgcd_*", "pcsgcd_*"):
     for run in sorted((PROJECT / "tb_logs").glob(pattern)):
         for version in sorted(run.glob("version_*")):
@@ -55,10 +56,43 @@ for pattern in ("main_baseline_*", "sgcd_*", "pcsgcd_*"):
                 metrics.get("native_precision", []),
             )
             if m and p:
+                configuration_path = diagnostic / "configuration.json"
+                configuration = (
+                    json.loads(configuration_path.read_text(encoding="utf-8"))
+                    if configuration_path.is_file()
+                    else {}
+                )
+                is_native = run.name.startswith("sgcd_native_")
+                warnings = []
+                configured_epochs = configuration.get("epochs")
+                if configured_epochs is not None and len(m) != configured_epochs:
+                    warnings.append(
+                        f"incomplete: {len(m)}/{configured_epochs} validation epochs"
+                    )
+                if is_native:
+                    expected = {
+                        "sgcd_student_mode": "native_prompt",
+                        "lambda_sgcd_anchor": 0.0,
+                        "lambda_sgcd_rank": 0.0,
+                        "sgcd_beta": 0.0,
+                        "sgcd_target": "verified",
+                    }
+                    for name, expected_value in expected.items():
+                        if configuration.get(name) != expected_value:
+                            warnings.append(
+                                f"{name}={configuration.get(name)!r}; "
+                                f"expected {expected_value!r}"
+                            )
+                for warning in warnings:
+                    run_warnings.append(
+                        {"run": run.name, "version": version.name, "warning": warning}
+                    )
+                native_ablation_eligible = is_native and not warnings
                 selected_index, selected_precision_point = max(
                     enumerate(p), key=lambda item: item[1]["value"]
                 )
                 selected_step = selected_precision_point["step"]
+                selected_validation_epoch = selected_index + 1
                 map_by_step = {value["step"]: value["value"] for value in m}
                 native_map_by_step = {
                     value["step"]: value["value"] for value in native_m
@@ -74,8 +108,17 @@ for pattern in ("main_baseline_*", "sgcd_*", "pcsgcd_*"):
                     {
                         "run": run.name,
                         "version": version.name,
+                        "configured_epochs": configured_epochs,
+                        "run_complete": configured_epochs is None
+                        or len(m) == configured_epochs,
+                        "native_ablation_eligible": native_ablation_eligible,
+                        "configuration_warning": "; ".join(warnings),
+                        "lambda_sgcd_where": configuration.get("lambda_sgcd_where"),
+                        "lambda_sgcd_what": configuration.get("lambda_sgcd_what"),
+                        "lambda_sgcd_effect": configuration.get("lambda_sgcd_effect"),
+                        "lambda_sgcd_rank": configuration.get("lambda_sgcd_rank"),
                         "selected_step": selected_step,
-                        "selected_validation_epoch": selected_index + 1,
+                        "selected_validation_epoch": selected_validation_epoch,
                         "selected_mAP": map_by_step[selected_step],
                         "selected_precision": selected_precision_point["value"],
                         "selected_native_mAP": native_map_by_step.get(selected_step),
@@ -94,7 +137,7 @@ for pattern in ("main_baseline_*", "sgcd_*", "pcsgcd_*"):
                     }
                 )
                 fixed_path = diagnostic / "fixed_batch.csv"
-                if run.name.startswith("sgcd_native_") and fixed_path.is_file():
+                if is_native and fixed_path.is_file():
                     with fixed_path.open(newline="", encoding="utf-8") as stream:
                         fixed = list(csv.DictReader(stream))
                     if fixed:
@@ -102,19 +145,26 @@ for pattern in ("main_baseline_*", "sgcd_*", "pcsgcd_*"):
                             (value for value in fixed if value["stage"] == "initial"),
                             fixed[0],
                         )
+                        selected_stage = f"epoch_{selected_validation_epoch}"
                         selected_fixed = next(
                             (
                                 value
                                 for value in fixed
-                                if int(value["global_step"]) == selected_step
+                                if value["stage"] == selected_stage
                             ),
-                            fixed[-1],
+                            None,
                         )
+                        if selected_fixed is None:
+                            raise RuntimeError(
+                                f"Missing {selected_stage} fixed diagnostics: {version}"
+                            )
                         final_fixed = fixed[-1]
                         summary = {
                             "run": run.name,
                             "version": version.name,
                             "selected_step": selected_step,
+                            "native_ablation_eligible": native_ablation_eligible,
+                            "configuration_warning": "; ".join(warnings),
                             "selected_stage": selected_fixed["stage"],
                             "final_stage": final_fixed["stage"],
                         }
@@ -153,6 +203,7 @@ for pattern in ("main_baseline_*", "sgcd_*", "pcsgcd_*"):
 write_csv(OUT / "comparison_summary.csv", rows)
 write_csv(OUT / "scalar_curves.csv", curves)
 write_csv(OUT / "ablation_diagnostics.csv", fixed_summaries)
+write_csv(OUT / "run_warnings.csv", run_warnings)
 
 baseline_rows = [row for row in rows if row["run"].startswith("main_baseline_")]
 delta_rows = []
@@ -178,6 +229,15 @@ if baseline_rows:
             }
         )
 write_csv(OUT / "comparison_deltas.csv", delta_rows)
+if not baseline_rows:
+    run_warnings.append(
+        {
+            "run": "REPORT",
+            "version": "",
+            "warning": "No main_baseline run was found; baseline deltas are unavailable.",
+        }
+    )
+    write_csv(OUT / "run_warnings.csv", run_warnings)
 
 checkpoint_rows = []
 for run in sorted((PROJECT / "saved_models").glob("*")):
@@ -257,8 +317,9 @@ if delta_rows:
     fig.tight_layout()
     fig.savefig(OUT / "comparison_selected_deltas.png", dpi=160)
     plt.close(fig)
-if fixed_summaries:
-    ordered = sorted(fixed_summaries, key=lambda row: row["run"])
+eligible_summaries = [row for row in fixed_summaries if row["native_ablation_eligible"]]
+if eligible_summaries:
+    ordered = sorted(eligible_summaries, key=lambda row: row["run"])
     names = [row["run"] for row in ordered]
     fig, axes = plt.subplots(2, 2, figsize=(17, max(8, len(ordered) * 0.7)))
     panels = (
@@ -293,6 +354,7 @@ manifest = {
         "Selected metrics use mAP and precision from the same precision-selected step.",
         "No model checkpoint, teacher cache or target tensor is copied.",
     ],
+    "warnings": run_warnings,
 }
 (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 archive = OUT.with_suffix(".zip")
