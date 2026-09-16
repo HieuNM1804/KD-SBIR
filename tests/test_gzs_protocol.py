@@ -13,7 +13,7 @@ class GZSDatasetProtocolTest(unittest.TestCase):
             root = Path(temporary_directory)
             unseen = "bat"
             seen = "teapot"
-            excluded_seen = "airplane"
+            excluded_seen = "banana"
             for modality, category, filename in (
                 ("sketch", unseen, "query.png"),
                 ("photo", unseen, "unseen.jpg"),
@@ -49,8 +49,8 @@ class GZSDatasetProtocolTest(unittest.TestCase):
             )
 
     def test_generalized_classes_are_seen_only(self):
-        self.assertEqual(len(GENERALIZED_CLASSES["sketchy_2"]), 9)
-        self.assertEqual(len(GENERALIZED_CLASSES["tuberlin"]), 5)
+        self.assertEqual(len(GENERALIZED_CLASSES["sketchy_2"]), 21)
+        self.assertEqual(len(GENERALIZED_CLASSES["tuberlin"]), 44)
         for dataset, classes in GENERALIZED_CLASSES.items():
             self.assertEqual(len(classes), len(set(classes)))
             self.assertTrue(set(classes).isdisjoint(UNSEEN_CLASSES[dataset]))

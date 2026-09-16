@@ -7,10 +7,17 @@ contains every unseen photo plus photos from the fixed seen-category subset in
 `GENERALIZED_CLASSES`. Relevant photos are determined by category; cosine
 values remain a continuous ranking score.
 
-The fixed seen distractors are nine Sketchy-2 classes (`teapot`, `harp`,
-`piano`, `trumpet`, `saxophone`, `hourglass`, `mushroom`, `pretzel`, `bell`)
-and five TU-Berlin classes (`blimp`, `tablelamp`, `telephone`,
-`human-skeleton`, `pickup truck`).
+The fixed seen distractors are 21 Sketchy-2 classes (`airplane`, `apple`,
+`beetle`, `bench`, `candle`, `couch`, `deer`, `dog`, `elephant`, `hedgehog`,
+`horse`, `kangaroo`, `pickup_truck`, `pig`, `scorpion`, `shark`, `starfish`,
+`table`, `teapot`, `tiger`, `umbrella`) and 44 TU-Berlin classes (`banana`,
+`bee`, `beer-mug`, `bench`, `bottle opener`, `bulldozer`, `chair`,
+`crocodile`, `elephant`, `envelope`, `fish`, `flower with stem`, `giraffe`,
+`hamburger`, `helmet`, `hourglass`, `human-skeleton`, `ice-cream-cone`,
+`key`, `keyboard`, `lion`, `lobster`, `mailbox`, `monkey`, `nose`, `pen`,
+`pickup truck`, `potted plant`, `pretzel`, `pumpkin`, `revolver`,
+`satellite dish`, `socks`, `spider`, `stapler`, `t-shirt`, `table`, `teapot`,
+`tennis-racket`, `tent`, `tooth`, `trumpet`, `umbrella`, `wine-bottle`).
 
 The branch defaults to `--eval_protocol gzs`. Use `--eval_protocol zs` only as
 an unseen-gallery ablation. Sketchy-2 reports mAP@200/P@200; TU-Berlin reports
@@ -77,3 +84,9 @@ checkpoints are also ranked by unseen P@K instead of mAP. Ties keep the earlier
 teacher epoch. Neither state cloning nor checkpoint serialization consumes RNG.
 Because unseen labels determine both selections, this setting has test-set
 model-selection leakage and is not a strict inductive ZS-SBIR protocol.
+
+For an offline Kaggle run, execute `test/kaggle_gzs_online.py` in an online
+notebook, attach the saved `offline_bundle` output, and then execute
+`test/kaggle_gzs_offline.py`. Both setup cells pin this branch to commit
+`983570560d01654b5757f936f386bd601e474ed0` and record the expanded GZS class
+lists in `bundle_manifest.json`.
