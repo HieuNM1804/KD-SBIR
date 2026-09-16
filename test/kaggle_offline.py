@@ -13,7 +13,7 @@ import sys
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/pairwise-counterfactual-stroke-distillation"
-EXPECTED_COMMIT = "59e48a430c5963f1360d5c2653c713dd32af8093"
+EXPECTED_COMMIT = "de00260324904539a3c1d2021883383c8ea4762c"
 EXPECTED_TASK = "pairwise_counterfactual_stroke_distillation"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
