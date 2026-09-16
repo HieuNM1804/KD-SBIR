@@ -246,6 +246,31 @@ class NativePromptTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             validate_arguments(parser, args)
 
+    def test_native_mode_allows_only_student_source_drift(self):
+        from src.stroke_graph_cache import _validation_metadata
+
+        current = {
+            "format_version": 2,
+            "source_sha256": {
+                "src/model.py": "new-model",
+                "src/stroke_graph_cache.py": "new-cache",
+                "src/stroke_graph.py": "same-graph",
+            },
+        }
+        stored = {
+            "format_version": 2,
+            "source_sha256": {
+                "src/model.py": "old-model",
+                "src/stroke_graph_cache.py": "old-cache",
+                "src/stroke_graph.py": "same-graph",
+            },
+        }
+        compatible = _validation_metadata(current, stored, True)
+        self.assertEqual(compatible, stored)
+        stored["source_sha256"]["src/stroke_graph.py"] = "changed-graph"
+        incompatible = _validation_metadata(current, stored, True)
+        self.assertNotEqual(incompatible, stored)
+
     def test_main_loss_prompt_gradients_are_identical_before_auxiliary_updates(self):
         backbone = tiny_clip()
         convert_weights(backbone)

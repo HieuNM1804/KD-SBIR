@@ -28,6 +28,7 @@ from src.stroke_graph import (
 )
 
 CACHE_FORMAT_VERSION = 2
+STUDENT_ONLY_SOURCE_DRIFT = ("src/model.py", "src/stroke_graph_cache.py")
 
 
 def file_sha256(path):
@@ -370,8 +371,28 @@ def _cache_path(args, metadata, teacher_path):
     return teacher_path.parent / f"{args.dataset}_sgcd_{key}.pt"
 
 
-def validate_payload(payload, metadata):
-    if payload.get("metadata") != metadata:
+def _validation_metadata(metadata, stored_metadata, allow_student_source_drift):
+    if not allow_student_source_drift:
+        return metadata
+    expected = dict(metadata)
+    expected["source_sha256"] = dict(metadata["source_sha256"])
+    stored_sources = stored_metadata.get("source_sha256", {})
+    for name in STUDENT_ONLY_SOURCE_DRIFT:
+        if name in stored_sources:
+            expected["source_sha256"][name] = stored_sources[name]
+    return expected
+
+
+def validate_payload(payload, metadata, allow_student_source_drift=False):
+    stored_metadata = payload.get("metadata")
+    if allow_student_source_drift and not isinstance(stored_metadata, dict):
+        raise ValueError("SGCD cache metadata is missing")
+    comparison_metadata = _validation_metadata(
+        metadata,
+        stored_metadata if isinstance(stored_metadata, dict) else {},
+        allow_student_source_drift,
+    )
+    if stored_metadata != comparison_metadata:
         raise ValueError("SGCD cache metadata differs; use a new --sgcd_cache_path")
     n, variants = metadata["sketch_count"], len(TARGET_NAMES)
     grid, width, paths = (
@@ -783,7 +804,21 @@ def prepare_cache(args, dataset, report_dir):
     report_dir = Path(report_dir)
     if path.exists():
         payload = torch.load(path, map_location="cpu", weights_only=True)
-        validate_payload(payload, metadata)
+        allow_student_source_drift = (
+            getattr(args, "sgcd_student_mode", "legacy_head") == "native_prompt"
+        )
+        validate_payload(
+            payload,
+            metadata,
+            allow_student_source_drift=allow_student_source_drift,
+        )
+        if allow_student_source_drift:
+            print(
+                "[SGCD Cache] native_prompt reusing target cache; "
+                "student-only source drift accepted for src/model.py and "
+                "src/stroke_graph_cache.py.",
+                flush=True,
+            )
         print("[SGCD Cache] reused; teacher extraction skipped:", path, flush=True)
     else:
         estimate = len(dataset) * (

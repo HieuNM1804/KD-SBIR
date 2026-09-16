@@ -79,4 +79,7 @@ Full training diagnostics additionally export `component_gradients.csv` and
 `prompt_learning.png`: separate loss gradients per layer, map change from
 initialization, and agreement above a fixed ink prior. Do not compare old head
 runs and native-prompt runs as if they shared the same numeric retrieval path.
-The earlier teacher cache need not be deleted for a student-only change.
+The earlier teacher and SGCD target caches need not be deleted for this
+student-only change. Native mode accepts only the expected student-source drift
+when reusing the historical target cache; dataset, teacher, loss, and stroke
+geometry fingerprints remain strict.
