@@ -873,10 +873,15 @@ class CustomCLIP(nn.Module):
     def encode_student_image_details(self, image, modality):
         visual_prompt, compound_prompts = self.get_visual_prompt(modality)
         if self.stroke_graph_head is None or modality != "sketch":
+            # Keep the original main-retrieval path byte-for-byte compatible:
+            # CLIP's half-precision output is normalized in its native dtype.
+            # The SGCD sketch path below intentionally promotes to FP32 before
+            # its evidence head, but main/photo descriptors must retain the
+            # baseline dtype and ranking behavior.
             native = self.clip_model.visual(
                 image.type(self.dtype), visual_prompt, compound_prompts
             )
-            native = F.normalize(native.float(), dim=-1)
+            native = native / native.norm(dim=-1, keepdim=True)
             return {
                 "descriptor": native,
                 "native": native,
