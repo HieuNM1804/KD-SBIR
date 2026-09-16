@@ -10,7 +10,7 @@ import subprocess
 import sys
 
 
-EXPECTED_COMMIT = "983570560d01654b5757f936f386bd601e474ed0"
+EXPECTED_COMMIT = "3a2a35785de40186064bcec28287622b7d72d4b8"
 WORKING_PROJECT = Path("/kaggle/working/KD-SBIR")
 SKETCHY_ROOT = Path("/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy")
 
