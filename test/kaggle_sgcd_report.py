@@ -2,6 +2,8 @@
 
 import csv
 import json
+import re
+import statistics
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -65,6 +67,11 @@ for pattern in ("main_baseline_*", "sgcd_*", "pcsgcd_*"):
                 is_native = run.name.startswith("sgcd_native_")
                 warnings = []
                 configured_epochs = configuration.get("epochs")
+                seed_match = re.search(r"(?:^|_)s(\d+)(?:_|$)", run.name)
+                seed = configuration.get("seed")
+                if seed is None and seed_match:
+                    seed = int(seed_match.group(1))
+                target_name = configuration.get("sgcd_target")
                 if configured_epochs is not None and len(m) != configured_epochs:
                     warnings.append(
                         f"incomplete: {len(m)}/{configured_epochs} validation epochs"
@@ -75,7 +82,6 @@ for pattern in ("main_baseline_*", "sgcd_*", "pcsgcd_*"):
                         "lambda_sgcd_anchor": 0.0,
                         "lambda_sgcd_rank": 0.0,
                         "sgcd_beta": 0.0,
-                        "sgcd_target": "verified",
                     }
                     for name, expected_value in expected.items():
                         if configuration.get(name) != expected_value:
@@ -87,7 +93,17 @@ for pattern in ("main_baseline_*", "sgcd_*", "pcsgcd_*"):
                     run_warnings.append(
                         {"run": run.name, "version": version.name, "warning": warning}
                     )
-                native_ablation_eligible = is_native and not warnings
+                run_complete = configured_epochs is None or len(m) == configured_epochs
+                native_base_eligible = is_native and not warnings and run_complete
+                native_ablation_eligible = (
+                    native_base_eligible and target_name == "verified"
+                )
+                target_control_eligible = native_base_eligible and (
+                    configuration.get("lambda_sgcd_where") == 1.0
+                    and configuration.get("lambda_sgcd_what") == 0.0
+                    and configuration.get("lambda_sgcd_effect") == 0.25
+                    and target_name in {"verified", "random", "shuffled"}
+                )
                 selected_index, selected_precision_point = max(
                     enumerate(p), key=lambda item: item[1]["value"]
                 )
@@ -108,10 +124,12 @@ for pattern in ("main_baseline_*", "sgcd_*", "pcsgcd_*"):
                     {
                         "run": run.name,
                         "version": version.name,
+                        "seed": seed,
+                        "sgcd_target": target_name,
                         "configured_epochs": configured_epochs,
-                        "run_complete": configured_epochs is None
-                        or len(m) == configured_epochs,
+                        "run_complete": run_complete,
                         "native_ablation_eligible": native_ablation_eligible,
+                        "native_target_control_eligible": target_control_eligible,
                         "configuration_warning": "; ".join(warnings),
                         "lambda_sgcd_where": configuration.get("lambda_sgcd_where"),
                         "lambda_sgcd_what": configuration.get("lambda_sgcd_what"),
@@ -164,6 +182,9 @@ for pattern in ("main_baseline_*", "sgcd_*", "pcsgcd_*"):
                             "version": version.name,
                             "selected_step": selected_step,
                             "native_ablation_eligible": native_ablation_eligible,
+                            "native_target_control_eligible": target_control_eligible,
+                            "seed": seed,
+                            "sgcd_target": target_name,
                             "configuration_warning": "; ".join(warnings),
                             "selected_stage": selected_fixed["stage"],
                             "final_stage": final_fixed["stage"],
@@ -206,13 +227,102 @@ write_csv(OUT / "ablation_diagnostics.csv", fixed_summaries)
 write_csv(OUT / "run_warnings.csv", run_warnings)
 
 baseline_rows = [row for row in rows if row["run"].startswith("main_baseline_")]
+baseline_by_seed = {}
+for row in baseline_rows:
+    seed = row["seed"]
+    if seed is None:
+        continue
+    previous = baseline_by_seed.get(seed)
+    if previous is None or (row["run"], row["version"]) > (
+        previous["run"],
+        previous["version"],
+    ):
+        baseline_by_seed[seed] = row
+
+target_control_by_key = {}
+for row in rows:
+    if not row["native_target_control_eligible"]:
+        continue
+    key = (row["seed"], row["sgcd_target"])
+    previous = target_control_by_key.get(key)
+    if previous is None or (row["run"], row["version"]) > (
+        previous["run"],
+        previous["version"],
+    ):
+        target_control_by_key[key] = row
+target_control_rows = [
+    target_control_by_key[key]
+    for key in sorted(
+        target_control_by_key,
+        key=lambda value: (value[0] if value[0] is not None else -1, value[1]),
+    )
+]
+write_csv(OUT / "target_control_summary.csv", target_control_rows)
+seed_42_targets = {
+    row["sgcd_target"] for row in target_control_rows if row["seed"] == 42
+}
+missing_seed_42_targets = {"verified", "random", "shuffled"} - seed_42_targets
+if missing_seed_42_targets:
+    run_warnings.append(
+        {
+            "run": "REPORT",
+            "version": "",
+            "warning": "Missing complete seed-42 native target controls: "
+            + ", ".join(sorted(missing_seed_42_targets)),
+        }
+    )
+
+replication_rows = []
+replication_deltas = []
+replication_seeds = set(baseline_by_seed) | {key[0] for key in target_control_by_key}
+for seed in sorted(
+    replication_seeds, key=lambda value: value if value is not None else -1
+):
+    baseline = baseline_by_seed.get(seed)
+    verified = target_control_by_key.get((seed, "verified"))
+    if baseline is not None:
+        replication_rows.append({"condition": "main", **baseline})
+    if verified is not None:
+        replication_rows.append({"condition": "native_where_effect", **verified})
+    if baseline is not None and verified is not None:
+        replication_deltas.append(
+            {
+                "seed": seed,
+                "baseline_run": baseline["run"],
+                "method_run": verified["run"],
+                "delta_selected_mAP": verified["selected_mAP"]
+                - baseline["selected_mAP"],
+                "delta_selected_precision": verified["selected_precision"]
+                - baseline["selected_precision"],
+                "delta_final_mAP": verified["final_mAP"] - baseline["final_mAP"],
+                "delta_final_precision": verified["final_precision"]
+                - baseline["final_precision"],
+            }
+        )
+write_csv(OUT / "seed_replication_summary.csv", replication_rows)
+write_csv(OUT / "seed_replication_deltas.csv", replication_deltas)
+if replication_deltas:
+    aggregate = {"paired_seeds": len(replication_deltas)}
+    for name in (
+        "delta_selected_mAP",
+        "delta_selected_precision",
+        "delta_final_mAP",
+        "delta_final_precision",
+    ):
+        values = [row[name] for row in replication_deltas]
+        aggregate[name + "_mean"] = statistics.mean(values)
+        aggregate[name + "_std"] = statistics.stdev(values) if len(values) > 1 else None
+    write_csv(OUT / "seed_replication_aggregate.csv", [aggregate])
+
 delta_rows = []
-if baseline_rows:
-    baseline = max(baseline_rows, key=lambda row: (row["run"], row["version"]))
+if baseline_by_seed:
     (OUT / "baseline_reference.json").write_text(
-        json.dumps(baseline, indent=2), encoding="utf-8"
+        json.dumps(baseline_by_seed, indent=2), encoding="utf-8"
     )
     for row in rows:
+        baseline = baseline_by_seed.get(row["seed"])
+        if baseline is None:
+            continue
         delta_rows.append(
             {
                 **row,
@@ -229,15 +339,15 @@ if baseline_rows:
             }
         )
 write_csv(OUT / "comparison_deltas.csv", delta_rows)
-if not baseline_rows:
+if not baseline_by_seed:
     run_warnings.append(
         {
             "run": "REPORT",
             "version": "",
-            "warning": "No main_baseline run was found; baseline deltas are unavailable.",
+            "warning": "No seed-identifiable main_baseline run was found; baseline deltas are unavailable.",
         }
     )
-    write_csv(OUT / "run_warnings.csv", run_warnings)
+write_csv(OUT / "run_warnings.csv", run_warnings)
 
 checkpoint_rows = []
 for run in sorted((PROJECT / "saved_models").glob("*")):
@@ -317,6 +427,43 @@ if delta_rows:
     fig.tight_layout()
     fig.savefig(OUT / "comparison_selected_deltas.png", dpi=160)
     plt.close(fig)
+if target_control_rows:
+    ordered = sorted(
+        target_control_rows,
+        key=lambda row: (
+            row["seed"] if row["seed"] is not None else -1,
+            row["sgcd_target"],
+        ),
+    )
+    names = [f"s{row['seed']} {row['sgcd_target']}" for row in ordered]
+    y = list(range(len(ordered)))
+    fig, axes = plt.subplots(1, 2, figsize=(16, max(5, len(ordered) * 0.55)))
+    axes[0].barh(y, [100 * row["selected_mAP"] for row in ordered])
+    axes[0].set_yticks(y, names, fontsize=8)
+    axes[0].set_xlabel("Target-control selected mAP (%)")
+    axes[1].barh(y, [100 * row["selected_precision"] for row in ordered])
+    axes[1].set_yticks(y, [])
+    axes[1].set_xlabel("Target-control selected P@100 (%)")
+    fig.tight_layout()
+    fig.savefig(OUT / "target_controls.png", dpi=160)
+    plt.close(fig)
+if replication_deltas:
+    ordered = sorted(replication_deltas, key=lambda row: row["seed"])
+    names = [f"seed {row['seed']}" for row in ordered]
+    selected = [100 * row["delta_selected_mAP"] for row in ordered]
+    final = [100 * row["delta_final_mAP"] for row in ordered]
+    y = list(range(len(ordered)))
+    height = 0.36
+    fig, axis = plt.subplots(figsize=(12, max(5, len(ordered) * 0.65)))
+    axis.barh([value - height / 2 for value in y], selected, height, label="selected")
+    axis.barh([value + height / 2 for value in y], final, height, label="final")
+    axis.set_yticks(y, names)
+    axis.axvline(0, color="black", linewidth=0.8)
+    axis.set_xlabel("Native W+Effect minus matched main mAP (percentage points)")
+    axis.legend()
+    fig.tight_layout()
+    fig.savefig(OUT / "seed_replication_deltas.png", dpi=160)
+    plt.close(fig)
 eligible_summaries = [row for row in fixed_summaries if row["native_ablation_eligible"]]
 if eligible_summaries:
     ordered = sorted(eligible_summaries, key=lambda row: row["run"])
@@ -352,6 +499,8 @@ manifest = {
         "Pairwise teacher audit files are included even when the gate stops before training.",
         "Full unseen retrieval metrics and fixed seen-batch diagnostics have different scope.",
         "Selected metrics use mAP and precision from the same precision-selected step.",
+        "Baseline deltas and replications are matched by parsed or configured seed.",
+        "Native target controls differ only in verified, random or shuffled targets.",
         "No model checkpoint, teacher cache or target tensor is copied.",
     ],
     "warnings": run_warnings,
@@ -383,6 +532,8 @@ for name in (
     "comparison_deltas.png",
     "comparison_selected.png",
     "comparison_selected_deltas.png",
+    "target_controls.png",
+    "seed_replication_deltas.png",
     "ablation_mechanisms.png",
 ):
     if (OUT / name).is_file():

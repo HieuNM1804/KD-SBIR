@@ -100,3 +100,21 @@ All four use seed 42, five epochs, verified pairwise targets, the same cache and
 main losses, native descriptors, and zero anchor/rank/beta. Run the report only
 after the selected ablations finish. It records final metrics separately from
 mAP and precision at the same precision-selected checkpoint.
+
+## Target controls and seed replication
+
+The component ablation identifies W + Effect as the current candidate. Test
+whether its result depends on the verified teacher target before changing any
+loss weight. `kaggle_sgcd_native_random_control.ipy` and
+`kaggle_sgcd_native_shuffle_control.ipy` copy every W + Effect setting and alter
+only `sgcd_target`. Compare them with the completed verified W + Effect run at
+seed 42. The report writes `target_control_summary.csv` and
+`target_controls.png`; incomplete runs and configurations with nonzero
+anchor/rank/beta are excluded.
+
+Only if verified targets outperform both controls should the result be repeated
+with seeds 43 and 44. Run each method beside its matched main baseline using the
+four `*_s43.ipy` and `*_s44.ipy` cells. The report pairs runs by seed and writes
+`seed_replication_deltas.csv`, `seed_replication_aggregate.csv`, and
+`seed_replication_deltas.png`. A small positive result from seed 42 alone is a
+development signal, not evidence for a final claim.

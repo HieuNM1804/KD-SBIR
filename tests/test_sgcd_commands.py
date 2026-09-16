@@ -115,6 +115,71 @@ class SgcdCommandTest(unittest.TestCase):
             }
             self.assertEqual(current, reference, name)
 
+    def test_native_target_controls_only_change_the_target(self):
+        expected = {
+            "kaggle_sgcd_native_where_effect_ablation.ipy": "verified",
+            "kaggle_sgcd_native_random_control.ipy": "random",
+            "kaggle_sgcd_native_shuffle_control.ipy": "shuffled",
+        }
+        configurations = {}
+        for name, target in expected.items():
+            text = self.read(name)
+            arguments = self.arguments(text)
+            configurations[name] = arguments
+            self.assertEqual(arguments["--sgcd_student_mode"], "native_prompt")
+            self.assertEqual(arguments["--sgcd_target"], target)
+            self.assertEqual(arguments["--lambda_sgcd_where"], "1.0")
+            self.assertEqual(arguments["--lambda_sgcd_what"], "0.0")
+            self.assertEqual(arguments["--lambda_sgcd_effect"], "0.25")
+            self.assertEqual(arguments["--lambda_sgcd_anchor"], "0.0")
+            self.assertEqual(arguments["--lambda_sgcd_rank"], "0.0")
+            self.assertEqual(arguments["--sgcd_beta"], "0.0")
+            self.assertEqual(arguments["--seed"], "42")
+        reference = configurations["kaggle_sgcd_native_where_effect_ablation.ipy"]
+        for name, arguments in configurations.items():
+            self.assertEqual(
+                {
+                    key: value
+                    for key, value in arguments.items()
+                    if key != "--sgcd_target"
+                },
+                {
+                    key: value
+                    for key, value in reference.items()
+                    if key != "--sgcd_target"
+                },
+                name,
+            )
+
+    def test_native_seed_replications_have_matched_baselines(self):
+        main_reference = self.arguments(self.read("kaggle_main_baseline_train.ipy"))
+        method_reference = self.arguments(
+            self.read("kaggle_sgcd_native_where_effect_ablation.ipy")
+        )
+        for seed in (43, 44):
+            main = self.arguments(self.read(f"kaggle_main_baseline_s{seed}.ipy"))
+            method = self.arguments(
+                self.read(f"kaggle_sgcd_native_where_effect_s{seed}.ipy")
+            )
+            self.assertEqual(main["--seed"], str(seed))
+            self.assertEqual(method["--seed"], str(seed))
+            self.assertEqual(
+                {key: value for key, value in main.items() if key != "--seed"},
+                {
+                    key: value
+                    for key, value in main_reference.items()
+                    if key != "--seed"
+                },
+            )
+            self.assertEqual(
+                {key: value for key, value in method.items() if key != "--seed"},
+                {
+                    key: value
+                    for key, value in method_reference.items()
+                    if key != "--seed"
+                },
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

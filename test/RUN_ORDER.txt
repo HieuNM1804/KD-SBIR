@@ -21,6 +21,26 @@ TRƯỚC THỰC NGHIỆM MỚI: đọc docs/sgcd_native_prompt.md.
    scalar_curves.csv cùng nhau. So sánh selected checkpoint và final riêng;
    probe thành công không tự nó chứng minh retrieval tăng.
 
+7. KẾT QUẢ ABLATION HIỆN TẠI: giữ W + Effect làm ứng viên; What chỉ giữ như
+   negative ablation. Trước khi tune lambda, chạy target controls seed42:
+   a. W+Effect verified: dùng kết quả hoàn chỉnh đã có từ
+      kaggle_sgcd_native_where_effect_ablation.ipy; chỉ chạy lại nếu thiếu.
+   b. kaggle_sgcd_native_random_control.ipy
+   c. kaggle_sgcd_native_shuffle_control.ipy
+   d. kaggle_sgcd_report.py
+   target_control_summary.csv phải chứa đủ verified/random/shuffled cùng seed42.
+   Nếu verified không hơn controls một cách nhất quán, dừng tuning và thiết kế
+   lại teacher target. Chênh lệch rất nhỏ ở một seed chưa đủ làm claim.
+
+8. Chỉ khi verified thắng target controls, chạy replication theo từng cặp:
+   a. kaggle_main_baseline_s43.ipy
+   b. kaggle_sgcd_native_where_effect_s43.ipy
+   c. kaggle_main_baseline_s44.ipy
+   d. kaggle_sgcd_native_where_effect_s44.ipy
+   e. kaggle_sgcd_report.py
+   Đọc seed_replication_deltas.csv và seed_replication_aggregate.csv. So sánh
+   baseline/phương pháp trong cùng seed; không lấy một baseline chung cho mọi seed.
+
 Các cell train SGCD cũ bên dưới vẫn dùng legacy_head để tái lập, không phải chế độ mới.
 
 THỨ TỰ CŨ (PC-SGCD LEGACY, giữ để tham chiếu):
