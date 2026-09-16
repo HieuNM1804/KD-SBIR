@@ -12,7 +12,7 @@ from pathlib import Path
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/sgcd-native-prompt-learning"
-EXPECTED_COMMIT = "fe01afc2f51f5350b9bad53cffe40baed657ddf7"
+EXPECTED_COMMIT = "a607c9afe4b896beaa442bc063ab854506f3f328"
 EXPECTED_TASK = "sgcd_native_prompt_learning"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
