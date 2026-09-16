@@ -89,6 +89,7 @@ class SgcdCommandTest(unittest.TestCase):
             configurations[name] = self.arguments(text)
             self.assertIn(CACHE, text)
             self.assertIn("--sgcd_student_mode native_prompt", text)
+            self.assertIn("--sgcd_control_contract_version 2", text)
             self.assertIn("--sgcd_target verified", text)
             self.assertIn("--lambda_domain 3.0", text)
             self.assertIn("--lambda_modality 1.0", text)
@@ -127,6 +128,7 @@ class SgcdCommandTest(unittest.TestCase):
             arguments = self.arguments(text)
             configurations[name] = arguments
             self.assertEqual(arguments["--sgcd_student_mode"], "native_prompt")
+            self.assertEqual(arguments["--sgcd_control_contract_version"], "2")
             self.assertEqual(arguments["--sgcd_target"], target)
             self.assertEqual(arguments["--lambda_sgcd_where"], "1.0")
             self.assertEqual(arguments["--lambda_sgcd_what"], "0.0")

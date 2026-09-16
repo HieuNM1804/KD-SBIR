@@ -38,6 +38,7 @@ RUN_NAME = "sgcd_native_where_what_s42_" + datetime.now().strftime(
     --seed 42 \
     --retrieval_head sgcd \
     --sgcd_student_mode native_prompt \
+    --sgcd_control_contract_version 2 \
     --sgcd_cache_path /kaggle/working/teacher_cache/sketchy1_pcsgcd_pairwise_s42_k4_m10.pt \
     --sgcd_effect_mode pairwise \
     --sgcd_negative_topk 3 \
