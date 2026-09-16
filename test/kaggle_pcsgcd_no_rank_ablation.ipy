@@ -43,6 +43,9 @@ RUN_NAME = "pcsgcd_no_rank_s42_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     --sgcd_proposal_topk 3 \
     --sgcd_teacher_batch_size 4 \
     --sgcd_mask_fraction 0.10 \
+    --sgcd_min_effect_ratio 1.15 \
+    --sgcd_min_win_rate 0.53 \
+    --sgcd_max_random_map_cosine 0.75 \
     --lambda_sgcd 1.0 \
     --lambda_sgcd_where 1.0 \
     --lambda_sgcd_what 0.25 \

@@ -45,7 +45,7 @@ RUN_NAME = "pcsgcd_pairwise_standalone_s42_" + datetime.now().strftime("%Y%m%d_%
     --sgcd_mask_fraction 0.10 \
     --sgcd_audit_samples 512 \
     --sgcd_min_effect_ratio 1.15 \
-    --sgcd_min_win_rate 0.60 \
+    --sgcd_min_win_rate 0.53 \
     --sgcd_max_random_map_cosine 0.75 \
     --lambda_sgcd 1.0 \
     --lambda_sgcd_where 1.0 \

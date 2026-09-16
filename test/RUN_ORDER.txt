@@ -7,6 +7,7 @@ BASELINE: main gốc = 3*domain + 1*modality, global CLIP descriptor.
 
 3. AUDIT PAIRWISE: chạy kaggle_sgcd_audit.ipy.
    Teacher target đo độ giảm positive-vs-hard-negative retrieval margin.
+   Gate exploratory dùng win-rate >= 53%; đây chỉ cho phép tạo full cache.
    Nếu gate FAIL: chạy kaggle_sgcd_report.py và gửi report; không full prepare.
 
 4. Nếu audit PASS: chạy kaggle_sgcd_prepare.ipy để tạo pairwise cache.

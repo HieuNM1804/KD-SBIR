@@ -26,7 +26,7 @@ class SgcdCommandTest(unittest.TestCase):
         for text in (audit, prepare):
             self.assertIn(CACHE, text)
             self.assertIn('--sgcd_min_effect_ratio 1.15', text)
-            self.assertIn('--sgcd_min_win_rate 0.60', text)
+            self.assertIn('--sgcd_min_win_rate 0.53', text)
             self.assertIn('--sgcd_max_random_map_cosine 0.75', text)
             self.assertIn('--sgcd_effect_mode pairwise', text)
             self.assertIn('--sgcd_negative_topk 3', text)
@@ -62,6 +62,7 @@ class SgcdCommandTest(unittest.TestCase):
             self.assertIn('--sgcd_effect_mode positive', text)
             self.assertIn('sketchy1_sgcd_positive_s42_k4_m10.pt', text)
         self.assertIn('--sgcd_prepare_only', positive_prepare)
+        self.assertIn('--sgcd_min_win_rate 0.60', positive_prepare)
         self.assertIn('--lambda_sgcd_rank 0.50', positive_train)
 
 

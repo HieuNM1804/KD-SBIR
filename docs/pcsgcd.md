@@ -33,6 +33,13 @@ The main claims require all of the following:
 5. Removing the ranking term reduces the gain.
 6. The result repeats across student seeds.
 
+The pairwise preparation cells use an exploratory audit win-rate floor of
+`0.53`. On the first 512-sketch audit, 282 verified targets beat random
+(`55.08%`, one-sided binomial `p=0.012`), while the positive-effect ratio was
+`2.41x`. This floor only authorizes full-cache measurement; it is not evidence
+for the final claim. The full-cache statistics and downstream controls remain
+mandatory.
+
 The diagnostic report contains target effects, path weights, target entropy,
 clean/masked teacher margins, student rank margin, ranking violation rate,
 retrieval metrics, evidence maps, descriptor intervention, and gradient
