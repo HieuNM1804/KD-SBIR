@@ -234,6 +234,7 @@ required_paths = (
     project / "test" / "kaggle_sgcd_native_where_effect_s43.ipy",
     project / "test" / "kaggle_sgcd_native_where_effect_s44.ipy",
     project / "test" / "kaggle_sgcd_prompt_preflight.py",
+    project / "test" / "kaggle_sgcd_restore_caches.py",
     project / "test" / "kaggle_sgcd_local_control.ipy",
     project / "test" / "kaggle_sgcd_random_control.ipy",
     project / "test" / "kaggle_sgcd_shuffle_control.ipy",

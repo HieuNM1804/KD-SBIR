@@ -137,6 +137,7 @@ required_bundle_paths = (
     source_project / "test" / "kaggle_sgcd_native_where_effect_s43.ipy",
     source_project / "test" / "kaggle_sgcd_native_where_effect_s44.ipy",
     source_project / "test" / "kaggle_sgcd_prompt_preflight.py",
+    source_project / "test" / "kaggle_sgcd_restore_caches.py",
     source_project / "test" / "kaggle_sgcd_local_control.ipy",
     source_project / "test" / "kaggle_sgcd_random_control.ipy",
     source_project / "test" / "kaggle_sgcd_shuffle_control.ipy",

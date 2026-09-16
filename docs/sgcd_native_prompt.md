@@ -103,6 +103,12 @@ mAP and precision at the same precision-selected checkpoint.
 
 ## Target controls and seed replication
 
+In a fresh Kaggle session, attach the dataset containing the saved teacher and
+pairwise target caches and run `kaggle_sgcd_restore_caches.py`. The restore cell
+accepts one content-identical source for each expected filename and rejects
+conflicting copies. If either cache was never saved, regenerate it with the
+audit and prepare cells before training.
+
 The component ablation identifies W + Effect as the current candidate. Test
 whether its result depends on the verified teacher target before changing any
 loss weight. `kaggle_sgcd_native_random_control.ipy` and

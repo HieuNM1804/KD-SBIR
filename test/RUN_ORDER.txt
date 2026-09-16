@@ -1,6 +1,9 @@
 NHÁNH: experiment/sgcd-native-prompt-learning
 TRƯỚC THỰC NGHIỆM MỚI: đọc docs/sgcd_native_prompt.md.
 1. Cập nhật source bằng kaggle_online.py / kaggle_offline.py của nhánh này.
+   Ở session mới, attach dataset chứa hai cache cũ rồi chạy
+   kaggle_sgcd_restore_caches.py. Nếu cell báo thiếu cache, chạy lại audit rồi
+   prepare; không chạy train khi chỉ có một trong hai cache.
 2. Giữ cache teacher và target cũ; chỉnh đường dẫn trong
    kaggle_sgcd_prompt_preflight.py rồi chạy một cell đó.
 3. Gửi summary.json, localization.csv, prompt_gradients.csv, evidence.png.
