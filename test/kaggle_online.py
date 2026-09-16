@@ -25,7 +25,7 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/pairwise-counterfactual-stroke-distillation"
 # Pinned training source; this builder is distributed separately.
-COMMIT = "de00260324904539a3c1d2021883383c8ea4762c"
+COMMIT = "739ba9f4749c7fb9afd2eb6508a0c9402471d1cc"
 TASK = "pairwise_counterfactual_stroke_distillation"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
