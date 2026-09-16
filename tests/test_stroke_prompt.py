@@ -166,6 +166,84 @@ class NativePromptTest(unittest.TestCase):
             all(p.grad is None for p in module.model.clip_model.parameters())
         )
 
+    def test_native_controls_match_confidence_and_shuffle_complete_teacher_pair(self):
+        with (
+            patch("src.model._load_clip_model", return_value=tiny_clip()),
+            patch("src.model._load_teacher", return_value=None),
+        ):
+            module = ZS_SBIR(config(sgcd_target="shuffled"), ["cat", "dog"]).eval()
+        images = torch.randn(4, 3, 32, 32)
+        maps = F.softmax(torch.randn(4, 3, 16), dim=-1)
+        confidence = torch.tensor(
+            [[0.1, 1.0, 1.0], [0.2, 1.0, 1.0], [0.3, 1.0, 1.0], [0.4, 1.0, 1.0]]
+        )
+        target = {
+            "maps": maps,
+            "mask_priorities": maps,
+            "teacher_evidence": torch.randn(4, 3, 48),
+            "teacher_masked": torch.randn(4, 3, 48),
+            "confidence": confidence,
+            "selected_effect": torch.randn(4, 3),
+            "clean_margin": torch.randn(4),
+            "masked_margin": torch.randn(4, 3),
+        }
+        teacher_photo = torch.randn(4, 48)
+        teacher_sketch = torch.arange(4 * 48, dtype=torch.float32).reshape(4, 48)
+        batch = (
+            torch.randn_like(images),
+            images,
+            teacher_photo,
+            teacher_sketch,
+            torch.tensor([0, 0, 1, 1]),
+            target,
+        )
+        features, output = module.model.forward_with_stroke_graph(batch[:5])
+        features = list(features)
+        features[2:4] = batch[2:4]
+        captured = {}
+
+        def fake_alignment(
+            clean_student,
+            masked_student,
+            student_gallery,
+            clean_teacher,
+            masked_teacher,
+            teacher_gallery,
+            confidence=None,
+            magnitude_weight=0.0,
+            eps=1e-8,
+        ):
+            captured["clean_teacher"] = clean_teacher.detach().clone()
+            captured["masked_teacher"] = masked_teacher.detach().clone()
+            zero = clean_student.sum() * 0
+            return zero, {
+                "effect_cosine": zero.detach(),
+                "student_effect_rms": zero.detach(),
+                "teacher_effect_rms": zero.detach(),
+                "effect_magnitude_ratio": zero.detach(),
+            }
+
+        with patch(
+            "src.stroke_graph.counterfactual_field_alignment",
+            side_effect=fake_alignment,
+        ):
+            module.stroke_graph_loss(batch, features, output)
+
+        source = torch.arange(4).roll(1)
+        selected = module._select_sgcd_target(target)
+        self.assertTrue(torch.equal(selected["source_index"], source))
+        self.assertTrue(torch.equal(selected["confidence"], confidence[:, 0].roll(1)))
+        self.assertTrue(torch.equal(captured["clean_teacher"], teacher_sketch[source]))
+        self.assertTrue(
+            torch.equal(
+                captured["masked_teacher"], target["teacher_masked"][:, 0].roll(1, 0)
+            )
+        )
+
+        module.args.sgcd_target = "random"
+        selected = module._select_sgcd_target(target)
+        self.assertTrue(torch.equal(selected["confidence"], confidence[:, 0]))
+
     def test_prompt_only_optimization_learns_nonuniform_locations(self):
         model = CustomCLIP(config(), tiny_clip(), ["cat", "dog"]).eval()
         images = torch.randn(2, 3, 32, 32)

@@ -47,6 +47,9 @@ def add_arguments(parser):
         default="legacy_head",
         help="Use the historical evidence head or supervise CLIP prompts directly.",
     )
+    parser.add_argument(
+        "--sgcd_control_contract_version", type=int, choices=(2,), default=2
+    )
     parser.add_argument("--lambda_sgcd", type=float, default=0.0)
     parser.add_argument("--lambda_sgcd_where", type=float, default=1.0)
     parser.add_argument("--lambda_sgcd_what", type=float, default=0.25)

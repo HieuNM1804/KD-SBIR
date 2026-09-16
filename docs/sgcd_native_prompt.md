@@ -118,6 +118,13 @@ seed 42. The report writes `target_control_summary.csv` and
 `target_controls.png`; incomplete runs and configurations with nonzero
 anchor/rank/beta are excluded.
 
+Control contract v2 also holds the confidence distribution fixed. Native random
+targets use the verified target's confidence weights. Shuffled targets permute
+the complete clean/masked teacher pair; permuting only the masked descriptor
+would create a cross-sketch difference with a much larger magnitude than a true
+counterfactual effect. The report excludes older random/shuffled runs that lack
+`sgcd_control_contract_version=2` and adds a delta-centered control plot.
+
 Only if verified targets outperform both controls should the result be repeated
 with seeds 43 and 44. Run each method beside its matched main baseline using the
 four `*_s43.ipy` and `*_s44.ipy` cells. The report pairs runs by seed and writes

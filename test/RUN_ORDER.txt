@@ -32,6 +32,9 @@ TRƯỚC THỰC NGHIỆM MỚI: đọc docs/sgcd_native_prompt.md.
    c. kaggle_sgcd_native_shuffle_control.ipy
    d. kaggle_sgcd_report.py
    target_control_summary.csv phải chứa đủ verified/random/shuffled cùng seed42.
+   Chỉ control contract v2 là hợp lệ: native random dùng cùng verified-confidence;
+   shuffled hoán vị đồng thời clean/masked teacher. Các control chạy trước bản sửa
+   này phải chạy lại và sẽ bị report loại bằng configuration warning.
    Nếu verified không hơn controls một cách nhất quán, dừng tuning và thiết kế
    lại teacher target. Chênh lệch rất nhỏ ở một seed chưa đủ làm claim.
 

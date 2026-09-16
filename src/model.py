@@ -1069,18 +1069,24 @@ class ZS_SBIR(pl.LightningModule):
         name = self.args.sgcd_target
         shuffled = name == "shuffled"
         index = 0 if shuffled else names.index(name)
+        confidence_index = (
+            0 if self.args.sgcd_student_mode == "native_prompt" else index
+        )
         selected = {
             "map": target["maps"][:, index],
             "mask_priority": target["mask_priorities"][:, index],
             "teacher_evidence": target["teacher_evidence"][:, index],
             "teacher_masked": target["teacher_masked"][:, index],
-            "confidence": target["confidence"][:, index],
+            "confidence": target["confidence"][:, confidence_index],
             "selected_effect": target["selected_effect"][:, index],
             "clean_margin": target["clean_margin"],
             "masked_margin": target["masked_margin"][:, index],
         }
+        source_index = torch.arange(len(selected["map"]), device=selected["map"].device)
         if shuffled:
             selected = {key: value.roll(1, 0) for key, value in selected.items()}
+            source_index = source_index.roll(1, 0)
+        selected["source_index"] = source_index
         return selected
 
     def stroke_graph_loss(self, batch, features, output, return_components=False):
@@ -1140,11 +1146,12 @@ class ZS_SBIR(pl.LightningModule):
             masked_output = self.model.encode_student_image_details(
                 masked_images, "sketch"
             )
+            teacher_source = target["source_index"].to(features[3].device)
             effect, effect_stats = counterfactual_field_alignment(
                 output["descriptor"],
                 masked_output["descriptor"],
                 features[0].detach(),
-                features[3],
+                features[3][teacher_source],
                 target["teacher_masked"],
                 features[2],
                 confidence,

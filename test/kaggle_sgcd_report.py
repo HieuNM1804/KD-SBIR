@@ -72,6 +72,7 @@ for pattern in ("main_baseline_*", "sgcd_*", "pcsgcd_*"):
                 if seed is None and seed_match:
                     seed = int(seed_match.group(1))
                 target_name = configuration.get("sgcd_target")
+                control_contract = configuration.get("sgcd_control_contract_version")
                 if configured_epochs is not None and len(m) != configured_epochs:
                     warnings.append(
                         f"incomplete: {len(m)}/{configured_epochs} validation epochs"
@@ -89,6 +90,11 @@ for pattern in ("main_baseline_*", "sgcd_*", "pcsgcd_*"):
                                 f"{name}={configuration.get(name)!r}; "
                                 f"expected {expected_value!r}"
                             )
+                    if target_name in {"random", "shuffled"} and control_contract != 2:
+                        warnings.append(
+                            "invalid historical target control; expected "
+                            "sgcd_control_contract_version=2"
+                        )
                 for warning in warnings:
                     run_warnings.append(
                         {"run": run.name, "version": version.name, "warning": warning}
@@ -126,6 +132,7 @@ for pattern in ("main_baseline_*", "sgcd_*", "pcsgcd_*"):
                         "version": version.name,
                         "seed": seed,
                         "sgcd_target": target_name,
+                        "sgcd_control_contract_version": control_contract,
                         "configured_epochs": configured_epochs,
                         "run_complete": run_complete,
                         "native_ablation_eligible": native_ablation_eligible,
@@ -258,6 +265,25 @@ target_control_rows = [
     )
 ]
 write_csv(OUT / "target_control_summary.csv", target_control_rows)
+target_control_deltas = []
+for row in target_control_rows:
+    verified = target_control_by_key.get((row["seed"], "verified"))
+    if verified is None:
+        continue
+    target_control_deltas.append(
+        {
+            **row,
+            "verified_run": verified["run"],
+            "delta_selected_mAP_vs_verified": row["selected_mAP"]
+            - verified["selected_mAP"],
+            "delta_selected_precision_vs_verified": row["selected_precision"]
+            - verified["selected_precision"],
+            "delta_final_mAP_vs_verified": row["final_mAP"] - verified["final_mAP"],
+            "delta_final_precision_vs_verified": row["final_precision"]
+            - verified["final_precision"],
+        }
+    )
+write_csv(OUT / "target_control_deltas.csv", target_control_deltas)
 seed_42_targets = {
     row["sgcd_target"] for row in target_control_rows if row["seed"] == 42
 }
@@ -447,6 +473,29 @@ if target_control_rows:
     fig.tight_layout()
     fig.savefig(OUT / "target_controls.png", dpi=160)
     plt.close(fig)
+if target_control_deltas:
+    ordered = sorted(
+        target_control_deltas,
+        key=lambda row: (
+            row["seed"] if row["seed"] is not None else -1,
+            row["sgcd_target"],
+        ),
+    )
+    names = [f"s{row['seed']} {row['sgcd_target']}" for row in ordered]
+    selected = [100 * row["delta_selected_mAP_vs_verified"] for row in ordered]
+    final = [100 * row["delta_final_mAP_vs_verified"] for row in ordered]
+    y = list(range(len(ordered)))
+    height = 0.36
+    fig, axis = plt.subplots(figsize=(12, max(5, len(ordered) * 0.65)))
+    axis.barh([value - height / 2 for value in y], selected, height, label="selected")
+    axis.barh([value + height / 2 for value in y], final, height, label="final")
+    axis.set_yticks(y, names)
+    axis.axvline(0, color="black", linewidth=0.8)
+    axis.set_xlabel("mAP change from matched verified target (percentage points)")
+    axis.legend()
+    fig.tight_layout()
+    fig.savefig(OUT / "target_control_deltas.png", dpi=160)
+    plt.close(fig)
 if replication_deltas:
     ordered = sorted(replication_deltas, key=lambda row: row["seed"])
     names = [f"seed {row['seed']}" for row in ordered]
@@ -501,6 +550,7 @@ manifest = {
         "Selected metrics use mAP and precision from the same precision-selected step.",
         "Baseline deltas and replications are matched by parsed or configured seed.",
         "Native target controls differ only in verified, random or shuffled targets.",
+        "Control contract v2 keeps verified confidence and shuffles complete clean/masked teacher pairs.",
         "No model checkpoint, teacher cache or target tensor is copied.",
     ],
     "warnings": run_warnings,
@@ -533,6 +583,7 @@ for name in (
     "comparison_selected.png",
     "comparison_selected_deltas.png",
     "target_controls.png",
+    "target_control_deltas.png",
     "seed_replication_deltas.png",
     "ablation_mechanisms.png",
 ):

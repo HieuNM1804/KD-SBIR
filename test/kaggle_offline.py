@@ -247,6 +247,7 @@ print("DFN5B checkpoint:", dfn_target)
 # ── Phase 6: Copy source to working directory ───────────────────────
 
 os.chdir(WORKING_ROOT)
+previous_project_backup = None
 if WORKING_PROJECT.exists():
     existing = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=WORKING_PROJECT, text=True
@@ -261,11 +262,26 @@ if WORKING_PROJECT.exists():
             "KD-SBIR-AVKD_backup_" + datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
         )
         WORKING_PROJECT.rename(backup)
+        previous_project_backup = backup
         print("Previous project and checkpoints preserved:", backup)
 if WORKING_PROJECT.exists():
     print("Reusing existing project:", WORKING_PROJECT)
 else:
     shutil.copytree(source_project, WORKING_PROJECT, symlinks=False)
+
+if previous_project_backup is not None:
+    for output_name in ("tb_logs", "saved_models"):
+        previous_output = previous_project_backup / output_name
+        restored_output = WORKING_PROJECT / output_name
+        if not previous_output.is_dir():
+            continue
+        if restored_output.exists():
+            raise RuntimeError(
+                f"Cannot restore {output_name}; destination already exists: "
+                f"{restored_output}"
+            )
+        shutil.copytree(previous_output, restored_output, symlinks=False)
+        print("Restored previous experiment output:", restored_output)
 
 actual_commit = subprocess.check_output(
     ["git", "rev-parse", "HEAD"], cwd=WORKING_PROJECT, text=True
