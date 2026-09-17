@@ -3,7 +3,10 @@
 import torch
 from torch.nn import functional as F
 
-from src.photo_sketch_promptkd import prototype_kd_loss
+from src.photo_sketch_promptkd import (
+    directional_vocabulary_kd_loss,
+    paired_coordinate_consistency,
+)
 
 
 def relational_kd_loss(
@@ -120,9 +123,11 @@ def loss_fn(args, features):
         student_photo_text,
         teacher_sketch_text,
         teacher_photo_text,
-        prototype_active,
-        student_prototypes,
-        teacher_prototypes,
+        retrieval_vocab_active,
+        student_sketch_landmarks,
+        student_photo_landmarks,
+        teacher_sketch_landmarks,
+        teacher_photo_landmarks,
     ) = features
 
     zero = torch.zeros((), device=photo_features.device)
@@ -156,33 +161,66 @@ def loss_fn(args, features):
         )
     modality_loss = photo_text_kd + sketch_text_kd
 
-    prototype_loss = zero
-    if teacher_active and prototype_active and args.lambda_prototype > 0:
-        photo_prototype_kd = prototype_kd_loss(
-            photo_features,
-            teacher_photo_features,
-            student_prototypes,
-            teacher_prototypes,
-            args.prototype_student_temperature,
-            args.prototype_teacher_temperature,
-        )
-        sketch_prototype_kd = prototype_kd_loss(
-            sketch_features,
-            teacher_sketch_features,
-            student_prototypes,
-            teacher_prototypes,
-            args.prototype_student_temperature,
-            args.prototype_teacher_temperature,
-        )
-        prototype_loss = 0.5 * (photo_prototype_kd + sketch_prototype_kd)
+    retrieval_vocab_loss = zero
+    retrieval_vocab_pair = zero
+    vocabulary_statistics = {
+        "vocab_sketch_teacher_entropy": zero,
+        "vocab_photo_teacher_entropy": zero,
+        "vocab_sketch_teacher_confidence": zero,
+        "vocab_photo_teacher_confidence": zero,
+    }
+    if retrieval_vocab_active:
+        if teacher_active and args.lambda_retrieval_vocab > 0:
+            sketch_to_photo, sketch_statistics = directional_vocabulary_kd_loss(
+                sketch_features,
+                teacher_sketch_features,
+                student_photo_landmarks,
+                teacher_photo_landmarks,
+                args.retrieval_vocab_student_temperature,
+                args.retrieval_vocab_teacher_temperature,
+            )
+            photo_to_sketch, photo_statistics = directional_vocabulary_kd_loss(
+                photo_features,
+                teacher_photo_features,
+                student_sketch_landmarks,
+                teacher_sketch_landmarks,
+                args.retrieval_vocab_student_temperature,
+                args.retrieval_vocab_teacher_temperature,
+            )
+            retrieval_vocab_loss = 0.5 * (sketch_to_photo + photo_to_sketch)
+            vocabulary_statistics = {
+                "vocab_sketch_teacher_entropy": sketch_statistics[
+                    "teacher_entropy"
+                ],
+                "vocab_photo_teacher_entropy": photo_statistics[
+                    "teacher_entropy"
+                ],
+                "vocab_sketch_teacher_confidence": sketch_statistics[
+                    "teacher_confidence"
+                ],
+                "vocab_photo_teacher_confidence": photo_statistics[
+                    "teacher_confidence"
+                ],
+            }
+        if args.lambda_retrieval_vocab_pair > 0:
+            retrieval_vocab_pair = paired_coordinate_consistency(
+                sketch_features,
+                photo_features,
+                student_photo_landmarks,
+                student_sketch_landmarks,
+                args.retrieval_vocab_student_temperature,
+            )
 
     total_loss = (
         args.lambda_domain * domain_loss
         + args.lambda_modality * modality_loss
-        + args.lambda_prototype * prototype_loss
+        + args.lambda_retrieval_vocab * retrieval_vocab_loss
+        + args.lambda_retrieval_vocab_pair * retrieval_vocab_pair
     )
     return total_loss, {
         "domain_kd": domain_loss,
         "modality_kd": modality_loss,
-        "prototype_kd": prototype_loss,
+        "retrieval_vocab_kd": retrieval_vocab_loss,
+        "retrieval_vocab_pair": retrieval_vocab_pair,
+        **vocabulary_statistics,
     }

@@ -1,8 +1,8 @@
-"""Train the text-free photo-sketch PromptKD experiment on Sketchy split 1."""
+"""Train retrieval-vocabulary PromptKD from main on Sketchy split 1."""
 
 from datetime import UTC, datetime
 
-RUN_NAME = "promptkd_photo_sketch_s42_" + datetime.now(UTC).strftime(
+RUN_NAME = "promptkd_retrieval_vocab_s42_" + datetime.now(UTC).strftime(
     "%Y%m%d_%H%M%S_%f"
 )
 
@@ -36,10 +36,16 @@ RUN_NAME = "promptkd_photo_sketch_s42_" + datetime.now(UTC).strftime(
     --seed 42 \
     --lambda_domain 3.0 \
     --lambda_modality 0.0 \
-    --lambda_prototype 0.5 \
-    --prototype_anchors_per_class 4 \
-    --prototype_teacher_temperature 0.07 \
-    --prototype_student_temperature 0.07 \
-    --prototype_batch_size 256 \
+    --lambda_retrieval_vocab 0.5 \
+    --lambda_retrieval_vocab_pair 0.0 \
+    --retrieval_vocab_size 128 \
+    --retrieval_vocab_candidates_per_class 8 \
+    --retrieval_vocab_mutual_topk 5 \
+    --retrieval_vocab_min_class_coverage 0.5 \
+    --retrieval_vocab_min_mean_margin 0.0 \
+    --retrieval_vocab_teacher_temperature 0.07 \
+    --retrieval_vocab_student_temperature 0.07 \
+    --retrieval_vocab_batch_size 256 \
+    --retrieval_vocab_descriptor native \
     --exp_name {RUN_NAME} \
     --progress

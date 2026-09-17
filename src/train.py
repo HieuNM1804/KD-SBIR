@@ -299,40 +299,82 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
-        "--lambda_prototype",
+        "--lambda_retrieval_vocab",
         type=float,
         default=0.0,
         help=(
-            "Weight for PromptKD-style photo-sketch prototype "
+            "Weight for PromptKD-style paired retrieval-vocabulary "
             "distillation. Zero preserves the main method."
         ),
     )
     parser.add_argument(
-        "--prototype_anchors_per_class",
+        "--lambda_retrieval_vocab_pair",
+        type=float,
+        default=0.0,
+        help="Weight for sketch-photo consistency in vocabulary coordinates.",
+    )
+    parser.add_argument(
+        "--retrieval_vocab_size",
         type=int,
-        default=4,
+        default=128,
+        help="Number of paired sketch-photo landmark identities.",
+    )
+    parser.add_argument(
+        "--retrieval_vocab_candidates_per_class",
+        type=int,
+        default=8,
         help=(
-            "Number of central real sketch and photo anchors used to form "
-            "each seen-class cross-modal prototype."
+            "Diverse teacher sketch and photo candidates retained per seen "
+            "class before mutual retrieval selection."
         ),
     )
     parser.add_argument(
-        "--prototype_teacher_temperature",
-        type=float,
-        default=0.07,
-        help="Teacher temperature for prototype-ranking distillation.",
+        "--retrieval_vocab_mutual_topk",
+        type=int,
+        default=5,
+        help="Top-k used to verify mutual teacher sketch-photo retrieval.",
     )
     parser.add_argument(
-        "--prototype_student_temperature",
+        "--retrieval_vocab_min_class_coverage",
         type=float,
-        default=0.07,
-        help="Student temperature for prototype-ranking distillation.",
+        default=0.5,
+        help="Minimum fraction of seen classes represented by landmarks.",
     )
     parser.add_argument(
-        "--prototype_batch_size",
+        "--retrieval_vocab_min_mean_margin",
+        type=float,
+        default=0.0,
+        help="Minimum mean teacher cross-class retrieval margin.",
+    )
+    parser.add_argument(
+        "--retrieval_vocab_teacher_temperature",
+        type=float,
+        default=0.07,
+        help="Teacher temperature for landmark-ranking distillation.",
+    )
+    parser.add_argument(
+        "--retrieval_vocab_student_temperature",
+        type=float,
+        default=0.07,
+        help="Student temperature for landmark-ranking distillation.",
+    )
+    parser.add_argument(
+        "--retrieval_vocab_batch_size",
         type=int,
         default=256,
-        help="Batch size for building the fixed student prototype bank.",
+        help="Batch size for building fixed student retrieval landmarks.",
+    )
+    parser.add_argument(
+        "--retrieval_vocab_descriptor",
+        choices=("native", "vocabulary", "hybrid"),
+        default="native",
+        help="Descriptor used for validation and checkpoint selection.",
+    )
+    parser.add_argument(
+        "--retrieval_vocab_native_mix",
+        type=float,
+        default=0.5,
+        help="Native-descriptor contribution for hybrid retrieval.",
     )
     parser.add_argument(
         "--image_text_kd_temperature",
@@ -399,16 +441,32 @@ if __name__ == "__main__":
         parser.error("--lambda_domain must be non-negative.")
     if args.lambda_modality < 0:
         parser.error("--lambda_modality must be non-negative.")
-    if args.lambda_prototype < 0:
-        parser.error("--lambda_prototype must be non-negative.")
-    if args.prototype_anchors_per_class < 1:
-        parser.error("--prototype_anchors_per_class must be at least 1.")
-    if args.prototype_teacher_temperature <= 0:
-        parser.error("--prototype_teacher_temperature must be greater than 0.")
-    if args.prototype_student_temperature <= 0:
-        parser.error("--prototype_student_temperature must be greater than 0.")
-    if args.prototype_batch_size < 1:
-        parser.error("--prototype_batch_size must be at least 1.")
+    if args.lambda_retrieval_vocab < 0:
+        parser.error("--lambda_retrieval_vocab must be non-negative.")
+    if args.lambda_retrieval_vocab_pair < 0:
+        parser.error("--lambda_retrieval_vocab_pair must be non-negative.")
+    if args.retrieval_vocab_size < 2:
+        parser.error("--retrieval_vocab_size must be at least 2.")
+    if args.retrieval_vocab_candidates_per_class < 1:
+        parser.error("--retrieval_vocab_candidates_per_class must be at least 1.")
+    if args.retrieval_vocab_mutual_topk < 1:
+        parser.error("--retrieval_vocab_mutual_topk must be at least 1.")
+    if not 0 < args.retrieval_vocab_min_class_coverage <= 1:
+        parser.error(
+            "--retrieval_vocab_min_class_coverage must be in (0, 1]."
+        )
+    if args.retrieval_vocab_teacher_temperature <= 0:
+        parser.error(
+            "--retrieval_vocab_teacher_temperature must be greater than 0."
+        )
+    if args.retrieval_vocab_student_temperature <= 0:
+        parser.error(
+            "--retrieval_vocab_student_temperature must be greater than 0."
+        )
+    if args.retrieval_vocab_batch_size < 1:
+        parser.error("--retrieval_vocab_batch_size must be at least 1.")
+    if not 0 <= args.retrieval_vocab_native_mix <= 1:
+        parser.error("--retrieval_vocab_native_mix must be between 0 and 1.")
     if args.image_text_kd_temperature <= 0:
         parser.error("--image_text_kd_temperature must be greater than 0.")
     if args.photo_text_kd_temperature <= 0:
@@ -480,6 +538,6 @@ if __name__ == "__main__":
         workers=args.workers,
         show_progress=args.progress,
     )
-    model.prepare_retrieval_prototypes(train_loader.dataset)
+    model.prepare_retrieval_vocabulary(train_loader.dataset)
 
     trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])

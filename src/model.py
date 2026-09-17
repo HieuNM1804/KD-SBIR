@@ -1,5 +1,7 @@
+import csv
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 
@@ -27,8 +29,9 @@ from src.losses import (
     loss_fn,
 )
 from src.photo_sketch_promptkd import (
-    build_cross_modal_prototypes,
-    select_central_anchor_indices,
+    build_retrieval_vocabulary,
+    select_diverse_candidates,
+    vocabulary_coordinates,
 )
 from src.teacher_prompts import build_teacher_prompt_controller
 
@@ -208,7 +211,9 @@ def _load_teacher(args):
     if (
         args.lambda_domain <= 0
         and not _image_text_kd_active(args)
-        and args.lambda_prototype <= 0
+        and args.lambda_retrieval_vocab <= 0
+        and args.lambda_retrieval_vocab_pair <= 0
+        and args.retrieval_vocab_descriptor == "native"
         and args.teacher_pretrain_epochs == 0
     ):
         return None
@@ -289,7 +294,11 @@ class CustomCLIP(nn.Module):
         self.image_text_kd_active = _image_text_kd_active(cfg)
         self.photo_text_active = self.image_text_kd_active
         self.sketch_text_active = self.image_text_kd_active
-        self.prototype_active = cfg.lambda_prototype > 0
+        self.retrieval_vocab_active = (
+            cfg.lambda_retrieval_vocab > 0
+            or cfg.lambda_retrieval_vocab_pair > 0
+            or cfg.retrieval_vocab_descriptor != "native"
+        )
         self.photo_visual_prompt = IndependentVisualPromptLearner(
             cfg.n_ctx_visual,
             visual_width,
@@ -331,17 +340,29 @@ class CustomCLIP(nn.Module):
             persistent=False,
         )
         self.register_buffer(
-            "_teacher_retrieval_prototypes",
+            "_teacher_sketch_landmarks",
             None,
             persistent=False,
         )
         self.register_buffer(
-            "_student_retrieval_prototypes",
+            "_teacher_photo_landmarks",
             None,
             persistent=False,
         )
-        self._prototype_sketch_paths = ()
-        self._prototype_photo_paths = ()
+        self.register_buffer(
+            "_student_sketch_landmarks",
+            None,
+            persistent=False,
+        )
+        self.register_buffer(
+            "_student_photo_landmarks",
+            None,
+            persistent=False,
+        )
+        self._retrieval_vocab_sketch_paths = ()
+        self._retrieval_vocab_photo_paths = ()
+        self.retrieval_vocab_summary = None
+        self.retrieval_vocab_records = []
 
         # The pretrained teacher is reloaded when needed and must not be saved
         # inside every student checkpoint.
@@ -371,12 +392,14 @@ class CustomCLIP(nn.Module):
             f"sketch_temperature={cfg.sketch_text_kd_temperature}"
         )
         print(
-            "[Photo-Sketch PromptKD] cross-modal prototype bank -> "
-            f"active={self.prototype_active}, "
-            f"lambda={cfg.lambda_prototype}, "
-            f"anchors_per_class={cfg.prototype_anchors_per_class}, "
-            f"teacher_temperature={cfg.prototype_teacher_temperature}, "
-            f"student_temperature={cfg.prototype_student_temperature}"
+            "[Photo-Sketch PromptKD] paired retrieval vocabulary -> "
+            f"active={self.retrieval_vocab_active}, "
+            f"lambda={cfg.lambda_retrieval_vocab}, "
+            f"pair_lambda={cfg.lambda_retrieval_vocab_pair}, "
+            f"size={cfg.retrieval_vocab_size}, "
+            f"candidates_per_class={cfg.retrieval_vocab_candidates_per_class}, "
+            f"mutual_topk={cfg.retrieval_vocab_mutual_topk}, "
+            f"descriptor={cfg.retrieval_vocab_descriptor}"
         )
 
     @staticmethod
@@ -817,51 +840,119 @@ class CustomCLIP(nn.Module):
         )
 
     @torch.no_grad()
-    def prepare_retrieval_prototypes(self, train_dataset):
-        """Build fixed teacher prototypes and remember their source images."""
-        if not self.prototype_active:
+    def prepare_retrieval_vocabulary(self, train_dataset):
+        """Build the teacher's fixed two-sided retrieval landmarks."""
+        if not self.retrieval_vocab_active:
             return
         if (
             train_dataset.teacher_sketch_features is None
             or train_dataset.teacher_photo_features is None
         ):
             raise RuntimeError(
-                "Photo-sketch prototypes require materialized teacher features."
+                "The retrieval vocabulary requires materialized teacher features."
             )
 
         class_count = len(self.classnames)
-        anchors_per_class = self.cfg.prototype_anchors_per_class
-        sketch_indices = select_central_anchor_indices(
+        candidates_per_class = self.cfg.retrieval_vocab_candidates_per_class
+        sketch_candidates = select_diverse_candidates(
             train_dataset.teacher_sketch_features,
             train_dataset.all_sketch_labels,
             class_count,
-            anchors_per_class,
-        )
-        photo_indices = select_central_anchor_indices(
+            candidates_per_class,
+        ).flatten()
+        photo_candidates = select_diverse_candidates(
             train_dataset.teacher_photo_features,
             train_dataset.all_photo_labels,
             class_count,
-            anchors_per_class,
+            candidates_per_class,
+        ).flatten()
+        candidate_sketch_labels = torch.as_tensor(
+            train_dataset.all_sketch_labels,
+            dtype=torch.long,
+        )[sketch_candidates]
+        candidate_photo_labels = torch.as_tensor(
+            train_dataset.all_photo_labels,
+            dtype=torch.long,
+        )[photo_candidates]
+        vocabulary = build_retrieval_vocabulary(
+            train_dataset.teacher_sketch_features[sketch_candidates],
+            train_dataset.teacher_photo_features[photo_candidates],
+            candidate_sketch_labels,
+            candidate_photo_labels,
+            self.cfg.retrieval_vocab_size,
+            self.cfg.retrieval_vocab_mutual_topk,
+            class_count,
         )
-        self._teacher_retrieval_prototypes = build_cross_modal_prototypes(
-            train_dataset.teacher_sketch_features,
-            train_dataset.teacher_photo_features,
-            sketch_indices,
-            photo_indices,
+        sketch_indices = sketch_candidates[vocabulary["sketch_indices"]]
+        photo_indices = photo_candidates[vocabulary["photo_indices"]]
+        self._teacher_sketch_landmarks = F.normalize(
+            train_dataset.teacher_sketch_features[sketch_indices].float(),
+            dim=-1,
         ).cpu()
-        self._prototype_sketch_paths = tuple(
+        self._teacher_photo_landmarks = F.normalize(
+            train_dataset.teacher_photo_features[photo_indices].float(),
+            dim=-1,
+        ).cpu()
+        self._retrieval_vocab_sketch_paths = tuple(
             train_dataset.all_sketches_path[index]
-            for index in sketch_indices.flatten().tolist()
+            for index in sketch_indices.tolist()
         )
-        self._prototype_photo_paths = tuple(
+        self._retrieval_vocab_photo_paths = tuple(
             train_dataset.all_photo_paths[index]
-            for index in photo_indices.flatten().tolist()
+            for index in photo_indices.tolist()
         )
+        self.retrieval_vocab_summary = {
+            "size": len(sketch_indices),
+            "covered_classes": vocabulary["labels"].unique().numel(),
+            "class_coverage": (
+                vocabulary["labels"].unique().numel() / class_count
+            ),
+            "mean_similarity": vocabulary["similarity"].mean().item(),
+            "mean_margin": vocabulary["margin"].mean().item(),
+            "mean_quality": vocabulary["quality"].mean().item(),
+        }
+        if (
+            self.retrieval_vocab_summary["class_coverage"]
+            < self.cfg.retrieval_vocab_min_class_coverage
+        ):
+            raise RuntimeError(
+                "Retrieval vocabulary class coverage is below the configured "
+                f"minimum: {self.retrieval_vocab_summary}"
+            )
+        if (
+            self.retrieval_vocab_summary["mean_margin"]
+            < self.cfg.retrieval_vocab_min_mean_margin
+        ):
+            raise RuntimeError(
+                "Retrieval vocabulary mean teacher margin is below the "
+                f"configured minimum: {self.retrieval_vocab_summary}"
+            )
+        self.retrieval_vocab_records = []
+        for index in range(len(sketch_indices)):
+            label = vocabulary["labels"][index].item()
+            sketch_index = sketch_indices[index].item()
+            photo_index = photo_indices[index].item()
+            self.retrieval_vocab_records.append(
+                {
+                    "landmark": index,
+                    "class_index": label,
+                    "class_name": self.classnames[label],
+                    "sketch_path": os.path.relpath(
+                        train_dataset.all_sketches_path[sketch_index],
+                        self.cfg.root,
+                    ).replace("\\", "/"),
+                    "photo_path": os.path.relpath(
+                        train_dataset.all_photo_paths[photo_index],
+                        self.cfg.root,
+                    ).replace("\\", "/"),
+                    "teacher_similarity": vocabulary["similarity"][index].item(),
+                    "teacher_margin": vocabulary["margin"][index].item(),
+                    "quality": vocabulary["quality"][index].item(),
+                }
+            )
         print(
-            "[Photo-Sketch PromptKD] prepared teacher prototype bank; "
-            f"classes={class_count}, "
-            f"anchors={anchors_per_class} sketch + "
-            f"{anchors_per_class} photo per class"
+            "[Photo-Sketch PromptKD] prepared paired teacher landmarks; "
+            + json.dumps(self.retrieval_vocab_summary, sort_keys=True)
         )
 
     @torch.no_grad()
@@ -887,7 +978,7 @@ class CustomCLIP(nn.Module):
         features = []
         batches = tqdm(
             loader,
-            desc=f"Student {modality} prototype anchors",
+            desc=f"Student {modality} retrieval landmarks",
             disable=not show_progress,
         )
         for images in batches:
@@ -897,47 +988,59 @@ class CustomCLIP(nn.Module):
         return torch.cat(features)
 
     @torch.no_grad()
-    def build_student_retrieval_prototypes(
+    def build_student_retrieval_vocabulary(
         self,
         batch_size,
         workers,
         show_progress,
     ):
-        """Build fixed student prototypes with the frozen, unprompted CLIP."""
-        if not self.prototype_active:
+        """Encode matching fixed landmarks with the frozen, unprompted CLIP."""
+        if not self.retrieval_vocab_active:
             return
-        if not self._prototype_sketch_paths or not self._prototype_photo_paths:
+        if (
+            not self._retrieval_vocab_sketch_paths
+            or not self._retrieval_vocab_photo_paths
+        ):
             raise RuntimeError(
-                "Teacher retrieval prototypes must be prepared before fitting."
+                "Teacher retrieval landmarks must be prepared before fitting."
             )
 
-        sketch_features = self._encode_student_anchor_paths(
-            self._prototype_sketch_paths,
+        self._student_sketch_landmarks = self._encode_student_anchor_paths(
+            self._retrieval_vocab_sketch_paths,
             "sketch",
             batch_size,
             workers,
             show_progress,
-        )
-        photo_features = self._encode_student_anchor_paths(
-            self._prototype_photo_paths,
+        ).detach()
+        self._student_photo_landmarks = self._encode_student_anchor_paths(
+            self._retrieval_vocab_photo_paths,
             "photo",
             batch_size,
             workers,
             show_progress,
-        )
-        class_count = len(self.classnames)
-        anchors_per_class = self.cfg.prototype_anchors_per_class
-        anchor_grid = torch.arange(
-            class_count * anchors_per_class,
-            device=sketch_features.device,
-        ).reshape(class_count, anchors_per_class)
-        self._student_retrieval_prototypes = build_cross_modal_prototypes(
-            sketch_features,
-            photo_features,
-            anchor_grid,
-            anchor_grid,
         ).detach()
-        print("[Photo-Sketch PromptKD] built fixed unprompted student prototype bank")
+        print("[Photo-Sketch PromptKD] built fixed unprompted student landmarks")
+
+    def write_retrieval_vocabulary_diagnostics(self, output_dir):
+        if not self.retrieval_vocab_active:
+            return
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "summary.json").write_text(
+            json.dumps(self.retrieval_vocab_summary, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        with (output_dir / "landmarks.csv").open(
+            "w",
+            newline="",
+            encoding="utf-8",
+        ) as stream:
+            writer = csv.DictWriter(
+                stream,
+                fieldnames=list(self.retrieval_vocab_records[0]),
+            )
+            writer.writeheader()
+            writer.writerows(self.retrieval_vocab_records)
 
     def train(self, mode=True):
         super().train(mode)
@@ -1032,12 +1135,14 @@ class CustomCLIP(nn.Module):
                 teacher_sketch_text, teacher_photo_text = (
                     self.get_teacher_text_features()
                 )
-        if self.prototype_active and (
-            self._teacher_retrieval_prototypes is None
-            or self._student_retrieval_prototypes is None
+        if self.retrieval_vocab_active and (
+            self._teacher_sketch_landmarks is None
+            or self._teacher_photo_landmarks is None
+            or self._student_sketch_landmarks is None
+            or self._student_photo_landmarks is None
         ):
             raise RuntimeError(
-                "Photo-sketch prototype banks are not ready for training."
+                "Photo-sketch retrieval landmarks are not ready for training."
             )
 
         return (
@@ -1050,13 +1155,46 @@ class CustomCLIP(nn.Module):
             student_photo_text,
             teacher_sketch_text,
             teacher_photo_text,
-            self.prototype_active,
-            self._student_retrieval_prototypes,
-            self._teacher_retrieval_prototypes,
+            self.retrieval_vocab_active,
+            self._student_sketch_landmarks,
+            self._student_photo_landmarks,
+            self._teacher_sketch_landmarks,
+            self._teacher_photo_landmarks,
         )
 
     def extract_feature(self, image, modality):
-        return self.encode_student_image(image, modality)
+        native = self.encode_student_image(image, modality)
+        descriptor = self.cfg.retrieval_vocab_descriptor
+        if descriptor == "native":
+            return native
+        landmarks = (
+            self._student_photo_landmarks
+            if modality == "sketch"
+            else self._student_sketch_landmarks
+        )
+        if landmarks is None:
+            raise RuntimeError(
+                "Student retrieval landmarks are required for vocabulary inference."
+            )
+        coordinates = vocabulary_coordinates(
+            native,
+            landmarks,
+            self.cfg.retrieval_vocab_student_temperature,
+        )
+        if descriptor == "vocabulary":
+            return coordinates
+        native_mix = self.cfg.retrieval_vocab_native_mix
+        native = F.normalize(native.float(), dim=-1)
+        return F.normalize(
+            torch.cat(
+                (
+                    math.sqrt(native_mix) * native,
+                    math.sqrt(1.0 - native_mix) * coordinates,
+                ),
+                dim=-1,
+            ),
+            dim=-1,
+        )
 
 
 class ZS_SBIR(pl.LightningModule):
@@ -1097,18 +1235,21 @@ class ZS_SBIR(pl.LightningModule):
             show_progress,
         )
 
-    def prepare_retrieval_prototypes(self, train_dataset):
-        self.model.prepare_retrieval_prototypes(train_dataset)
+    def prepare_retrieval_vocabulary(self, train_dataset):
+        self.model.prepare_retrieval_vocabulary(train_dataset)
 
-    def on_train_epoch_start(self):
-        if not self.model.prototype_active:
+    def on_fit_start(self):
+        if not self.model.retrieval_vocab_active:
             return
-        if self.model._student_retrieval_prototypes is None:
-            self.model.build_student_retrieval_prototypes(
-                batch_size=self.args.prototype_batch_size,
+        if self.model._student_sketch_landmarks is None:
+            self.model.build_student_retrieval_vocabulary(
+                batch_size=self.args.retrieval_vocab_batch_size,
                 workers=self.args.workers,
                 show_progress=self.args.progress,
             )
+        self.model.write_retrieval_vocabulary_diagnostics(
+            Path(self.logger.log_dir) / "retrieval_vocabulary"
+        )
         
     def configure_optimizers(self):
         student_params = [
@@ -1161,7 +1302,8 @@ class ZS_SBIR(pl.LightningModule):
         bar_names = {
             "domain_kd": "DOMAIN",
             "modality_kd": "MODALITY",
-            "prototype_kd": "PROTOTYPE",
+            "retrieval_vocab_kd": "VOCAB",
+            "retrieval_vocab_pair": "VOCAB_PAIR",
         }
         for key, bar_name in bar_names.items():
             self.log(
@@ -1171,6 +1313,9 @@ class ZS_SBIR(pl.LightningModule):
                 on_epoch=False,
                 prog_bar=True,
             )
+        for key, value in loss_dict.items():
+            if key.startswith("vocab_"):
+                self.log(key.upper(), value, on_step=False, on_epoch=True)
         return loss
     
     def validation_step(self, batch, batch_idx, dataloader_idx):
