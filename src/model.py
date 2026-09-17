@@ -26,6 +26,10 @@ from src.losses import (
     batch_hard_teacher_triplet_loss,
     loss_fn,
 )
+from src.photo_sketch_promptkd import (
+    build_cross_modal_prototypes,
+    select_central_anchor_indices,
+)
 from src.teacher_prompts import build_teacher_prompt_controller
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -204,6 +208,7 @@ def _load_teacher(args):
     if (
         args.lambda_domain <= 0
         and not _image_text_kd_active(args)
+        and args.lambda_prototype <= 0
         and args.teacher_pretrain_epochs == 0
     ):
         return None
@@ -284,6 +289,7 @@ class CustomCLIP(nn.Module):
         self.image_text_kd_active = _image_text_kd_active(cfg)
         self.photo_text_active = self.image_text_kd_active
         self.sketch_text_active = self.image_text_kd_active
+        self.prototype_active = cfg.lambda_prototype > 0
         self.photo_visual_prompt = IndependentVisualPromptLearner(
             cfg.n_ctx_visual,
             visual_width,
@@ -324,6 +330,18 @@ class CustomCLIP(nn.Module):
             None,
             persistent=False,
         )
+        self.register_buffer(
+            "_teacher_retrieval_prototypes",
+            None,
+            persistent=False,
+        )
+        self.register_buffer(
+            "_student_retrieval_prototypes",
+            None,
+            persistent=False,
+        )
+        self._prototype_sketch_paths = ()
+        self._prototype_photo_paths = ()
 
         # The pretrained teacher is reloaded when needed and must not be saved
         # inside every student checkpoint.
@@ -351,6 +369,14 @@ class CustomCLIP(nn.Module):
             f"lambda={cfg.lambda_modality}, "
             f"photo_temperature={cfg.photo_text_kd_temperature}, "
             f"sketch_temperature={cfg.sketch_text_kd_temperature}"
+        )
+        print(
+            "[Photo-Sketch PromptKD] cross-modal prototype bank -> "
+            f"active={self.prototype_active}, "
+            f"lambda={cfg.lambda_prototype}, "
+            f"anchors_per_class={cfg.prototype_anchors_per_class}, "
+            f"teacher_temperature={cfg.prototype_teacher_temperature}, "
+            f"student_temperature={cfg.prototype_student_temperature}"
         )
 
     @staticmethod
@@ -790,6 +816,129 @@ class CustomCLIP(nn.Module):
             "DFN5B released."
         )
 
+    @torch.no_grad()
+    def prepare_retrieval_prototypes(self, train_dataset):
+        """Build fixed teacher prototypes and remember their source images."""
+        if not self.prototype_active:
+            return
+        if (
+            train_dataset.teacher_sketch_features is None
+            or train_dataset.teacher_photo_features is None
+        ):
+            raise RuntimeError(
+                "Photo-sketch prototypes require materialized teacher features."
+            )
+
+        class_count = len(self.classnames)
+        anchors_per_class = self.cfg.prototype_anchors_per_class
+        sketch_indices = select_central_anchor_indices(
+            train_dataset.teacher_sketch_features,
+            train_dataset.all_sketch_labels,
+            class_count,
+            anchors_per_class,
+        )
+        photo_indices = select_central_anchor_indices(
+            train_dataset.teacher_photo_features,
+            train_dataset.all_photo_labels,
+            class_count,
+            anchors_per_class,
+        )
+        self._teacher_retrieval_prototypes = build_cross_modal_prototypes(
+            train_dataset.teacher_sketch_features,
+            train_dataset.teacher_photo_features,
+            sketch_indices,
+            photo_indices,
+        ).cpu()
+        self._prototype_sketch_paths = tuple(
+            train_dataset.all_sketches_path[index]
+            for index in sketch_indices.flatten().tolist()
+        )
+        self._prototype_photo_paths = tuple(
+            train_dataset.all_photo_paths[index]
+            for index in photo_indices.flatten().tolist()
+        )
+        print(
+            "[Photo-Sketch PromptKD] prepared teacher prototype bank; "
+            f"classes={class_count}, "
+            f"anchors={anchors_per_class} sketch + "
+            f"{anchors_per_class} photo per class"
+        )
+
+    @torch.no_grad()
+    def _encode_student_anchor_paths(
+        self,
+        paths,
+        modality,
+        batch_size,
+        workers,
+        show_progress,
+    ):
+        dataset = TeacherFeatureDataset(paths, self.cfg.max_size)
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=workers,
+            pin_memory=True,
+            persistent_workers=False,
+            prefetch_factor=4 if workers > 0 else None,
+        )
+        student_device = self.clip_model.visual.conv1.weight.device
+        features = []
+        batches = tqdm(
+            loader,
+            desc=f"Student {modality} prototype anchors",
+            disable=not show_progress,
+        )
+        for images in batches:
+            images = images.to(student_device, non_blocking=True)
+            base_features = self.clip_model.visual(images.type(self.dtype))
+            features.append(F.normalize(base_features.float(), dim=-1))
+        return torch.cat(features)
+
+    @torch.no_grad()
+    def build_student_retrieval_prototypes(
+        self,
+        batch_size,
+        workers,
+        show_progress,
+    ):
+        """Build fixed student prototypes with the frozen, unprompted CLIP."""
+        if not self.prototype_active:
+            return
+        if not self._prototype_sketch_paths or not self._prototype_photo_paths:
+            raise RuntimeError(
+                "Teacher retrieval prototypes must be prepared before fitting."
+            )
+
+        sketch_features = self._encode_student_anchor_paths(
+            self._prototype_sketch_paths,
+            "sketch",
+            batch_size,
+            workers,
+            show_progress,
+        )
+        photo_features = self._encode_student_anchor_paths(
+            self._prototype_photo_paths,
+            "photo",
+            batch_size,
+            workers,
+            show_progress,
+        )
+        class_count = len(self.classnames)
+        anchors_per_class = self.cfg.prototype_anchors_per_class
+        anchor_grid = torch.arange(
+            class_count * anchors_per_class,
+            device=sketch_features.device,
+        ).reshape(class_count, anchors_per_class)
+        self._student_retrieval_prototypes = build_cross_modal_prototypes(
+            sketch_features,
+            photo_features,
+            anchor_grid,
+            anchor_grid,
+        ).detach()
+        print("[Photo-Sketch PromptKD] built fixed unprompted student prototype bank")
+
     def train(self, mode=True):
         super().train(mode)
         self.clip_model.eval()
@@ -883,6 +1032,13 @@ class CustomCLIP(nn.Module):
                 teacher_sketch_text, teacher_photo_text = (
                     self.get_teacher_text_features()
                 )
+        if self.prototype_active and (
+            self._teacher_retrieval_prototypes is None
+            or self._student_retrieval_prototypes is None
+        ):
+            raise RuntimeError(
+                "Photo-sketch prototype banks are not ready for training."
+            )
 
         return (
             photo_features,
@@ -894,6 +1050,9 @@ class CustomCLIP(nn.Module):
             student_photo_text,
             teacher_sketch_text,
             teacher_photo_text,
+            self.prototype_active,
+            self._student_retrieval_prototypes,
+            self._teacher_retrieval_prototypes,
         )
 
     def extract_feature(self, image, modality):
@@ -937,6 +1096,19 @@ class ZS_SBIR(pl.LightningModule):
             workers,
             show_progress,
         )
+
+    def prepare_retrieval_prototypes(self, train_dataset):
+        self.model.prepare_retrieval_prototypes(train_dataset)
+
+    def on_train_epoch_start(self):
+        if not self.model.prototype_active:
+            return
+        if self.model._student_retrieval_prototypes is None:
+            self.model.build_student_retrieval_prototypes(
+                batch_size=self.args.prototype_batch_size,
+                workers=self.args.workers,
+                show_progress=self.args.progress,
+            )
         
     def configure_optimizers(self):
         student_params = [
@@ -989,6 +1161,7 @@ class ZS_SBIR(pl.LightningModule):
         bar_names = {
             "domain_kd": "DOMAIN",
             "modality_kd": "MODALITY",
+            "prototype_kd": "PROTOTYPE",
         }
         for key, bar_name in bar_names.items():
             self.log(

@@ -3,6 +3,8 @@
 import torch
 from torch.nn import functional as F
 
+from src.photo_sketch_promptkd import prototype_kd_loss
+
 
 def relational_kd_loss(
     student_sketch,
@@ -118,6 +120,9 @@ def loss_fn(args, features):
         student_photo_text,
         teacher_sketch_text,
         teacher_photo_text,
+        prototype_active,
+        student_prototypes,
+        teacher_prototypes,
     ) = features
 
     zero = torch.zeros((), device=photo_features.device)
@@ -151,11 +156,33 @@ def loss_fn(args, features):
         )
     modality_loss = photo_text_kd + sketch_text_kd
 
+    prototype_loss = zero
+    if teacher_active and prototype_active and args.lambda_prototype > 0:
+        photo_prototype_kd = prototype_kd_loss(
+            photo_features,
+            teacher_photo_features,
+            student_prototypes,
+            teacher_prototypes,
+            args.prototype_student_temperature,
+            args.prototype_teacher_temperature,
+        )
+        sketch_prototype_kd = prototype_kd_loss(
+            sketch_features,
+            teacher_sketch_features,
+            student_prototypes,
+            teacher_prototypes,
+            args.prototype_student_temperature,
+            args.prototype_teacher_temperature,
+        )
+        prototype_loss = 0.5 * (photo_prototype_kd + sketch_prototype_kd)
+
     total_loss = (
         args.lambda_domain * domain_loss
         + args.lambda_modality * modality_loss
+        + args.lambda_prototype * prototype_loss
     )
     return total_loss, {
         "domain_kd": domain_loss,
         "modality_kd": modality_loss,
+        "prototype_kd": prototype_loss,
     }

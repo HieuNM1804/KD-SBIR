@@ -58,13 +58,16 @@ class TrainDataset(torch.utils.data.Dataset):
             category: label for label, category in enumerate(self.all_categories)
         }
         self.all_sketches_path = []
+        self.all_sketch_labels = []
         self.all_photos_path = {}
         self.all_photo_paths = []
+        self.all_photo_labels = []
         self.photo_path_to_index = {}
         self.teacher_sketch_features = None
         self.teacher_photo_features = None
 
         for category in self.all_categories:
+            label = self.category_to_label[category]
             sketch_paths = sorted(
                 glob.glob(os.path.join(args.root, "sketch", category, "*"))
             )
@@ -72,10 +75,12 @@ class TrainDataset(torch.utils.data.Dataset):
                 glob.glob(os.path.join(args.root, "photo", category, "*"))
             )
             self.all_sketches_path.extend(sketch_paths)
+            self.all_sketch_labels.extend([label] * len(sketch_paths))
             self.all_photos_path[category] = photo_paths
             for path in photo_paths:
                 self.photo_path_to_index[path] = len(self.all_photo_paths)
                 self.all_photo_paths.append(path)
+                self.all_photo_labels.append(label)
 
     def set_teacher_features(self, sketch_features, photo_features):
         if len(sketch_features) != len(self.all_sketches_path):

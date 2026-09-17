@@ -16,6 +16,14 @@ uses fixed CLIP features from these modality-specific templates:
 The student objectives are sketch-photo relational KD, photo-text KD, and
 sketch-text KD. Setting an objective weight to zero disables that objective.
 
+The `experiment/promptkd-photo-sketch-prototypes` branch adds a retrieval-native
+PromptKD objective. It replaces text class vectors with fixed identities of
+cross-modal prototypes built from real seen-class photo and sketch anchors.
+Teacher and student vectors stay in their own embedding dimensions; their
+probability distributions share the same prototype ordering. No projector or
+prototype parameter is used at inference. Set `--lambda_prototype 0` to recover
+the original main objective.
+
 ```bash
 !python -m src.train \
     --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \

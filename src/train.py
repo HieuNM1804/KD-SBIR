@@ -299,6 +299,42 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--lambda_prototype",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight for PromptKD-style photo-sketch prototype "
+            "distillation. Zero preserves the main method."
+        ),
+    )
+    parser.add_argument(
+        "--prototype_anchors_per_class",
+        type=int,
+        default=4,
+        help=(
+            "Number of central real sketch and photo anchors used to form "
+            "each seen-class cross-modal prototype."
+        ),
+    )
+    parser.add_argument(
+        "--prototype_teacher_temperature",
+        type=float,
+        default=0.07,
+        help="Teacher temperature for prototype-ranking distillation.",
+    )
+    parser.add_argument(
+        "--prototype_student_temperature",
+        type=float,
+        default=0.07,
+        help="Student temperature for prototype-ranking distillation.",
+    )
+    parser.add_argument(
+        "--prototype_batch_size",
+        type=int,
+        default=256,
+        help="Batch size for building the fixed student prototype bank.",
+    )
+    parser.add_argument(
         "--image_text_kd_temperature",
         type=float,
         default=0.1,
@@ -363,6 +399,16 @@ if __name__ == "__main__":
         parser.error("--lambda_domain must be non-negative.")
     if args.lambda_modality < 0:
         parser.error("--lambda_modality must be non-negative.")
+    if args.lambda_prototype < 0:
+        parser.error("--lambda_prototype must be non-negative.")
+    if args.prototype_anchors_per_class < 1:
+        parser.error("--prototype_anchors_per_class must be at least 1.")
+    if args.prototype_teacher_temperature <= 0:
+        parser.error("--prototype_teacher_temperature must be greater than 0.")
+    if args.prototype_student_temperature <= 0:
+        parser.error("--prototype_student_temperature must be greater than 0.")
+    if args.prototype_batch_size < 1:
+        parser.error("--prototype_batch_size must be at least 1.")
     if args.image_text_kd_temperature <= 0:
         parser.error("--image_text_kd_temperature must be greater than 0.")
     if args.photo_text_kd_temperature <= 0:
@@ -434,5 +480,6 @@ if __name__ == "__main__":
         workers=args.workers,
         show_progress=args.progress,
     )
+    model.prepare_retrieval_prototypes(train_loader.dataset)
 
     trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])
