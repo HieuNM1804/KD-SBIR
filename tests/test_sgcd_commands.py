@@ -187,7 +187,8 @@ class SgcdCommandTest(unittest.TestCase):
         self.assertIn('"sketchy_2"', text)
         self.assertIn('"--retrieval_head",\n    "main"', text)
         self.assertIn('"--retrieval_head",\n    "sgcd"', text)
-        self.assertEqual(text.count("*shared"), 2)
+        self.assertEqual(text.count("*shared"), 3)
+        self.assertEqual(text.count("*sgcd_arguments"), 2)
         self.assertIn('"--sgcd_student_mode",\n    "native_prompt"', text)
         self.assertIn('"--lambda_sgcd_where",\n    "1.0"', text)
         self.assertIn('"--lambda_sgcd_what",\n    "0.0"', text)
@@ -195,9 +196,10 @@ class SgcdCommandTest(unittest.TestCase):
         self.assertIn('"--lambda_sgcd_rank",\n    "0.0"', text)
         self.assertIn('"--sgcd_beta",\n    "0.0"', text)
         self.assertIn('"--sgcd_min_win_rate",\n    "0.53"', text)
-        self.assertNotIn("--sgcd_force_prepare", text)
+        self.assertIn("--sgcd_force_prepare", text)
+        self.assertIn("--sgcd_audit_only", text)
         self.assertIn("zipfile.ZipFile", text)
-        self.assertIn('"teacher_gate_forced": False', text)
+        self.assertIn('"teacher_gate_bypassed_for_training": False', text)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ SGCD_CACHE = (
     f"sketchy2_pcsgcd_pairwise_s42_k4_m10_rerun_{STAMP}.pt"
 )
 BASELINE_RUN = "main_baseline_sketchy2_s42_" + STAMP
+AUDIT_RUN = "sgcd_audit_sketchy2_s42_" + STAMP
 SGCD_RUN = "sgcd_native_where_effect_sketchy2_s42_" + STAMP
 OUT = Path("/kaggle/working") / ("sgcd_sketchy2_comparison_" + STAMP)
 OUT.mkdir(parents=True, exist_ok=False)
@@ -54,6 +55,13 @@ def run_stage(label, command):
         code = process.wait()
     print(f"[{label}] exit code: {code}", flush=True)
     return code
+
+
+def latest_version(run_name):
+    versions = list((PROJECT / "tb_logs" / run_name).glob("version_*"))
+    if not versions:
+        return None
+    return max(versions, key=lambda path: int(path.name.split("_")[-1]))
 
 
 shared = [
@@ -130,13 +138,7 @@ baseline_command = [
 ]
 baseline_code = run_stage("baseline", baseline_command)
 
-sgcd_code = None
-sgcd_command = [
-    sys.executable,
-    "-u",
-    "-m",
-    "src.train",
-    *shared,
+sgcd_arguments = [
     "--retrieval_head",
     "sgcd",
     "--sgcd_student_mode",
@@ -206,23 +208,59 @@ sgcd_command = [
     "--sgcd_diagnostics",
     "--sgcd_target",
     "verified",
-    "--exp_name",
-    SGCD_RUN,
 ]
+audit_code = None
+audit = None
+audit_version = None
+audit_path = None
+sgcd_code = None
 if baseline_code == 0:
-    sgcd_code = run_stage("sgcd_where_effect", sgcd_command)
+    audit_command = [
+        sys.executable,
+        "-u",
+        "-m",
+        "src.train",
+        *shared,
+        *sgcd_arguments,
+        "--sgcd_force_prepare",
+        "--sgcd_audit_only",
+        "--exp_name",
+        AUDIT_RUN,
+    ]
+    audit_code = run_stage("sgcd_audit", audit_command)
+    audit_version = latest_version(AUDIT_RUN)
+    if audit_version is not None:
+        candidate = audit_version / "sgcd_diagnostics" / "teacher_audit.json"
+        if candidate.is_file():
+            audit_path = candidate
+            audit = json.loads(candidate.read_text(encoding="utf-8"))
+
+    if audit_code == 0 and audit is not None and audit.get("passed"):
+        sgcd_command = [
+            sys.executable,
+            "-u",
+            "-m",
+            "src.train",
+            *shared,
+            *sgcd_arguments,
+            "--exp_name",
+            SGCD_RUN,
+        ]
+        sgcd_code = run_stage("sgcd_where_effect", sgcd_command)
+    else:
+        (OUT / "sgcd_where_effect.log").write_text(
+            "W+Effect was not started because the diagnostic audit did not pass.\n",
+            encoding="utf-8",
+        )
 else:
+    (OUT / "sgcd_audit.log").write_text(
+        "Audit was not started because the matched baseline failed.\n",
+        encoding="utf-8",
+    )
     (OUT / "sgcd_where_effect.log").write_text(
         "SGCD was not started because the matched baseline failed.\n",
         encoding="utf-8",
     )
-
-
-def latest_version(run_name):
-    versions = list((PROJECT / "tb_logs" / run_name).glob("version_*"))
-    if not versions:
-        return None
-    return max(versions, key=lambda path: int(path.name.split("_")[-1]))
 
 
 def read_scalars(version):
@@ -342,21 +380,22 @@ write_csv(
     ),
 )
 
-audit = None
-audit_path = None
+# A successful training run repeats the audit without the diagnostic force flag.
+# Prefer that strict report in the final manifest and visualizations.
 if sgcd_version is not None:
-    candidate = sgcd_version / "sgcd_diagnostics" / "teacher_audit.json"
-    if candidate.is_file():
-        audit_path = candidate
-        audit = json.loads(candidate.read_text(encoding="utf-8"))
+    strict_audit = sgcd_version / "sgcd_diagnostics" / "teacher_audit.json"
+    if strict_audit.is_file():
+        audit_path = strict_audit
+        audit = json.loads(strict_audit.read_text(encoding="utf-8"))
 
-sgcd_log = (OUT / "sgcd_where_effect.log").read_text(encoding="utf-8", errors="replace")
-if sgcd_row is not None and sgcd_code == 0:
-    sgcd_status = "trained"
-elif "SGCD teacher-only gate failed" in sgcd_log:
-    sgcd_status = "teacher_gate_failed"
-elif baseline_code != 0:
+if baseline_code != 0:
     sgcd_status = "not_started_baseline_failed"
+elif audit_code != 0 or audit is None:
+    sgcd_status = "audit_failed_unexpectedly"
+elif not audit.get("passed"):
+    sgcd_status = "teacher_gate_failed"
+elif sgcd_row is not None and sgcd_code == 0:
+    sgcd_status = "trained"
 else:
     sgcd_status = "failed"
 
@@ -371,10 +410,14 @@ manifest = {
     "seed": 42,
     "baseline_run": BASELINE_RUN,
     "baseline_return_code": baseline_code,
+    "audit_run": AUDIT_RUN,
+    "audit_return_code": audit_code,
     "sgcd_run": SGCD_RUN,
     "sgcd_return_code": sgcd_code,
     "sgcd_status": sgcd_status,
-    "teacher_gate_forced": False,
+    "audit_only_diagnostic_force_flag": True,
+    "teacher_gate_bypassed_for_training": False,
+    "claim_eligible": sgcd_status == "trained",
     "teacher_audit": audit,
     "notes": [
         "Baseline and W+Effect use the same teacher cache and main losses.",
@@ -428,6 +471,7 @@ with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
             bundle.write(path, Path("report") / path.relative_to(OUT))
     for run_name, version in (
         (BASELINE_RUN, baseline_version),
+        (AUDIT_RUN, audit_version),
         (SGCD_RUN, sgcd_version),
     ):
         if version is None:
@@ -462,7 +506,7 @@ display(FileLink(str(archive)))
 
 if baseline_code != 0:
     raise RuntimeError("Matched Sketchy2 baseline failed; inspect baseline.log in ZIP.")
-if sgcd_status == "failed":
+if sgcd_status in {"failed", "audit_failed_unexpectedly"}:
     raise RuntimeError("Sketchy2 W+Effect failed unexpectedly; inspect ZIP logs.")
 if sgcd_status == "teacher_gate_failed":
     print(
