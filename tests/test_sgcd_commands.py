@@ -182,6 +182,23 @@ class SgcdCommandTest(unittest.TestCase):
                 },
             )
 
+    def test_sketchy2_combined_run_is_matched_and_keeps_gate(self):
+        text = self.read("kaggle_sgcd_sketchy2_baseline_where_effect.ipy")
+        self.assertIn('"sketchy_2"', text)
+        self.assertIn('"--retrieval_head",\n    "main"', text)
+        self.assertIn('"--retrieval_head",\n    "sgcd"', text)
+        self.assertEqual(text.count("*shared"), 2)
+        self.assertIn('"--sgcd_student_mode",\n    "native_prompt"', text)
+        self.assertIn('"--lambda_sgcd_where",\n    "1.0"', text)
+        self.assertIn('"--lambda_sgcd_what",\n    "0.0"', text)
+        self.assertIn('"--lambda_sgcd_effect",\n    "0.25"', text)
+        self.assertIn('"--lambda_sgcd_rank",\n    "0.0"', text)
+        self.assertIn('"--sgcd_beta",\n    "0.0"', text)
+        self.assertIn('"--sgcd_min_win_rate",\n    "0.53"', text)
+        self.assertNotIn("--sgcd_force_prepare", text)
+        self.assertIn("zipfile.ZipFile", text)
+        self.assertIn('"teacher_gate_forced": False', text)
+
 
 if __name__ == "__main__":
     unittest.main()

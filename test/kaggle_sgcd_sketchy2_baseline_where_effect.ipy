@@ -1,0 +1,471 @@
+"""Run matched Sketchy2 main and native Where+Effect, then export one ZIP.
+
+The SGCD run keeps the validated teacher-only gate. If the gate fails, student
+SGCD training is skipped and the ZIP contains the complete baseline and audit.
+"""
+
+import csv
+import json
+import os
+import subprocess
+import sys
+import zipfile
+from datetime import UTC, datetime
+from pathlib import Path
+
+PROJECT = Path("/kaggle/working/KD-SBIR-AVKD")
+ROOT = "/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy"
+TEACHER_CACHE = "/kaggle/working/teacher_cache/sketchy2_teacher_2ep.pt"
+STAMP = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
+SGCD_CACHE = (
+    "/kaggle/working/teacher_cache/"
+    f"sketchy2_pcsgcd_pairwise_s42_k4_m10_rerun_{STAMP}.pt"
+)
+BASELINE_RUN = "main_baseline_sketchy2_s42_" + STAMP
+SGCD_RUN = "sgcd_native_where_effect_sketchy2_s42_" + STAMP
+OUT = Path("/kaggle/working") / ("sgcd_sketchy2_comparison_" + STAMP)
+OUT.mkdir(parents=True, exist_ok=False)
+Path(TEACHER_CACHE).parent.mkdir(parents=True, exist_ok=True)
+
+
+def run_stage(label, command):
+    """Stream a subprocess to the notebook and retain its exact log."""
+    log_path = OUT / f"{label}.log"
+    print("=" * 80, flush=True)
+    print(label.upper(), flush=True)
+    print(" ".join(command), flush=True)
+    print("=" * 80, flush=True)
+    with log_path.open("w", encoding="utf-8") as log:
+        process = subprocess.Popen(
+            command,
+            cwd=PROJECT,
+            env=os.environ.copy(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line.rstrip(), flush=True)
+            log.write(line)
+        code = process.wait()
+    print(f"[{label}] exit code: {code}", flush=True)
+    return code
+
+
+shared = [
+    "--root",
+    ROOT,
+    "--dataset",
+    "sketchy_2",
+    "--epochs",
+    "5",
+    "--workers",
+    "8",
+    "--batch_size",
+    "64",
+    "--test_batch_size",
+    "1024",
+    "--n_ctx_visual",
+    "3",
+    "--prompt_depth",
+    "12",
+    "--teacher_pretrain_epochs",
+    "2",
+    "--teacher_cache_path",
+    TEACHER_CACHE,
+    "--teacher_pretrain_batch_size",
+    "64",
+    "--teacher_n_ctx_visual",
+    "10",
+    "--teacher_prompt_depth",
+    "12",
+    "--teacher_prompt_std",
+    "0.02",
+    "--teacher_prompt_lr",
+    "3e-2",
+    "--teacher_prompt_seed",
+    "42",
+    "--teacher_prompt_gradient_checkpointing",
+    "--teacher_momentum",
+    "0.9",
+    "--teacher_weight_decay",
+    "1e-3",
+    "--lambda_teacher_retrieval",
+    "1.5",
+    "--teacher_triplet_margin",
+    "0.2",
+    "--photo_text_kd_temperature",
+    "0.15",
+    "--sketch_text_kd_temperature",
+    "0.02",
+    "--lr",
+    "1e-2",
+    "--momentum",
+    "0.9",
+    "--weight_decay",
+    "5e-4",
+    "--seed",
+    "42",
+    "--lambda_domain",
+    "3.0",
+    "--lambda_modality",
+    "1.0",
+    "--progress",
+]
+
+baseline_command = [
+    sys.executable,
+    "-u",
+    "-m",
+    "src.train",
+    *shared,
+    "--retrieval_head",
+    "main",
+    "--exp_name",
+    BASELINE_RUN,
+]
+baseline_code = run_stage("baseline", baseline_command)
+
+sgcd_code = None
+sgcd_command = [
+    sys.executable,
+    "-u",
+    "-m",
+    "src.train",
+    *shared,
+    "--retrieval_head",
+    "sgcd",
+    "--sgcd_student_mode",
+    "native_prompt",
+    "--sgcd_control_contract_version",
+    "2",
+    "--sgcd_cache_path",
+    SGCD_CACHE,
+    "--sgcd_effect_mode",
+    "pairwise",
+    "--sgcd_negative_topk",
+    "3",
+    "--sgcd_target_temperature",
+    "0.05",
+    "--sgcd_skeleton_grid",
+    "28",
+    "--sgcd_max_paths",
+    "4",
+    "--sgcd_photo_representatives",
+    "2",
+    "--sgcd_local_topk_patches",
+    "4",
+    "--sgcd_proposal_topk",
+    "3",
+    "--sgcd_teacher_batch_size",
+    "4",
+    "--sgcd_mask_fraction",
+    "0.10",
+    "--sgcd_audit_samples",
+    "512",
+    "--sgcd_min_effect_ratio",
+    "1.15",
+    "--sgcd_min_win_rate",
+    "0.53",
+    "--sgcd_max_random_map_cosine",
+    "0.75",
+    "--lambda_sgcd",
+    "1.0",
+    "--lambda_sgcd_where",
+    "1.0",
+    "--lambda_sgcd_what",
+    "0.0",
+    "--lambda_sgcd_effect",
+    "0.25",
+    "--lambda_sgcd_anchor",
+    "0.0",
+    "--lambda_sgcd_rank",
+    "0.0",
+    "--sgcd_effect_magnitude_weight",
+    "0.25",
+    "--sgcd_beta",
+    "0.0",
+    "--sgcd_bottleneck",
+    "128",
+    "--sgcd_head_lr",
+    "3e-3",
+    "--sgcd_temperature",
+    "0.07",
+    "--sgcd_graph_steps",
+    "0",
+    "--sgcd_graph_mix",
+    "0.0",
+    "--sgcd_warmup_epochs",
+    "0.5",
+    "--sgcd_decay_start_epoch",
+    "3.0",
+    "--sgcd_diagnostics",
+    "--sgcd_target",
+    "verified",
+    "--exp_name",
+    SGCD_RUN,
+]
+if baseline_code == 0:
+    sgcd_code = run_stage("sgcd_where_effect", sgcd_command)
+else:
+    (OUT / "sgcd_where_effect.log").write_text(
+        "SGCD was not started because the matched baseline failed.\n",
+        encoding="utf-8",
+    )
+
+
+def latest_version(run_name):
+    versions = list((PROJECT / "tb_logs" / run_name).glob("version_*"))
+    if not versions:
+        return None
+    return max(versions, key=lambda path: int(path.name.split("_")[-1]))
+
+
+def read_scalars(version):
+    from tensorboard.backend.event_processing.event_accumulator import (
+        EventAccumulator,
+    )
+
+    accumulator = EventAccumulator(str(version), size_guidance={"scalars": 0})
+    accumulator.Reload()
+    return {
+        tag: [
+            {
+                "step": value.step,
+                "value": value.value,
+                "wall_time": value.wall_time,
+            }
+            for value in accumulator.Scalars(tag)
+        ]
+        for tag in accumulator.Tags().get("scalars", [])
+    }
+
+
+def summarize_run(condition, run_name, return_code):
+    version = latest_version(run_name)
+    if version is None:
+        return None, [], None
+    metrics = read_scalars(version)
+    map_values = metrics.get("mAP", [])
+    precision_values = metrics.get("precision", [])
+    curves = []
+    for tag in sorted(metrics):
+        for value in metrics[tag]:
+            curves.append(
+                {
+                    "condition": condition,
+                    "run": run_name,
+                    "version": version.name,
+                    "tag": tag,
+                    **value,
+                }
+            )
+    if not map_values or not precision_values:
+        return None, curves, version
+    map_by_step = {value["step"]: value["value"] for value in map_values}
+    selected_index, selected_precision = max(
+        enumerate(precision_values), key=lambda item: item[1]["value"]
+    )
+    selected_step = selected_precision["step"]
+    if selected_step not in map_by_step:
+        raise RuntimeError(
+            f"mAP is missing at precision-selected step {selected_step}: {version}"
+        )
+    row = {
+        "condition": condition,
+        "run": run_name,
+        "version": version.name,
+        "return_code": return_code,
+        "selected_validation_epoch": selected_index + 1,
+        "selected_step": selected_step,
+        "selected_mAP200": map_by_step[selected_step],
+        "selected_P200": selected_precision["value"],
+        "final_mAP200": map_values[-1]["value"],
+        "final_P200": precision_values[-1]["value"],
+        "best_mAP200": max(value["value"] for value in map_values),
+        "best_P200": max(value["value"] for value in precision_values),
+        "completed_validation_epochs": len(map_values),
+    }
+    return row, curves, version
+
+
+def write_csv(path, rows, fieldnames=None):
+    if not rows and fieldnames is None:
+        return
+    if fieldnames is None:
+        fieldnames = list(rows[0])
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+baseline_row, baseline_curves, baseline_version = summarize_run(
+    "main", BASELINE_RUN, baseline_code
+)
+sgcd_row, sgcd_curves, sgcd_version = summarize_run(
+    "native_where_effect", SGCD_RUN, sgcd_code
+)
+summary_rows = [row for row in (baseline_row, sgcd_row) if row is not None]
+write_csv(OUT / "comparison_summary.csv", summary_rows)
+write_csv(OUT / "scalar_curves.csv", baseline_curves + sgcd_curves)
+
+delta_rows = []
+if baseline_row is not None and sgcd_row is not None:
+    delta_rows.append(
+        {
+            "baseline_run": BASELINE_RUN,
+            "method_run": SGCD_RUN,
+            "delta_selected_mAP200": sgcd_row["selected_mAP200"]
+            - baseline_row["selected_mAP200"],
+            "delta_selected_P200": sgcd_row["selected_P200"]
+            - baseline_row["selected_P200"],
+            "delta_final_mAP200": sgcd_row["final_mAP200"]
+            - baseline_row["final_mAP200"],
+            "delta_final_P200": sgcd_row["final_P200"] - baseline_row["final_P200"],
+        }
+    )
+write_csv(
+    OUT / "comparison_deltas.csv",
+    delta_rows,
+    fieldnames=(
+        "baseline_run",
+        "method_run",
+        "delta_selected_mAP200",
+        "delta_selected_P200",
+        "delta_final_mAP200",
+        "delta_final_P200",
+    ),
+)
+
+audit = None
+audit_path = None
+if sgcd_version is not None:
+    candidate = sgcd_version / "sgcd_diagnostics" / "teacher_audit.json"
+    if candidate.is_file():
+        audit_path = candidate
+        audit = json.loads(candidate.read_text(encoding="utf-8"))
+
+sgcd_log = (OUT / "sgcd_where_effect.log").read_text(encoding="utf-8", errors="replace")
+if sgcd_row is not None and sgcd_code == 0:
+    sgcd_status = "trained"
+elif "SGCD teacher-only gate failed" in sgcd_log:
+    sgcd_status = "teacher_gate_failed"
+elif baseline_code != 0:
+    sgcd_status = "not_started_baseline_failed"
+else:
+    sgcd_status = "failed"
+
+source_commit = subprocess.check_output(
+    ["git", "rev-parse", "HEAD"], cwd=PROJECT, text=True
+).strip()
+manifest = {
+    "created": datetime.now(UTC).isoformat(),
+    "source_commit": source_commit,
+    "dataset": "sketchy_2",
+    "metric": "mAP@200/P@200",
+    "seed": 42,
+    "baseline_run": BASELINE_RUN,
+    "baseline_return_code": baseline_code,
+    "sgcd_run": SGCD_RUN,
+    "sgcd_return_code": sgcd_code,
+    "sgcd_status": sgcd_status,
+    "teacher_gate_forced": False,
+    "teacher_audit": audit,
+    "notes": [
+        "Baseline and W+Effect use the same teacher cache and main losses.",
+        "The precision-selected checkpoint pairs mAP@200 and P@200 at one step.",
+        "A failed teacher gate stops SGCD before target preparation and student training.",
+        "No checkpoint or cache is copied into the diagnostics ZIP.",
+    ],
+}
+(OUT / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+checkpoint_rows = []
+for run_name in (BASELINE_RUN, SGCD_RUN):
+    for checkpoint in sorted((PROJECT / "saved_models" / run_name).glob("*.ckpt")):
+        checkpoint_rows.append(
+            {
+                "run": run_name,
+                "checkpoint": checkpoint.name,
+                "size_MiB": checkpoint.stat().st_size / 1024**2,
+            }
+        )
+write_csv(OUT / "checkpoint_inventory.csv", checkpoint_rows)
+
+if summary_rows:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    names = [row["condition"] for row in summary_rows]
+    fig, axes = plt.subplots(1, 2, figsize=(12, max(4, len(summary_rows) * 0.8)))
+    axes[0].barh(
+        range(len(summary_rows)),
+        [100 * row["selected_mAP200"] for row in summary_rows],
+    )
+    axes[0].set_yticks(range(len(summary_rows)), names)
+    axes[0].set_xlabel("mAP@200 at P@200-selected checkpoint (%)")
+    axes[1].barh(
+        range(len(summary_rows)),
+        [100 * row["selected_P200"] for row in summary_rows],
+    )
+    axes[1].set_yticks(range(len(summary_rows)), [])
+    axes[1].set_xlabel("Selected P@200 (%)")
+    fig.tight_layout()
+    fig.savefig(OUT / "comparison_selected.png", dpi=160)
+    plt.close(fig)
+
+archive = OUT.with_suffix(".zip")
+with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+    for path in sorted(OUT.rglob("*")):
+        if path.is_file():
+            bundle.write(path, Path("report") / path.relative_to(OUT))
+    for run_name, version in (
+        (BASELINE_RUN, baseline_version),
+        (SGCD_RUN, sgcd_version),
+    ):
+        if version is None:
+            continue
+        diagnostic = version / "sgcd_diagnostics"
+        if diagnostic.is_dir():
+            for path in sorted(diagnostic.rglob("*")):
+                if path.is_file():
+                    bundle.write(
+                        path,
+                        Path("tb_logs")
+                        / run_name
+                        / version.name
+                        / "sgcd_diagnostics"
+                        / path.relative_to(diagnostic),
+                    )
+
+from IPython.display import FileLink, Image, display
+
+comparison_plot = OUT / "comparison_selected.png"
+if comparison_plot.is_file():
+    display(Image(filename=str(comparison_plot)))
+if audit_path is not None:
+    for name in ("teacher_audit.png", "teacher_audit_examples.png"):
+        image = audit_path.parent / name
+        if image.is_file():
+            display(Image(filename=str(image)))
+
+print("Sketchy2 SGCD status:", sgcd_status)
+print("Send this ZIP:", archive)
+display(FileLink(str(archive)))
+
+if baseline_code != 0:
+    raise RuntimeError("Matched Sketchy2 baseline failed; inspect baseline.log in ZIP.")
+if sgcd_status == "failed":
+    raise RuntimeError("Sketchy2 W+Effect failed unexpectedly; inspect ZIP logs.")
+if sgcd_status == "teacher_gate_failed":
+    print(
+        "Teacher gate failed, so W+Effect student training was correctly skipped. "
+        "Use the ZIP audit to decide whether the Sketchy2 target must be redesigned."
+    )
