@@ -24,6 +24,10 @@ share the same paired landmark identities. No projector or trainable vocabulary
 parameter is introduced. Set `--lambda_retrieval_vocab 0` and use the `native`
 descriptor to recover the original main objective.
 
+For Kaggle, follow `test/PROMPTKD_RUN_ORDER.md`. The online builder creates a
+pinned offline bundle; the offline setup validates that bundle, restores model
+weights and an optional saved teacher cache, and runs the method smoke tests.
+
 ```bash
 !python -m src.train \
     --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
