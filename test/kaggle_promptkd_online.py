@@ -27,7 +27,7 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/promptkd-photo-sketch-prototypes"
 # This setup script is distributed after the pinned training implementation.
-COMMIT = "cb328cf69815eaaa83b76d539fef0ecaf9178a75"
+COMMIT = "a536d707a353bbe5b3e4471e3447ce21aed34cbf"
 TASK = "promptkd_photo_sketch_retrieval_vocabulary"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"

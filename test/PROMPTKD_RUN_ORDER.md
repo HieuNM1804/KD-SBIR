@@ -1,7 +1,7 @@
 # Kaggle run order: photo-sketch retrieval vocabulary
 
 This experiment uses branch `experiment/promptkd-photo-sketch-prototypes` and
-the pinned training commit `cb328cf69815eaaa83b76d539fef0ecaf9178a75`.
+the pinned training commit `a536d707a353bbe5b3e4471e3447ce21aed34cbf`.
 Do not use the SGCD online/offline setup scripts for this experiment.
 
 ## A. One-time online bundle build

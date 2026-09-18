@@ -12,7 +12,7 @@ from pathlib import Path
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/promptkd-photo-sketch-prototypes"
-EXPECTED_COMMIT = "cb328cf69815eaaa83b76d539fef0ecaf9178a75"
+EXPECTED_COMMIT = "a536d707a353bbe5b3e4471e3447ce21aed34cbf"
 EXPECTED_TASK = "promptkd_photo_sketch_retrieval_vocabulary"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
