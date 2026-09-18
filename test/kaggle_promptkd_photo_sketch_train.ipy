@@ -1,8 +1,8 @@
-"""Train retrieval-vocabulary PromptKD from main on Sketchy split 1."""
+"""Add retrieval-vocabulary PromptKD to the matched main configuration."""
 
 from datetime import UTC, datetime
 
-RUN_NAME = "promptkd_retrieval_vocab_s42_" + datetime.now(UTC).strftime(
+RUN_NAME = "promptkd_retrieval_vocab_text_s42_" + datetime.now(UTC).strftime(
     "%Y%m%d_%H%M%S_%f"
 )
 
@@ -35,7 +35,9 @@ RUN_NAME = "promptkd_retrieval_vocab_s42_" + datetime.now(UTC).strftime(
     --weight_decay 5e-4 \
     --seed 42 \
     --lambda_domain 3.0 \
-    --lambda_modality 0.0 \
+    --lambda_modality 1.0 \
+    --photo_text_kd_temperature 0.15 \
+    --sketch_text_kd_temperature 0.02 \
     --lambda_retrieval_vocab 0.5 \
     --lambda_retrieval_vocab_pair 0.0 \
     --retrieval_vocab_size 128 \

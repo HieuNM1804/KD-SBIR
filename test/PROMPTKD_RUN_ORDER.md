@@ -55,6 +55,7 @@ Read the following files under the selected TensorBoard version:
 - `retrieval_vocabulary/landmarks.csv`;
 - TensorBoard metrics `VOCAB`, teacher entropy, mAP, and precision.
 
-The first experiment keeps `retrieval_vocab_descriptor=native`. Therefore its
-retrieval metrics remain directly comparable with main while only the training
-objective changes.
+The primary experiment keeps the matched main text KD and uses
+`retrieval_vocab_descriptor=native`. Therefore its retrieval metrics remain
+directly comparable with main while vocabulary KD is the only added objective.
+Disabling text KD is a later mechanism ablation, not the primary run.

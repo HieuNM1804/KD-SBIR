@@ -57,11 +57,13 @@ Validation can use one of three descriptors:
 - `vocabulary`: centered landmark log-probability coordinates.
 - `hybrid`: normalized concatenation of native and vocabulary descriptors.
 
-## First experiment
+## Primary matched-main experiment
 
 ```text
 lambda_domain=3.0
-lambda_modality=0.0
+lambda_modality=1.0
+photo_text_kd_temperature=0.15
+sketch_text_kd_temperature=0.02
 lambda_retrieval_vocab=0.5
 lambda_retrieval_vocab_pair=0.0
 retrieval_vocab_size=128
@@ -74,20 +76,27 @@ retrieval_vocab_student_temperature=0.07
 retrieval_vocab_descriptor=native
 ```
 
-This isolates vocabulary distillation while retaining the original retrieval
-descriptor. Coordinate consistency and vocabulary/hybrid inference should only
-be enabled after this run establishes that the teacher vocabulary is valid.
+This retains the established main losses and retrieval descriptor, then adds
+only vocabulary distillation. It is the primary comparison against matched
+main. Coordinate consistency and vocabulary/hybrid inference should only be
+enabled after this run establishes that the teacher vocabulary is valid.
+
+Setting `lambda_modality=0` is a mechanistic ablation. It tests whether the
+image-landmark vocabulary can replace text KD, but it is not the primary method
+configuration because it removes an objective from main.
 
 ## Required ablations
 
 1. Main: domain 3, modality 1, vocabulary 0.
-2. Main without text: domain 3, modality 0, vocabulary 0.
-3. Random paired landmarks.
-4. Class-centroid image prototypes.
-5. Photo-only landmarks.
-6. Paired mutual retrieval landmarks.
-7. Paired landmarks plus coordinate consistency.
-8. Native, vocabulary, and hybrid inference from the same trained checkpoint.
+2. Main plus paired mutual retrieval landmarks: domain 3, modality 1,
+   vocabulary 0.5.
+3. Main without text: domain 3, modality 0, vocabulary 0.
+4. Vocabulary without text: domain 3, modality 0, vocabulary 0.5.
+5. Random paired landmarks.
+6. Class-centroid image prototypes.
+7. Photo-only landmarks.
+8. Paired landmarks plus coordinate consistency.
+9. Native, vocabulary, and hybrid inference from the same trained checkpoint.
 
 The method is supported only if paired mutual landmarks outperform random
 landmarks and class centroids over matched seeds, not merely if one run exceeds
