@@ -7,7 +7,15 @@ Do not use the SGCD online/offline setup scripts for this experiment.
 ## A. One-time online bundle build
 
 1. Create a Kaggle notebook with Internet enabled. A GPU is not required.
-2. Run `test/kaggle_promptkd_online.py` as one cell.
+2. Run this bootstrap cell. It deliberately saves both setup scripts in the
+   notebook output so the second notebook does not need Internet:
+
+   ```python
+   !wget -q https://raw.githubusercontent.com/HieuNM1804/KD-SBIR/experiment/promptkd-photo-sketch-prototypes/test/kaggle_promptkd_online.py -O /kaggle/working/kaggle_promptkd_online.py
+   !wget -q https://raw.githubusercontent.com/HieuNM1804/KD-SBIR/experiment/promptkd-photo-sketch-prototypes/test/kaggle_promptkd_offline.py -O /kaggle/working/kaggle_promptkd_offline.py
+   %run /kaggle/working/kaggle_promptkd_online.py
+   ```
+
 3. Wait for `ONLINE PROMPTKD BUNDLE COMPLETE`.
 4. Use **Save Version -> Save & Run All -> Always save output**.
 5. Keep that notebook output. It contains source, wheels, ViT-B/32, and DFN5B.
@@ -22,7 +30,20 @@ Repeat this section only when the pinned training commit changes.
    - the saved output from section A;
    - optionally, one prior output containing
      `teacher_cache/sketchy1_teacher_1ep.pt`.
-3. Run `test/kaggle_promptkd_offline.py` as one cell.
+3. Run this bootstrap cell. It loads the offline setup saved by section A:
+
+   ```python
+   from pathlib import Path
+
+   setup_scripts = sorted(
+       Path("/kaggle/input").rglob("kaggle_promptkd_offline.py")
+   )
+   if len(setup_scripts) != 1:
+       raise RuntimeError(f"Expected one offline setup script: {setup_scripts}")
+   setup_path = setup_scripts[0]
+   exec(compile(setup_path.read_text(), str(setup_path), "exec"))
+   ```
+
 4. Wait for `OFFLINE PROMPTKD SETUP COMPLETE — READY TO TRAIN`.
 5. Run `test/kaggle_promptkd_photo_sketch_train.ipy` as one cell.
 
