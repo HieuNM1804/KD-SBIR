@@ -28,7 +28,7 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/sgcd-native-prompt-learning"
 # Pinned training source; this builder is distributed separately.
-COMMIT = "331d5d03f3f84ae9abd30457756afa05c1bb7727"
+COMMIT = "b86364cbe576d5b20064846462f448ff4c09b64b"
 TASK = "sgcd_sketchy2_where_effect"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
