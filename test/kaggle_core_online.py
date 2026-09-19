@@ -26,7 +26,7 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 
 REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/core-cross-modal-margin-kd"
-COMMIT = "5e12c0d28c5e80dddd40f24671cb9087a51c7035"
+COMMIT = "d222afbf6b8838c30cd8bf5dbb65552ddcabb89b"
 TASK = "core_cross_modal_margin_distillation"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
