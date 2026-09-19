@@ -118,7 +118,7 @@ shared = [
     "3.0",
     "--lambda_modality",
     "1.0",
-    "--progress",
+    "--no_progress",
 ]
 
 conditions = [

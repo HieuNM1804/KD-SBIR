@@ -575,7 +575,7 @@ class CustomCLIP(nn.Module):
         self.teacher_best_epoch = best_epoch
         print(
             "[Teacher Best] restored visual prompts from "
-            f"epoch={best_epoch}, precision={best_precision:.6f}"
+            f"epoch={best_epoch}, precision={100 * best_precision:.2f}%"
         )
 
         self.teacher_prompts.requires_grad_(False)
@@ -623,8 +623,8 @@ class CustomCLIP(nn.Module):
         map_name = f"mAP@{map_k}" if map_k else "mAP@all"
         print(
             f"[Teacher Validation] epoch={epoch}, "
-            f"{map_name}={mean_ap.item():.4f}, "
-            f"P@{p_k}={precision.item():.4f}"
+            f"{map_name}={100 * mean_ap.item():.2f}%, "
+            f"P@{p_k}={100 * precision.item():.2f}%"
         )
         return precision.item()
 
@@ -1144,19 +1144,40 @@ class ZS_SBIR(pl.LightningModule):
                 precision.item(),
             )
 
-        if map_k:
-            print(
-                f"mAP@{map_k}: {mAP.item()}, P@{p_k}: {precision}, "
-                f"Best P@{p_k}: {self.best_precision}"
-            )
-        else:
-            print(
-                f"mAP@all: {mAP.item()}, P@{p_k}: {precision}, "
-                f"Best P@{p_k}: {self.best_precision}"
-            )
+        map_name = f"mAP@{map_k}" if map_k else "mAP@all"
+        print(
+            f"{map_name}: {100 * mAP.item():.2f}%, "
+            f"P@{p_k}: {100 * precision.item():.2f}%, "
+            f"Best P@{p_k}: {100 * self.best_precision:.2f}%"
+        )
         train_loss = self.trainer.callback_metrics.get("train_loss")
         if train_loss is not None:
             print(f"Train loss (epoch avg): {train_loss.item():.6f}")
+        if self.args.lambda_core > 0 and self.global_step > 0:
+            coverage = self.trainer.callback_metrics.get("core_coverage")
+            agreement = self.trainer.callback_metrics.get("core_agreement")
+            teacher_correction = self.trainer.callback_metrics.get(
+                "core_teacher_correction"
+            )
+            student_correction = self.trainer.callback_metrics.get(
+                "core_student_correction"
+            )
+            if all(
+                value is not None
+                for value in (
+                    coverage,
+                    agreement,
+                    teacher_correction,
+                    student_correction,
+                )
+            ):
+                print(
+                    "CoRe: "
+                    f"coverage={100 * coverage.item():.2f}%, "
+                    f"agreement={100 * agreement.item():.2f}%, "
+                    f"teacher_correction={teacher_correction.item():.6f}, "
+                    f"student_correction={student_correction.item():.6f}"
+                )
 
         self.val_step_outputs_sk.clear()
         self.val_step_outputs_ph.clear()
