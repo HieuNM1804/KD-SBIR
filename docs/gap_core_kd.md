@@ -72,9 +72,11 @@ and student magnitude, sign agreement, absolute error, common/full margins,
 and the norm ratio and cosine between main and weighted Gap-CoRe gradients on
 the first batch of every epoch.
 
-The initial weight is `lambda_gap_core=0.25`. Interpret the gradient ratio
-before tuning: an auxiliary/main ratio around 0.1--0.3 is the intended range.
-If it is much larger, lower the weight before running additional seeds.
+The pilot used `lambda_gap_core=0.25` and produced an auxiliary/main gradient
+ratio around 0.003--0.014. The calibrated comparison therefore uses
+`lambda_gap_core=2.0`, targeting a ratio near 0.1 after the first epoch. An
+auxiliary/main ratio around 0.1--0.3 is the intended range. If it is much
+larger, lower the weight before running additional seeds.
 
 All follow-up runs pretrain the teacher prompt for one epoch. Every compared
 condition reuses the same resulting cache, so teacher cost is paid once.

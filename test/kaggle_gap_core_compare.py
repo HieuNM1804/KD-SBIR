@@ -186,7 +186,7 @@ conditions = [
         "run": "gap_core_verified_sketchy2_s42_" + STAMP,
         "arguments": [
             "--lambda_gap_core",
-            "0.25",
+            "2.0",
             "--gap_core_control",
             "verified",
             "--gap_core_direction",
@@ -204,7 +204,7 @@ conditions = [
         "run": "gap_core_shuffled_sketchy2_s42_" + STAMP,
         "arguments": [
             "--lambda_gap_core",
-            "0.25",
+            "2.0",
             "--gap_core_control",
             "shuffled",
             "--gap_core_direction",
@@ -373,7 +373,7 @@ for condition in conditions:
         continue
     row = {"condition": condition["condition"], "run": condition["run"]}
     for tag in mechanism_tags:
-        values = metrics.get(tag, [])
+        values = metrics.get(tag, []) or metrics.get(tag + "_epoch", [])
         row[tag + "_final"] = values[-1]["value"] if values else None
         row[tag + "_mean"] = (
             sum(value["value"] for value in values) / len(values) if values else None
@@ -459,6 +459,7 @@ manifest = {
         "All conditions share seed, main losses, optimizer, teacher cache and epochs.",
         "Only lambda_gap_core and the declared correction control differ.",
         "Gap-CoRe matches full-minus-common margin magnitude with Smooth-L1.",
+        "lambda_gap_core=2.0 targets an auxiliary/main gradient ratio near 0.1 based on the 0.25 pilot.",
         "Selected mAP@200 and P@200 come from the same P@200-selected step.",
         "No checkpoint, teacher cache or feature tensor is copied into the ZIP.",
     ],
