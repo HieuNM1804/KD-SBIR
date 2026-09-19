@@ -222,6 +222,13 @@ def freeze_clip(clip_model):
     clip_model.requires_grad_(False)
 
 
+def _teacher_pretrain_inputs(batch):
+    """Return image pair and labels from the stable TrainDataset contract."""
+    if len(batch) < 9:
+        raise ValueError("Teacher pretraining batch is missing required fields.")
+    return batch[0], batch[1], batch[8]
+
+
 def _random_parameter(rows, width, seed):
     if rows == 0:
         return None
@@ -530,7 +537,8 @@ class CustomCLIP(nn.Module):
                 disable=not show_progress,
             )
             with torch.enable_grad():
-                for photo, sketch, *_, labels in batches:
+                for batch in batches:
+                    photo, sketch, labels = _teacher_pretrain_inputs(batch)
                     photo = photo.to(
                         teacher_device, dtype=teacher_dtype, non_blocking=True
                     )

@@ -4,6 +4,7 @@ import torch
 
 from src.gap_core_audit import build_gap_audit_rows, summarize_gap_rows
 from src.losses import gap_core_margin_correction_loss
+from src.model import _teacher_pretrain_inputs
 from src.teacher_prompts import ModalityVisualPrompts
 
 
@@ -36,6 +37,16 @@ class CommonPromptDecompositionTest(unittest.TestCase):
             prompts.for_layer(
                 "photo", 0, 1, torch.float32, torch.device("cpu"), "invalid"
             )
+
+    def test_teacher_pretrain_labels_do_not_depend_on_trailing_cache_fields(self):
+        labels = torch.tensor([3, 7])
+        batch = tuple(torch.empty(2, 0) for _ in range(8)) + (
+            labels,
+            torch.empty(2, 0),
+            torch.empty(2, 0),
+        )
+        _, _, extracted = _teacher_pretrain_inputs(batch)
+        self.assertIs(extracted, labels)
 
 
 class GapCorrectionAuditTest(unittest.TestCase):
