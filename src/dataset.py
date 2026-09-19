@@ -71,6 +71,8 @@ class TrainDataset(torch.utils.data.Dataset):
         self.base_teacher_photo_features = None
         self.base_student_sketch_features = None
         self.base_student_photo_features = None
+        self.common_teacher_sketch_features = None
+        self.common_teacher_photo_features = None
 
         for category in self.all_categories:
             sketch_paths = sorted(
@@ -114,6 +116,20 @@ class TrainDataset(torch.utils.data.Dataset):
         self.base_student_sketch_features = base_student_sketch_features
         self.base_student_photo_features = base_student_photo_features
 
+    def set_gap_core_features(
+        self,
+        common_teacher_sketch_features,
+        common_teacher_photo_features,
+    ):
+        expected = (
+            (common_teacher_sketch_features, len(self.all_sketches_path)),
+            (common_teacher_photo_features, len(self.all_photo_paths)),
+        )
+        if any(len(features) != count for features, count in expected):
+            raise ValueError("Gap-CoRe feature cache has the wrong length.")
+        self.common_teacher_sketch_features = common_teacher_sketch_features
+        self.common_teacher_photo_features = common_teacher_photo_features
+
     def __len__(self):
         return len(self.all_sketches_path)
 
@@ -143,6 +159,8 @@ class TrainDataset(torch.utils.data.Dataset):
             base_teacher_photo_feature = torch.empty(0)
             base_student_sketch_feature = torch.empty(0)
             base_student_photo_feature = torch.empty(0)
+            common_teacher_sketch_feature = torch.empty(0)
+            common_teacher_photo_feature = torch.empty(0)
         else:
             teacher_sketch_feature = self.teacher_sketch_features[index]
             photo_index = self.photo_path_to_index[img_path]
@@ -161,6 +179,16 @@ class TrainDataset(torch.utils.data.Dataset):
                 base_student_photo_feature = self.base_student_photo_features[
                     photo_index
                 ]
+            if self.common_teacher_sketch_features is None:
+                common_teacher_sketch_feature = torch.empty(0)
+                common_teacher_photo_feature = torch.empty(0)
+            else:
+                common_teacher_sketch_feature = self.common_teacher_sketch_features[
+                    index
+                ]
+                common_teacher_photo_feature = self.common_teacher_photo_features[
+                    photo_index
+                ]
 
         return (
             img_tensor,
@@ -172,6 +200,8 @@ class TrainDataset(torch.utils.data.Dataset):
             base_student_photo_feature,
             base_student_sketch_feature,
             self.category_to_label[category],
+            common_teacher_photo_feature,
+            common_teacher_sketch_feature,
         )
 
 

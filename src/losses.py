@@ -308,6 +308,195 @@ def cross_modal_margin_correction_loss(
     return loss, diagnostics
 
 
+def _gap_margin_direction(
+    full_student_query,
+    full_student_gallery,
+    common_student_query,
+    common_student_gallery,
+    full_teacher_query,
+    full_teacher_gallery,
+    common_teacher_query,
+    common_teacher_gallery,
+    query_labels,
+    gallery_labels,
+    huber_beta,
+    minimum_correction,
+    maximum_weight,
+    control,
+):
+    """Match full-minus-common margin change on fixed common-state pairs."""
+    full_student_query = F.normalize(full_student_query.float(), dim=-1)
+    full_student_gallery = F.normalize(full_student_gallery.float(), dim=-1)
+    common_student_query = F.normalize(common_student_query.float(), dim=-1)
+    common_student_gallery = F.normalize(common_student_gallery.float(), dim=-1)
+
+    device = full_student_query.device
+    with torch.no_grad():
+        full_teacher_query = F.normalize(
+            full_teacher_query.to(device=device, dtype=torch.float32), dim=-1
+        )
+        full_teacher_gallery = F.normalize(
+            full_teacher_gallery.to(device=device, dtype=torch.float32), dim=-1
+        )
+        common_teacher_query = F.normalize(
+            common_teacher_query.to(device=device, dtype=torch.float32), dim=-1
+        )
+        common_teacher_gallery = F.normalize(
+            common_teacher_gallery.to(device=device, dtype=torch.float32), dim=-1
+        )
+        common_scores = common_teacher_query @ common_teacher_gallery.t()
+        full_scores = full_teacher_query @ full_teacher_gallery.t()
+        query_labels = query_labels.to(device)
+        gallery_labels = gallery_labels.to(device)
+        positive_mask = query_labels[:, None].eq(gallery_labels[None, :])
+        negative_mask = ~positive_mask
+        has_positive = positive_mask.any(dim=1)
+        has_negative = negative_mask.any(dim=1)
+        positive_index = common_scores.masked_fill(
+            ~positive_mask, -torch.inf
+        ).argmax(dim=1)
+        negative_index = common_scores.masked_fill(
+            ~negative_mask, -torch.inf
+        ).argmax(dim=1)
+        row = torch.arange(len(query_labels), device=device)
+        common_margin = (
+            common_scores[row, positive_index]
+            - common_scores[row, negative_index]
+        )
+        full_margin = (
+            full_scores[row, positive_index]
+            - full_scores[row, negative_index]
+        )
+        verified_correction = full_margin - common_margin
+        valid = (
+            has_positive
+            & has_negative
+            & verified_correction.gt(minimum_correction)
+        )
+        if control == "verified":
+            teacher_target = verified_correction
+        elif control == "shuffled":
+            teacher_target = verified_correction.roll(shifts=1, dims=0)
+        elif control == "reversed":
+            teacher_target = -verified_correction
+        else:
+            raise ValueError(f"Unsupported Gap-CoRe control: {control}")
+
+    full_student_scores = full_student_query @ full_student_gallery.t()
+    common_student_scores = common_student_query @ common_student_gallery.t()
+    student_correction = (
+        full_student_scores[row, positive_index]
+        - full_student_scores[row, negative_index]
+        - common_student_scores[row, positive_index]
+        + common_student_scores[row, negative_index]
+    )
+    if not valid.any():
+        zero = student_correction.sum() * 0.0
+        return zero, {
+            "coverage": zero.detach(),
+            "teacher_correction": zero.detach(),
+            "student_correction": zero.detach(),
+            "agreement": zero.detach(),
+            "absolute_error": zero.detach(),
+            "common_margin": zero.detach(),
+            "full_margin": zero.detach(),
+        }
+
+    pair_loss = F.smooth_l1_loss(
+        student_correction,
+        teacher_target.detach(),
+        beta=huber_beta,
+        reduction="none",
+    )
+    weights = verified_correction.detach().clamp(
+        min=0.0,
+        max=maximum_weight,
+    )
+    valid_weights = weights[valid]
+    valid_weights = valid_weights / valid_weights.mean().clamp_min(1e-6)
+    loss = (pair_loss[valid] * valid_weights).mean()
+
+    valid_teacher = teacher_target[valid]
+    valid_student = student_correction[valid]
+    return loss, {
+        "coverage": valid.float().mean(),
+        "teacher_correction": valid_teacher.mean(),
+        "student_correction": valid_student.detach().mean(),
+        "agreement": (
+            valid_student.detach().sign().eq(valid_teacher.sign()).float().mean()
+        ),
+        "absolute_error": (
+            valid_student.detach() - valid_teacher
+        ).abs().mean(),
+        "common_margin": common_margin[valid].mean(),
+        "full_margin": full_margin[valid].mean(),
+    }
+
+
+def gap_core_margin_correction_loss(
+    full_student_photo,
+    full_student_sketch,
+    common_student_photo,
+    common_student_sketch,
+    full_teacher_photo,
+    full_teacher_sketch,
+    common_teacher_photo,
+    common_teacher_sketch,
+    labels,
+    huber_beta=0.05,
+    minimum_correction=0.0,
+    maximum_weight=0.25,
+    control="verified",
+    direction="bidirectional",
+):
+    common = {
+        "query_labels": labels,
+        "gallery_labels": labels,
+        "huber_beta": huber_beta,
+        "minimum_correction": minimum_correction,
+        "maximum_weight": maximum_weight,
+        "control": control,
+    }
+    results = []
+    if direction in {"bidirectional", "sketch_to_photo"}:
+        results.append(
+            _gap_margin_direction(
+                full_student_sketch,
+                full_student_photo,
+                common_student_sketch,
+                common_student_photo,
+                full_teacher_sketch,
+                full_teacher_photo,
+                common_teacher_sketch,
+                common_teacher_photo,
+                **common,
+            )
+        )
+    if direction in {"bidirectional", "photo_to_sketch"}:
+        results.append(
+            _gap_margin_direction(
+                full_student_photo,
+                full_student_sketch,
+                common_student_photo,
+                common_student_sketch,
+                full_teacher_photo,
+                full_teacher_sketch,
+                common_teacher_photo,
+                common_teacher_sketch,
+                **common,
+            )
+        )
+    if not results:
+        raise ValueError(f"Unsupported Gap-CoRe direction: {direction}")
+    return (
+        torch.stack([value[0] for value in results]).mean(),
+        {
+            name: torch.stack([value[1][name] for value in results]).mean()
+            for name in results[0][1]
+        },
+    )
+
+
 def loss_fn(args, features):
     (
         photo_features,
@@ -324,6 +513,10 @@ def loss_fn(args, features):
         base_student_photo,
         base_student_sketch,
         labels,
+        common_student_photo,
+        common_student_sketch,
+        common_teacher_photo,
+        common_teacher_sketch,
     ) = features
 
     zero = torch.zeros((), device=photo_features.device)
@@ -386,14 +579,51 @@ def loss_fn(args, features):
             direction=args.core_direction,
         )
 
-    total_loss = (
+    gap_core_loss = zero
+    gap_core_diagnostics = {
+        "coverage": zero,
+        "teacher_correction": zero,
+        "student_correction": zero,
+        "agreement": zero,
+        "absolute_error": zero,
+        "common_margin": zero,
+        "full_margin": zero,
+    }
+    if teacher_active and args.lambda_gap_core > 0:
+        gap_core_loss, gap_core_diagnostics = gap_core_margin_correction_loss(
+            full_student_photo=photo_features,
+            full_student_sketch=sketch_features,
+            common_student_photo=common_student_photo,
+            common_student_sketch=common_student_sketch,
+            full_teacher_photo=teacher_photo_features,
+            full_teacher_sketch=teacher_sketch_features,
+            common_teacher_photo=common_teacher_photo,
+            common_teacher_sketch=common_teacher_sketch,
+            labels=labels,
+            huber_beta=args.gap_core_huber_beta,
+            minimum_correction=args.gap_core_min_correction,
+            maximum_weight=args.gap_core_max_weight,
+            control=args.gap_core_control,
+            direction=args.gap_core_direction,
+        )
+
+    main_objective = (
         args.lambda_domain * domain_loss
         + args.lambda_modality * modality_loss
         + args.lambda_core * core_loss
     )
+    gap_objective = args.lambda_gap_core * gap_core_loss
+    total_loss = main_objective + gap_objective
     return total_loss, {
         "domain_kd": domain_loss,
         "modality_kd": modality_loss,
         "core_kd": core_loss,
+        "gap_core_kd": gap_core_loss,
+        "main_objective": main_objective,
+        "gap_objective": gap_objective,
         **{f"core_{name}": value for name, value in core_diagnostics.items()},
+        **{
+            f"gap_core_{name}": value
+            for name, value in gap_core_diagnostics.items()
+        },
     }

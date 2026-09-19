@@ -34,7 +34,13 @@ The gate passes only when all three checks hold:
 1. Full prompts improve unseen mAP@200 over common prompts.
 2. The 95% bootstrap interval for verified-minus-shuffled margin correction is
    above zero.
-3. The 95% bootstrap interval for positive-score change is above zero.
+3. The 95% bootstrap interval for full-minus-common margin correction is above
+   zero.
+
+Absolute positive cosine is reported as a diagnostic, but it is not a gate.
+Using a shared prompt can raise all cross-modal similarities by collapsing the
+score range. Retrieval improves when the positive-negative margin grows, even
+if both absolute scores decrease.
 
 Only a passing gate justifies implementing and tuning student Gap-CoRe loss.
 The audit creates a ZIP with JSON, per-query CSV, plot, manifest, and logs. It

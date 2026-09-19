@@ -19,8 +19,16 @@ os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 PROJECT = Path("/kaggle/working/KD-SBIR-AVKD")
 ROOT = Path("/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy")
-TEACHER_CACHE = Path(
+LEGACY_TEACHER_CACHE = Path(
     "/kaggle/working/teacher_cache/sketchy2_core_teacher2_v7.pt"
+)
+GAP_TEACHER_CACHE = Path(
+    "/kaggle/working/teacher_cache/sketchy2_gap_core_teacher2_v8.pt"
+)
+TEACHER_CACHE = (
+    LEGACY_TEACHER_CACHE
+    if LEGACY_TEACHER_CACHE.is_file()
+    else GAP_TEACHER_CACHE
 )
 STAMP = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
 RUN_NAME = "gap_core_teacher_audit_sketchy2_s42_" + STAMP
@@ -126,7 +134,15 @@ cache_command = [
     "--exp_name",
     RUN_NAME,
 ]
-cache_code = run_logged("teacher_cache", cache_command)
+if TEACHER_CACHE.is_file():
+    cache_code = 0
+    (OUT / "teacher_cache.log").write_text(
+        f"Reusing existing teacher cache: {TEACHER_CACHE}\n",
+        encoding="utf-8",
+    )
+    print("[Teacher Cache] reusing", TEACHER_CACHE)
+else:
+    cache_code = run_logged("teacher_cache", cache_command)
 if cache_code != 0 or not TEACHER_CACHE.is_file():
     archive = OUT.with_suffix(".zip")
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
@@ -319,7 +335,10 @@ gate_checks = {
         "ci95_low"
     ]
     > 0,
-    "positive_evidence_ci95": summary["positive_delta"]["ci95_low"] > 0,
+    "positive_margin_correction_ci95": summary[
+        "verified_margin_correction"
+    ]["ci95_low"]
+    > 0,
 }
 gate_checks["passed"] = all(gate_checks.values())
 
@@ -357,6 +376,7 @@ report = {
         "Positive and negative identities are selected once under the common state.",
         "Full and shuffled corrections are evaluated on those same fixed pairs.",
         "The shuffled control reassigns full-minus-common feature residuals across image identities.",
+        "Absolute positive cosine is diagnostic only; retrieval depends on the positive-negative margin.",
         "No student is trained and no checkpoint or feature tensor is included in the ZIP.",
     ],
 }

@@ -380,6 +380,45 @@ if __name__ == "__main__":
         help="Cross-modal correction direction used for training.",
     )
     parser.add_argument(
+        "--lambda_gap_core",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight for common-to-full modality-gap margin correction. "
+            "Zero preserves the main baseline forward path."
+        ),
+    )
+    parser.add_argument(
+        "--gap_core_huber_beta",
+        type=float,
+        default=0.05,
+        help="Smooth-L1 transition used to match correction magnitudes.",
+    )
+    parser.add_argument(
+        "--gap_core_min_correction",
+        type=float,
+        default=0.0,
+        help="Minimum verified teacher margin correction retained.",
+    )
+    parser.add_argument(
+        "--gap_core_max_weight",
+        type=float,
+        default=0.25,
+        help="Maximum teacher correction used for query weighting.",
+    )
+    parser.add_argument(
+        "--gap_core_control",
+        choices=("verified", "shuffled", "reversed"),
+        default="verified",
+        help="Verified, identity-shuffled, or sign-reversed gap target.",
+    )
+    parser.add_argument(
+        "--gap_core_direction",
+        choices=("bidirectional", "sketch_to_photo", "photo_to_sketch"),
+        default="bidirectional",
+        help="Cross-modal direction used by Gap-CoRe.",
+    )
+    parser.add_argument(
         "--exp_name",
         type=str,
         default="teacher_visual_student_visual_only",
@@ -443,6 +482,19 @@ if __name__ == "__main__":
         parser.error("--core_min_teacher_correction must be non-negative.")
     if args.core_max_weight <= 0:
         parser.error("--core_max_weight must be greater than 0.")
+    if args.lambda_gap_core < 0:
+        parser.error("--lambda_gap_core must be non-negative.")
+    if args.lambda_gap_core > 0 and args.teacher_pretrain_epochs <= 0:
+        parser.error(
+            "--lambda_gap_core requires --teacher_pretrain_epochs greater "
+            "than 0 so full and common teacher states are distinct."
+        )
+    if args.gap_core_huber_beta <= 0:
+        parser.error("--gap_core_huber_beta must be greater than 0.")
+    if args.gap_core_min_correction < 0:
+        parser.error("--gap_core_min_correction must be non-negative.")
+    if args.gap_core_max_weight <= 0:
+        parser.error("--gap_core_max_weight must be greater than 0.")
     if args.image_text_kd_temperature <= 0:
         parser.error("--image_text_kd_temperature must be greater than 0.")
     if args.photo_text_kd_temperature <= 0:

@@ -64,6 +64,7 @@ class CrossModalMarginCorrectionTest(unittest.TestCase):
             lambda_domain=0.0,
             lambda_modality=0.0,
             lambda_core=0.5,
+            lambda_gap_core=0.0,
             kd_temperature=0.07,
             core_teacher_temperature=0.05,
             core_student_temperature=0.05,
@@ -90,6 +91,10 @@ class CrossModalMarginCorrectionTest(unittest.TestCase):
             self.base_photo,
             self.base_sketch,
             self.labels,
+            None,
+            None,
+            None,
+            None,
         )
         total, diagnostics = loss_fn(args, features)
         self.assertTrue(torch.isfinite(total))

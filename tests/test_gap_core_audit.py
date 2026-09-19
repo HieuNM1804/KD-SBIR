@@ -3,6 +3,7 @@ import unittest
 import torch
 
 from src.gap_core_audit import build_gap_audit_rows, summarize_gap_rows
+from src.losses import gap_core_margin_correction_loss
 from src.teacher_prompts import ModalityVisualPrompts
 
 
@@ -60,6 +61,56 @@ class GapCorrectionAuditTest(unittest.TestCase):
             0.0,
         )
         self.assertGreater(summary["positive_delta"]["mean"], 0.0)
+
+
+class GapCoreStudentLossTest(unittest.TestCase):
+    def test_matching_full_minus_common_margin_has_lower_loss(self):
+        labels = torch.tensor([0, 0, 1, 1])
+        common_sketch = torch.nn.functional.normalize(
+            torch.tensor([[1.0, 0.2], [0.9, 0.3], [0.2, 1.0], [0.3, 0.9]]),
+            dim=-1,
+        )
+        common_photo = torch.nn.functional.normalize(
+            torch.tensor([[0.7, 0.5], [0.6, 0.5], [0.5, 0.7], [0.5, 0.6]]),
+            dim=-1,
+        )
+        full_sketch = common_sketch.clone()
+        full_photo = torch.nn.functional.normalize(
+            torch.tensor([[1.0, 0.0], [0.9, 0.1], [0.0, 1.0], [0.1, 0.9]]),
+            dim=-1,
+        )
+
+        matched_photo = full_photo.clone().requires_grad_(True)
+        matched_sketch = full_sketch.clone().requires_grad_(True)
+        matched, diagnostics = gap_core_margin_correction_loss(
+            matched_photo,
+            matched_sketch,
+            common_photo,
+            common_sketch,
+            full_photo,
+            full_sketch,
+            common_photo,
+            common_sketch,
+            labels,
+            direction="bidirectional",
+        )
+        unchanged, _ = gap_core_margin_correction_loss(
+            common_photo,
+            common_sketch,
+            common_photo,
+            common_sketch,
+            full_photo,
+            full_sketch,
+            common_photo,
+            common_sketch,
+            labels,
+            direction="bidirectional",
+        )
+        self.assertGreater(diagnostics["coverage"].item(), 0.0)
+        self.assertLess(matched.item(), unchanged.item())
+        matched.backward()
+        self.assertIsNotNone(matched_photo.grad)
+        self.assertIsNotNone(matched_sketch.grad)
 
 
 if __name__ == "__main__":

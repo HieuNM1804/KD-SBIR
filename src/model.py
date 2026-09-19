@@ -36,7 +36,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DFN5B_MODEL = "ViT-H-14-quickgelu"
 DFN5B_PRETRAINED = "dfn5b"
 DFN5B_OUTPUT_DIM = 1024
-TEACHER_CACHE_FORMAT_VERSION = 7
+TEACHER_CACHE_FORMAT_VERSION = 8
 
 
 def _retrieval_metrics(
@@ -353,6 +353,12 @@ class CustomCLIP(nn.Module):
             f"teacher_temperature={cfg.core_teacher_temperature}, "
             f"student_temperature={cfg.core_student_temperature}"
         )
+        print(
+            "[Gap-CoRe] common/gap prompt margin correction -> "
+            f"lambda={cfg.lambda_gap_core}, control={cfg.gap_core_control}, "
+            f"direction={cfg.gap_core_direction}, "
+            f"huber_beta={cfg.gap_core_huber_beta}"
+        )
 
     @staticmethod
     def _path_fingerprint(paths, root):
@@ -408,6 +414,8 @@ class CustomCLIP(nn.Module):
             "base_student_photo_features",
             "teacher_sketch_text",
             "teacher_photo_text",
+            "common_teacher_sketch_features",
+            "common_teacher_photo_features",
         )
         missing = [key for key in required_tensors if key not in payload]
         if mismatches or missing:
@@ -431,6 +439,10 @@ class CustomCLIP(nn.Module):
             payload["base_teacher_photo_features"],
             payload["base_student_sketch_features"],
             payload["base_student_photo_features"],
+        )
+        train_dataset.set_gap_core_features(
+            payload["common_teacher_sketch_features"],
+            payload["common_teacher_photo_features"],
         )
         self._teacher_sketch_text = payload["teacher_sketch_text"]
         self._teacher_photo_text = payload["teacher_photo_text"]
@@ -641,6 +653,7 @@ class CustomCLIP(nn.Module):
         workers,
         show_progress,
         adapted=True,
+        prompt_mode="full",
     ):
         teacher_parameter = self._teacher.visual.conv1.weight
         teacher_device = teacher_parameter.device
@@ -665,14 +678,18 @@ class CustomCLIP(nn.Module):
             loader,
             desc=(
                 f"Caching {modality} "
-                f"{'adapted' if adapted else 'base'} teacher features"
+                f"{prompt_mode if adapted else 'base'} teacher features"
             ),
             disable=not show_progress,
         )
         for images in batches:
             images = images.to(teacher_device, dtype=teacher_dtype, non_blocking=True)
             if adapted:
-                features = self._encode_teacher_image(images, modality)
+                features = self._encode_teacher_image(
+                    images,
+                    modality,
+                    prompt_mode=prompt_mode,
+                )
             else:
                 features = self._teacher.encode_image(images)
             end = offset + len(features)
@@ -726,6 +743,8 @@ class CustomCLIP(nn.Module):
         base_teacher_photo_features,
         base_student_sketch_features,
         base_student_photo_features,
+        common_teacher_sketch_features,
+        common_teacher_photo_features,
         prompt_state,
     ):
         if not self.cfg.teacher_cache_path:
@@ -742,6 +761,10 @@ class CustomCLIP(nn.Module):
             "base_teacher_photo_features": base_teacher_photo_features.cpu(),
             "base_student_sketch_features": base_student_sketch_features.cpu(),
             "base_student_photo_features": base_student_photo_features.cpu(),
+            "common_teacher_sketch_features": (
+                common_teacher_sketch_features.cpu()
+            ),
+            "common_teacher_photo_features": common_teacher_photo_features.cpu(),
             "teacher_sketch_text": self._teacher_sketch_text.detach().cpu(),
             "teacher_photo_text": self._teacher_photo_text.detach().cpu(),
             "teacher_prompt_state_dict": prompt_state,
@@ -825,7 +848,27 @@ class CustomCLIP(nn.Module):
             workers,
             show_progress,
         )
+        common_teacher_sketch_features = self._materialize_teacher_features(
+            train_dataset.all_sketches_path,
+            "sketch",
+            batch_size,
+            workers,
+            show_progress,
+            prompt_mode="common",
+        )
+        common_teacher_photo_features = self._materialize_teacher_features(
+            train_dataset.all_photo_paths,
+            "photo",
+            batch_size,
+            workers,
+            show_progress,
+            prompt_mode="common",
+        )
         train_dataset.set_teacher_features(sketch_features, photo_features)
+        train_dataset.set_gap_core_features(
+            common_teacher_sketch_features,
+            common_teacher_photo_features,
+        )
 
         prompt_state = None
         if self.cfg.teacher_pretrain_epochs > 0:
@@ -874,11 +917,13 @@ class CustomCLIP(nn.Module):
                 base_teacher_photo_features,
                 base_student_sketch_features,
                 base_student_photo_features,
+                common_teacher_sketch_features,
+                common_teacher_photo_features,
                 prompt_state,
             )
 
         print(
-            "[Teacher Cache] materialized adapted/base teacher and base "
+            "[Teacher Cache] materialized full/common/base teacher and base "
             f"student features; images={image_count:,}, "
             f"adapted_teacher_memory={cache_size_mb:.1f} MB. DFN5B released."
         )
@@ -916,10 +961,29 @@ class CustomCLIP(nn.Module):
             self._teacher_photo_text,
         )
 
-    def get_visual_prompt(self, modality):
-        if modality == "photo":
-            return self.photo_visual_prompt()
-        return self.sketch_visual_prompt()
+    def get_visual_prompt(self, modality, prompt_mode="full"):
+        if prompt_mode == "full":
+            if modality == "photo":
+                return self.photo_visual_prompt()
+            return self.sketch_visual_prompt()
+        if prompt_mode != "common":
+            raise ValueError(f"Unsupported student prompt mode: {prompt_mode}")
+
+        photo_ctx, photo_compound = self.photo_visual_prompt()
+        sketch_ctx, sketch_compound = self.sketch_visual_prompt()
+        common_ctx = (
+            None
+            if photo_ctx is None
+            else 0.5 * (photo_ctx + sketch_ctx)
+        )
+        common_compound = [
+            0.5 * (photo_prompt + sketch_prompt)
+            for photo_prompt, sketch_prompt in zip(
+                photo_compound,
+                sketch_compound,
+            )
+        ]
+        return common_ctx, common_compound
 
     def get_student_text_features(self, modality):
         feature_name = f"_student_{modality}_text_features"
@@ -934,8 +998,11 @@ class CustomCLIP(nn.Module):
             setattr(self, feature_name, features)
         return features
 
-    def encode_student_image(self, image, modality):
-        visual_prompt, compound_prompts = self.get_visual_prompt(modality)
+    def encode_student_image(self, image, modality, prompt_mode="full"):
+        visual_prompt, compound_prompts = self.get_visual_prompt(
+            modality,
+            prompt_mode=prompt_mode,
+        )
         features = self.clip_model.visual(
             image.type(self.dtype),
             visual_prompt,
@@ -954,9 +1021,24 @@ class CustomCLIP(nn.Module):
             base_student_photo,
             base_student_sketch,
             labels,
+            common_teacher_photo,
+            common_teacher_sketch,
         ) = x
         photo_features = self.encode_student_image(photo_tensor, "photo")
         sketch_features = self.encode_student_image(sk_tensor, "sketch")
+        common_photo_features = None
+        common_sketch_features = None
+        if self.cfg.lambda_gap_core > 0:
+            common_photo_features = self.encode_student_image(
+                photo_tensor,
+                "photo",
+                prompt_mode="common",
+            )
+            common_sketch_features = self.encode_student_image(
+                sk_tensor,
+                "sketch",
+                prompt_mode="common",
+            )
         student_photo_text = (
             F.normalize(self.get_student_text_features("photo"), dim=-1)
             if self.photo_text_active
@@ -994,6 +1076,10 @@ class CustomCLIP(nn.Module):
             base_student_photo,
             base_student_sketch,
             labels,
+            common_photo_features,
+            common_sketch_features,
+            common_teacher_photo,
+            common_teacher_sketch,
         )
 
     def extract_feature(self, image, modality):
@@ -1090,6 +1176,7 @@ class ZS_SBIR(pl.LightningModule):
             "domain_kd": "DOMAIN",
             "modality_kd": "MODALITY",
             "core_kd": "CORE",
+            "gap_core_kd": "GAP_CORE",
         }
         for key, bar_name in bar_names.items():
             self.log(
@@ -1106,8 +1193,58 @@ class ZS_SBIR(pl.LightningModule):
             "core_promote",
             "core_suppress",
             "core_agreement",
+            "gap_core_coverage",
+            "gap_core_teacher_correction",
+            "gap_core_student_correction",
+            "gap_core_agreement",
+            "gap_core_absolute_error",
+            "gap_core_common_margin",
+            "gap_core_full_margin",
         ):
             self.log(key, loss_dict[key], on_step=False, on_epoch=True)
+        if self.args.lambda_gap_core > 0 and batch_idx == 0:
+            parameters = [
+                parameter
+                for learner in (
+                    self.model.photo_visual_prompt,
+                    self.model.sketch_visual_prompt,
+                )
+                for parameter in learner.parameters()
+                if parameter.requires_grad
+            ]
+            main_gradients = torch.autograd.grad(
+                loss_dict["main_objective"],
+                parameters,
+                retain_graph=True,
+                allow_unused=True,
+            )
+            gap_gradients = torch.autograd.grad(
+                loss_dict["gap_objective"],
+                parameters,
+                retain_graph=True,
+                allow_unused=True,
+            )
+            main_squared = loss.new_zeros(())
+            gap_squared = loss.new_zeros(())
+            dot = loss.new_zeros(())
+            for main_gradient, gap_gradient in zip(
+                main_gradients,
+                gap_gradients,
+            ):
+                if main_gradient is not None:
+                    main_squared = main_squared + main_gradient.float().pow(2).sum()
+                if gap_gradient is not None:
+                    gap_squared = gap_squared + gap_gradient.float().pow(2).sum()
+                if main_gradient is not None and gap_gradient is not None:
+                    dot = dot + (
+                        main_gradient.float() * gap_gradient.float()
+                    ).sum()
+            main_norm = main_squared.sqrt()
+            gap_norm = gap_squared.sqrt()
+            ratio = gap_norm / main_norm.clamp_min(1e-12)
+            cosine = dot / (main_norm * gap_norm).clamp_min(1e-12)
+            self.log("gap_core_grad_ratio", ratio.detach(), on_epoch=True)
+            self.log("gap_core_grad_cosine", cosine.detach(), on_epoch=True)
         return loss
 
     def validation_step(self, batch, batch_idx, dataloader_idx):
@@ -1181,6 +1318,32 @@ class ZS_SBIR(pl.LightningModule):
                     f"agreement={100 * agreement.item():.2f}%, "
                     f"teacher_correction={teacher_correction.item():.6f}, "
                     f"student_correction={student_correction.item():.6f}"
+                )
+        if self.args.lambda_gap_core > 0 and self.global_step > 0:
+            values = {
+                name: self.trainer.callback_metrics.get(name)
+                for name in (
+                    "gap_core_coverage",
+                    "gap_core_agreement",
+                    "gap_core_teacher_correction",
+                    "gap_core_student_correction",
+                    "gap_core_absolute_error",
+                    "gap_core_grad_ratio",
+                    "gap_core_grad_cosine",
+                )
+            }
+            if all(value is not None for value in values.values()):
+                print(
+                    "Gap-CoRe: "
+                    f"coverage={100 * values['gap_core_coverage'].item():.2f}%, "
+                    f"agreement={100 * values['gap_core_agreement'].item():.2f}%, "
+                    "teacher_correction="
+                    f"{values['gap_core_teacher_correction'].item():.6f}, "
+                    "student_correction="
+                    f"{values['gap_core_student_correction'].item():.6f}, "
+                    f"MAE={values['gap_core_absolute_error'].item():.6f}, "
+                    f"grad_ratio={values['gap_core_grad_ratio'].item():.4f}, "
+                    f"grad_cos={values['gap_core_grad_cosine'].item():.4f}"
                 )
 
         self.val_step_outputs_sk.clear()
