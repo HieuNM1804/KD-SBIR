@@ -106,9 +106,13 @@ and its controls.
 For broader method validation, use
 `test/kaggle_gap_core_significance_sweep.py`. It first tunes the main model on
 student seed 42 over domain/modality weights, prompt count/depth, learning rate,
-and weight decay without observing Gap-CoRe. It then tunes Gap-CoRe only on the
-two selected main configurations. After locking all hyperparameters, it runs
+SGD momentum, and weight decay without observing Gap-CoRe. It then tunes
+Gap-CoRe only on the selected best main configuration. Every student search and
+confirmation run uses three epochs. After locking all hyperparameters, it runs
 paired main/verified/shuffled confirmation on student seeds 43--47 with a fixed
 teacher trained at seed 42. The primary claim requires positive selected-mAP
 deltas, 95% paired t intervals above zero, and exact one-sided sign-flip
 `p <= 0.05` against both main and shuffled. No checkpoint is retained.
+The current adaptive design runs 33 main configurations, 40 Gap-CoRe
+configurations, up to 8 loss refinements, and 16 confirmation/control runs
+(97 student runs in total).

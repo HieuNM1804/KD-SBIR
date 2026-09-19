@@ -217,8 +217,6 @@ fixed = [
     "0.15",
     "--sketch_text_kd_temperature",
     "0.02",
-    "--momentum",
-    "0.9",
     "--lambda_core",
     "0.0",
     "--no_progress",
@@ -316,8 +314,10 @@ def launch(condition, configuration, retain_metrics=False):
         str(configuration["prompt_depth"]),
         "--lr",
         str(configuration["lr"]),
-        "--weight_decay",
-        str(configuration["weight_decay"]),
+            "--weight_decay",
+            str(configuration["weight_decay"]),
+            "--momentum",
+            str(configuration["momentum"]),
         "--seed",
         str(configuration["seed"]),
         "--lambda_domain",
@@ -390,6 +390,7 @@ def base_configuration(**changes):
         "prompt_depth": 12,
         "lr": 1e-2,
         "weight_decay": 5e-4,
+        "momentum": 0.9,
         "lambda_domain": 3.0,
         "lambda_modality": 1.0,
         "lambda_gap_core": 0.0,
@@ -404,7 +405,9 @@ def base_configuration(**changes):
     return configuration
 
 
-# Stage A: tune the main model without observing Gap-CoRe results.
+# Stage A: tune the main model without observing Gap-CoRe results. Curated
+# sub-grids cover loss weights, architecture, and optimizer without an
+# intractable full Cartesian product.
 base_candidates = []
 for domain, modality in itertools.product(
     (1.0, 1.5, 2.0, 3.0),
@@ -427,13 +430,15 @@ for n_ctx, depth in (
     base_candidates.append(
         base_configuration(n_ctx_visual=n_ctx, prompt_depth=depth)
     )
-for learning_rate, decay in itertools.product(
+for learning_rate, momentum in itertools.product(
     (5e-3, 1e-2, 2e-2),
-    (1e-4, 5e-4, 1e-3),
+    (0.0, 0.5, 0.9, 0.95),
 ):
     base_candidates.append(
-        base_configuration(lr=learning_rate, weight_decay=decay)
+        base_configuration(lr=learning_rate, momentum=momentum)
     )
+for decay in (1e-4, 5e-4, 1e-3):
+    base_candidates.append(base_configuration(weight_decay=decay))
 
 unique_base_candidates = []
 seen_base_keys = set()
@@ -442,6 +447,7 @@ base_names = (
     "prompt_depth",
     "lr",
     "weight_decay",
+    "momentum",
     "lambda_domain",
     "lambda_modality",
 )
@@ -457,24 +463,24 @@ for configuration in unique_base_candidates:
     row, _, record = launch(configuration["base_id"], configuration)
     if record["return_code"] == 0 and "selected_mAP200" in row:
         base_results.append((row, record))
-if len(base_results) < 2:
-    raise RuntimeError("Fewer than two baseline-search runs completed.")
+if not base_results:
+    raise RuntimeError("Every baseline-search run failed.")
 base_results.sort(
     key=lambda item: (item[0]["selected_mAP200"], item[0]["selected_P200"]),
     reverse=True,
 )
-top_bases = base_results[:2]
+top_bases = base_results[:1]
 matched_base_rows = {row["base_id"]: row for row, _ in base_results}
 
 
-# Stage B: tune Gap-CoRe only on the two bases selected without using Gap loss.
+# Stage B: tune Gap-CoRe only on the best base selected without using Gap loss.
 gap_results = []
 for base_row, base_record in top_bases:
     base = dict(base_record["configuration"])
     for lambda_value, direction, minimum in itertools.product(
-        (1.0, 2.0, 4.0),
+        (0.5, 1.0, 2.0, 4.0, 8.0),
         ("bidirectional", "sketch_to_photo"),
-        (0.0, 0.02),
+        (0.0, 0.01, 0.02, 0.05),
     ):
         configuration = {
             **base,
@@ -574,7 +580,7 @@ for seed in (43, 44, 45, 46, 47):
     for control in ("main", "verified", "shuffled"):
         configuration = {
             **selected_configuration,
-            "epochs": 5,
+            "epochs": 3,
             "seed": seed,
             "stage": "confirmation",
             "control": control,
@@ -594,7 +600,7 @@ for seed in (43, 44, 45, 46, 47):
 # One reversed run is diagnostic; significance is assessed against shuffled.
 reverse_configuration = {
     **selected_configuration,
-    "epochs": 5,
+    "epochs": 3,
     "seed": 43,
     "stage": "confirmation_control",
     "control": "reversed",
@@ -712,10 +718,10 @@ analysis = {
         "tuning_seed": 42,
         "confirmation_seeds": [43, 44, 45, 46, 47],
         "baseline_selection": (
-            "top two selected mAP@200/P@200 using only lambda_gap_core=0"
+            "best selected mAP@200/P@200 using only lambda_gap_core=0"
         ),
         "gap_selection": (
-            "highest selected mAP@200, then P@200, within the two locked bases"
+            "highest selected mAP@200, then P@200, within the locked best base"
         ),
         "primary_confirmation_metric": "selected_mAP200",
         "significance_test": "exact one-sided paired sign-flip over five new seeds",
@@ -839,6 +845,7 @@ manifest = {
     "teacher_cache": str(TEACHER_CACHE),
     "teacher_training_seed": 42,
     "teacher_pretrain_epochs": 1,
+    "student_epochs_per_run": 3,
     "baseline_search_runs": len(unique_base_candidates),
     "gap_search_runs": len(gap_results),
     "gap_refinement_runs": len(refinement_results),
