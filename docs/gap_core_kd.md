@@ -94,3 +94,11 @@ avoids repeating teacher prompt pretraining.
 2. `test/kaggle_gap_core_offline.py` in the offline GPU notebook.
 3. `test/kaggle_gap_core_compare.py` in the same GPU notebook.
 4. Send the emitted `gap_core_sketchy2_comparison_*.zip`.
+
+For the checkpoint-free hyperparameter search, replace step 3 with
+`test/kaggle_gap_core_sweep.py`. It runs 24 broad verified configurations,
+refines the two best configurations with alternative Huber and clipping
+settings, and then runs shuffled and reversed controls for the selected best
+configuration. Checkpoint creation is disabled. The ZIP contains compact
+metrics for every trial and detailed curves/logs only for main, best verified,
+and its controls.

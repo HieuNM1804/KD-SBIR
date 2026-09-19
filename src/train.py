@@ -162,6 +162,11 @@ if __name__ == "__main__":
         help="Disable the tqdm progress bar.",
     )
     parser.add_argument(
+        "--no_checkpoints",
+        action="store_true",
+        help="Disable model checkpoint creation for sweeps and diagnostics.",
+    )
+    parser.add_argument(
         "--teacher_n_ctx_visual",
         type=int,
         default=3,
@@ -503,15 +508,6 @@ if __name__ == "__main__":
         parser.error("--sketch_text_kd_temperature must be greater than 0.")
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
 
-    checkpoint_callback = ModelCheckpoint(
-        monitor="precision",
-        dirpath=f"saved_models/{args.exp_name}",
-        filename="{epoch:02d}-{precision:.4f}",
-        save_top_k=1,
-        mode="max",
-        save_last=True,
-    )
-
     train_loader, val_sketch_loader, val_photo_loader = get_loaders(args)
     if not args.teacher_cache_path and args.teacher_pretrain_epochs > 0:
         args.teacher_cache_path = default_teacher_cache_path(
@@ -537,7 +533,18 @@ if __name__ == "__main__":
             "--rebuild_teacher_cache requires --teacher_cache_path or "
             "--teacher_pretrain_epochs greater than 0."
         )
-    callbacks = [checkpoint_callback]
+    callbacks = []
+    if not args.no_checkpoints:
+        callbacks.append(
+            ModelCheckpoint(
+                monitor="precision",
+                dirpath=f"saved_models/{args.exp_name}",
+                filename="{epoch:02d}-{precision:.4f}",
+                save_top_k=1,
+                mode="max",
+                save_last=True,
+            )
+        )
     if args.progress:
         callbacks.append(TQDMProgressBar(refresh_rate=20))
 
@@ -551,6 +558,7 @@ if __name__ == "__main__":
         logger=logger,
         check_val_every_n_epoch=1,
         enable_progress_bar=args.progress,
+        enable_checkpointing=not args.no_checkpoints,
         callbacks=callbacks,
     )
 
