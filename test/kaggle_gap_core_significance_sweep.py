@@ -97,12 +97,20 @@ def read_scalars(version):
 
     accumulator = EventAccumulator(str(version), size_guidance={"scalars": 0})
     accumulator.Reload()
+    retained_tags = {
+        "mAP",
+        "precision",
+        "train_loss",
+        *MECHANISM_TAGS,
+        *(tag + "_epoch" for tag in MECHANISM_TAGS),
+    }
     return {
         tag: [
             {"step": value.step, "value": value.value, "wall_time": value.wall_time}
             for value in accumulator.Scalars(tag)
         ]
         for tag in accumulator.Tags().get("scalars", [])
+        if tag in retained_tags
     }
 
 
