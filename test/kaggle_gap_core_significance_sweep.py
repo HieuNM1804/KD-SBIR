@@ -1,17 +1,16 @@
-"""Tune Gap-CoRe, then run checkpoint-free paired confirmation on new seeds.
+"""Tune only Gap-CoRe-sensitive parameters on a fixed seed-42 main model.
 
-Paste this entire file into one offline Kaggle GPU cell after setup. Search is
-performed on student seed 42. The selected configuration is frozen before
-paired main/verified/shuffled confirmation on seeds 43--47.
+Paste this entire file into one offline Kaggle GPU cell after setup. The main
+model, optimizer, prompts, teacher, and student seed stay fixed. A staged
+one-factor, structural-interaction, and loss-shape search selects one Gap-CoRe
+candidate, then evaluates shuffled and reversed controls. No weight is kept.
 """
 
 import csv
 import itertools
 import json
-import math
 import os
 import shutil
-import statistics
 import subprocess
 import sys
 import zipfile
@@ -27,7 +26,7 @@ TEACHER_CACHE = Path(
     "/kaggle/working/teacher_cache/sketchy2_gap_core_teacher1_v8.pt"
 )
 STAMP = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
-RUN_PREFIX = "gap_core_significance_" + STAMP
+RUN_PREFIX = "gap_core_seed42_sensitivity_" + STAMP
 OUT = Path("/kaggle/working") / RUN_PREFIX
 WORK_LOGS = OUT / "work_logs"
 OUT.mkdir(parents=True, exist_ok=False)
@@ -299,9 +298,10 @@ if cache_code != 0 or not TEACHER_CACHE.is_file():
 
 all_rows = []
 all_runs = []
+all_metrics = {}
 
 
-def launch(condition, configuration, retain_metrics=False):
+def launch(condition, configuration):
     index = len(all_runs)
     label = f"{index:03d}_{condition}"
     run_name = RUN_PREFIX + f"_{index:03d}_{condition}"
@@ -353,9 +353,8 @@ def launch(condition, configuration, retain_metrics=False):
         run_name,
     ]
     code, log_path = run_stage(label, command)
-    row, metrics, version = summarize(
-        run_name, condition, code, configuration
-    )
+    row, metrics, version = summarize(run_name, condition, code, configuration)
+    all_metrics[run_name] = metrics
     checkpoint_directory = PROJECT / "saved_models" / run_name
     checkpoint_bytes_removed = 0
     if checkpoint_directory.is_dir():
@@ -379,379 +378,327 @@ def launch(condition, configuration, retain_metrics=False):
     }
     all_rows.append(row)
     all_runs.append(record)
-    return row, (metrics if retain_metrics else {}), record
+    return row, record
 
 
-def base_configuration(**changes):
+FIXED_MAIN = {
+    "epochs": 3,
+    "seed": 42,
+    "n_ctx_visual": 3,
+    "prompt_depth": 12,
+    "lr": 1e-2,
+    "weight_decay": 5e-4,
+    "momentum": 0.9,
+    "lambda_domain": 3.0,
+    "lambda_modality": 1.0,
+}
+REFERENCE_GAP = {
+    "lambda_gap_core": 0.5,
+    "direction": "bidirectional",
+    "min_correction": 0.05,
+    "huber_beta": 0.02,
+    "max_weight": 0.25,
+    "control": "verified",
+}
+SENSITIVITY_GRIDS = {
+    "lambda_gap_core": (0.10, 0.20, 0.25, 0.35, 0.50, 0.65, 0.75, 1.0, 1.5, 2.0),
+    "direction": ("bidirectional", "sketch_to_photo", "photo_to_sketch"),
+    "min_correction": (0.0, 0.005, 0.01, 0.02, 0.035, 0.05, 0.075, 0.10),
+    "huber_beta": (0.005, 0.01, 0.015, 0.02, 0.03, 0.05, 0.075, 0.10, 0.15),
+    "max_weight": (0.05, 0.10, 0.15, 0.20, 0.25, 0.35, 0.50),
+}
+
+
+def make_configuration(**changes):
     configuration = {
-        "epochs": 3,
-        "seed": 42,
-        "n_ctx_visual": 3,
-        "prompt_depth": 12,
-        "lr": 1e-2,
-        "weight_decay": 5e-4,
-        "momentum": 0.9,
-        "lambda_domain": 3.0,
-        "lambda_modality": 1.0,
-        "lambda_gap_core": 0.0,
-        "direction": "none",
-        "min_correction": 0.0,
-        "huber_beta": 0.05,
-        "max_weight": 0.25,
-        "control": "none",
-        "stage": "baseline_search",
+        **FIXED_MAIN,
+        **REFERENCE_GAP,
+        "stage": "gap_search",
     }
     configuration.update(changes)
     return configuration
 
 
-# Stage A: tune the main model without observing Gap-CoRe results. Curated
-# sub-grids cover loss weights, architecture, and optimizer without an
-# intractable full Cartesian product.
-base_candidates = []
-for domain, modality in itertools.product(
-    (1.0, 1.5, 2.0, 3.0),
-    (0.25, 0.5, 1.0),
-):
-    base_candidates.append(
-        base_configuration(lambda_domain=domain, lambda_modality=modality)
-    )
-for n_ctx, depth in (
-    (2, 6),
-    (2, 12),
-    (3, 6),
-    (3, 9),
-    (3, 12),
-    (4, 6),
-    (4, 9),
-    (4, 12),
-    (6, 12),
-):
-    base_candidates.append(
-        base_configuration(n_ctx_visual=n_ctx, prompt_depth=depth)
-    )
-for learning_rate, momentum in itertools.product(
-    (5e-3, 1e-2, 2e-2),
-    (0.0, 0.5, 0.9, 0.95),
-):
-    base_candidates.append(
-        base_configuration(lr=learning_rate, momentum=momentum)
-    )
-for decay in (1e-4, 5e-4, 1e-3):
-    base_candidates.append(base_configuration(weight_decay=decay))
+def completed(row, record):
+    return record["return_code"] == 0 and "selected_mAP200" in row
 
-unique_base_candidates = []
-seen_base_keys = set()
-base_names = (
-    "n_ctx_visual",
-    "prompt_depth",
-    "lr",
-    "weight_decay",
-    "momentum",
-    "lambda_domain",
-    "lambda_modality",
+
+main_configuration = make_configuration(
+    lambda_gap_core=0.0,
+    direction="none",
+    min_correction=0.0,
+    control="none",
+    stage="fixed_main",
 )
-for configuration in base_candidates:
-    key = tuple(configuration[name] for name in base_names)
-    if key not in seen_base_keys:
-        seen_base_keys.add(key)
-        configuration["base_id"] = "base_" + str(len(unique_base_candidates))
-        unique_base_candidates.append(configuration)
-
-base_results = []
-for configuration in unique_base_candidates:
-    row, _, record = launch(configuration["base_id"], configuration)
-    if record["return_code"] == 0 and "selected_mAP200" in row:
-        base_results.append((row, record))
-if not base_results:
-    raise RuntimeError("Every baseline-search run failed.")
-base_results.sort(
-    key=lambda item: (item[0]["selected_mAP200"], item[0]["selected_P200"]),
-    reverse=True,
-)
-top_bases = base_results[:1]
-matched_base_rows = {row["base_id"]: row for row, _ in base_results}
+main_row, main_record = launch("fixed_main", main_configuration)
+if not completed(main_row, main_record):
+    raise RuntimeError("The fixed main run failed; inspect its retained log.")
 
 
-# Stage B: tune Gap-CoRe only on the best base selected without using Gap loss.
-# The previous five-epoch seed-42 pilot put the useful region near lambda 0.5,
-# min_correction 0.05, while lambda 2--4 was usually harmful. Search the low
-# lambda region densely and retain 2.0 as a boundary check.
-gap_results = []
-for base_row, base_record in top_bases:
-    base = dict(base_record["configuration"])
-    for lambda_value, direction, minimum in itertools.product(
-        (0.25, 0.5, 0.75, 1.0, 1.5, 2.0),
-        ("bidirectional", "sketch_to_photo"),
-        (0.0, 0.01, 0.02, 0.035, 0.05),
-    ):
-        configuration = {
-            **base,
-            "lambda_gap_core": lambda_value,
-            "direction": direction,
-            "min_correction": minimum,
-            "huber_beta": 0.05,
-            "max_weight": 0.25,
-            "control": "verified",
-            "stage": "gap_search",
-        }
-        condition = (
-            base["base_id"]
-            + "_gap_l"
-            + safe_name(lambda_value)
-            + "_"
-            + direction
-            + "_m"
-            + safe_name(minimum)
-        )
-        row, _, record = launch(condition, configuration)
-        if record["return_code"] == 0 and "selected_mAP200" in row:
-            matched = matched_base_rows[base["base_id"]]
-            row["delta_selected_mAP200_vs_matched_main"] = (
-                row["selected_mAP200"] - matched["selected_mAP200"]
-            )
-            row["delta_selected_P200_vs_matched_main"] = (
-                row["selected_P200"] - matched["selected_P200"]
-            )
-            gap_results.append((row, record))
-if not gap_results:
-    raise RuntimeError("Every Gap-CoRe search run failed.")
-gap_results.sort(
-    key=lambda item: (item[0]["selected_mAP200"], item[0]["selected_P200"]),
-    reverse=True,
-)
-
-
-# Stage C: refine loss curvature and correction clipping around the top three.
-# beta=0.02 produced the best previous pilot, so curvature is sampled more
-# densely around it. Each variant changes one loss-shape parameter at a time.
-refinement_results = []
-seen_gap_keys = set()
-gap_names = (
-    "base_id",
+SEARCH_KEY_FIELDS = (
     "lambda_gap_core",
     "direction",
     "min_correction",
     "huber_beta",
     "max_weight",
+    "control",
 )
-for row, _ in gap_results:
-    seen_gap_keys.add(tuple(row[name] for name in gap_names))
-for top_row, top_record in gap_results[:3]:
-    base = dict(top_record["configuration"])
-    variants = []
-    for beta in (0.01, 0.02, 0.035, 0.075, 0.10):
-        variants.append({**base, "huber_beta": beta})
-    for maximum in (0.10, 0.15, 0.20, 0.35):
-        variants.append({**base, "max_weight": maximum})
-    for configuration in variants:
-        configuration["stage"] = "gap_refinement"
-        key = tuple(configuration[name] for name in gap_names)
-        if key in seen_gap_keys:
-            continue
-        seen_gap_keys.add(key)
-        condition = (
-            configuration["base_id"]
-            + "_refine_b"
-            + safe_name(configuration["huber_beta"])
-            + "_w"
-            + safe_name(configuration["max_weight"])
+verified_by_key = {}
+
+
+def search_key(configuration):
+    return tuple(configuration[name] for name in SEARCH_KEY_FIELDS)
+
+
+def annotate_against_main(row):
+    if "selected_mAP200" not in row:
+        return
+    row["delta_selected_mAP200_vs_main"] = (
+        row["selected_mAP200"] - main_row["selected_mAP200"]
+    )
+    row["delta_selected_P200_vs_main"] = (
+        row["selected_P200"] - main_row["selected_P200"]
+    )
+    row["delta_final_mAP200_vs_main"] = (
+        row["final_mAP200"] - main_row["final_mAP200"]
+    )
+    row["delta_final_P200_vs_main"] = (
+        row["final_P200"] - main_row["final_P200"]
+    )
+
+
+def launch_verified(condition, configuration):
+    configuration = {**configuration, "control": "verified"}
+    key = search_key(configuration)
+    if key in verified_by_key:
+        return (*verified_by_key[key], False)
+    row, record = launch(condition, configuration)
+    annotate_against_main(row)
+    verified_by_key[key] = (row, record)
+    return row, record, True
+
+
+def ranking_key(item):
+    row = item[0]
+    return (row.get("selected_mAP200", -1.0), row.get("selected_P200", -1.0))
+
+
+# Stage A: isolate each Gap-CoRe parameter around the pilot reference. This
+# measures sensitivity before spending runs on interactions.
+reference_configuration = make_configuration(stage="sensitivity_reference")
+reference_row, reference_record, _ = launch_verified(
+    "gap_reference", reference_configuration
+)
+if not completed(reference_row, reference_record):
+    raise RuntimeError("The Gap-CoRe reference run failed.")
+
+one_factor_rows = []
+one_factor_results = {}
+for parameter, values in SENSITIVITY_GRIDS.items():
+    parameter_results = []
+    for value in values:
+        configuration = make_configuration(
+            **{parameter: value},
+            stage="sensitivity_" + parameter,
         )
-        row, _, record = launch(condition, configuration)
-        if record["return_code"] == 0 and "selected_mAP200" in row:
-            matched = matched_base_rows[configuration["base_id"]]
-            row["delta_selected_mAP200_vs_matched_main"] = (
-                row["selected_mAP200"] - matched["selected_mAP200"]
-            )
-            row["delta_selected_P200_vs_matched_main"] = (
-                row["selected_P200"] - matched["selected_P200"]
-            )
-            refinement_results.append((row, record))
-
-all_gap_candidates = gap_results + refinement_results
-all_gap_candidates.sort(
-    key=lambda item: (item[0]["selected_mAP200"], item[0]["selected_P200"]),
-    reverse=True,
-)
-best_search_row, best_search_record = all_gap_candidates[0]
-selected_configuration = dict(best_search_record["configuration"])
-
-
-# Stage D: freeze hyperparameters and confirm on five unseen student seeds.
-confirmation_rows = []
-confirmation_metric_sets = []
-confirmation_records = []
-for seed in (43, 44, 45, 46, 47):
-    for control in ("main", "verified", "shuffled"):
-        configuration = {
-            **selected_configuration,
-            "epochs": 3,
-            "seed": seed,
-            "stage": "confirmation",
-            "control": control,
-            "lambda_gap_core": (
-                0.0 if control == "main" else selected_configuration["lambda_gap_core"]
-            ),
-            "direction": (
-                "none" if control == "main" else selected_configuration["direction"]
-            ),
+        condition = "screen_" + parameter + "_" + safe_name(value)
+        row, record, _ = launch_verified(condition, configuration)
+        entry = {
+            **row,
+            "swept_parameter": parameter,
+            "swept_value": value,
         }
-        condition = f"confirm_s{seed}_{control}"
-        row, metrics, record = launch(condition, configuration, retain_metrics=True)
-        confirmation_rows.append(row)
-        confirmation_metric_sets.append((condition, record, metrics))
-        confirmation_records.append(record)
-
-# One reversed run is diagnostic; significance is assessed against shuffled.
-reverse_configuration = {
-    **selected_configuration,
-    "epochs": 3,
-    "seed": 43,
-    "stage": "confirmation_control",
-    "control": "reversed",
-}
-reverse_row, reverse_metrics, reverse_record = launch(
-    "confirm_s43_reversed", reverse_configuration, retain_metrics=True
-)
-confirmation_rows.append(reverse_row)
-confirmation_metric_sets.append(
-    ("confirm_s43_reversed", reverse_record, reverse_metrics)
-)
-confirmation_records.append(reverse_record)
+        one_factor_rows.append(entry)
+        if completed(row, record):
+            parameter_results.append((row, record, value))
+    parameter_results.sort(key=lambda item: ranking_key(item[:2]), reverse=True)
+    one_factor_results[parameter] = parameter_results
 
 
-def exact_sign_flip_p(values):
-    """Exact one-sided paired randomization p-value for a positive mean."""
-    values = [float(value) for value in values]
-    observed = statistics.mean(values)
-    if not values or observed <= 0:
-        return 1.0
-    extreme = 0
-    total = 2 ** len(values)
-    for signs in itertools.product((-1.0, 1.0), repeat=len(values)):
-        permuted = statistics.mean(
-            sign * value for sign, value in zip(signs, values)
-        )
-        if permuted >= observed - 1e-15:
-            extreme += 1
-    return extreme / total
+def top_values(parameter, count):
+    values = []
+    for row, record, value in one_factor_results[parameter]:
+        if value not in values:
+            values.append(value)
+        if len(values) == count:
+            break
+    return values
 
 
-def paired_statistics(values):
-    values = [float(value) for value in values]
-    count = len(values)
-    mean = statistics.mean(values)
-    std = statistics.stdev(values) if count > 1 else 0.0
-    # t(0.975, 4) for the preregistered five confirmation seeds.
-    critical = 2.776 if count == 5 else 1.96
-    half_width = critical * std / math.sqrt(count) if count > 1 else 0.0
-    return {
-        "n": count,
-        "mean": mean,
-        "std": std,
-        "ci95_low": mean - half_width,
-        "ci95_high": mean + half_width,
-        "positive_seeds": sum(value > 0 for value in values),
-        "exact_one_sided_sign_flip_p": exact_sign_flip_p(values),
-        "values": values,
-    }
-
-
-by_seed_condition = {
-    (int(row["seed"]), row["control"]): row
-    for row in confirmation_rows
-    if "selected_mAP200" in row and row["control"] in {"main", "verified", "shuffled"}
-}
-paired_report = {}
-for metric in (
-    "selected_mAP200",
-    "selected_P200",
-    "final_mAP200",
-    "final_P200",
+# Stage B: the strongest structural parameters interact. Test the four best
+# lambda values, every direction, and the four best correction thresholds.
+top_lambdas = top_values("lambda_gap_core", 4)
+top_minimums = top_values("min_correction", 4)
+directions = list(SENSITIVITY_GRIDS["direction"])
+structural_results = []
+for lambda_value, direction, minimum in itertools.product(
+    top_lambdas,
+    directions,
+    top_minimums,
 ):
-    verified_main = []
-    verified_shuffled = []
-    for seed in (43, 44, 45, 46, 47):
-        main = by_seed_condition.get((seed, "main"))
-        verified = by_seed_condition.get((seed, "verified"))
-        shuffled = by_seed_condition.get((seed, "shuffled"))
-        if main is not None and verified is not None:
-            verified_main.append(verified[metric] - main[metric])
-        if shuffled is not None and verified is not None:
-            verified_shuffled.append(verified[metric] - shuffled[metric])
-    paired_report[metric] = {
-        "verified_minus_main": paired_statistics(verified_main),
-        "verified_minus_shuffled": paired_statistics(verified_shuffled),
+    configuration = make_configuration(
+        lambda_gap_core=lambda_value,
+        direction=direction,
+        min_correction=minimum,
+        stage="structural_interaction",
+    )
+    condition = (
+        "structure_l"
+        + safe_name(lambda_value)
+        + "_"
+        + direction
+        + "_m"
+        + safe_name(minimum)
+    )
+    row, record, _ = launch_verified(condition, configuration)
+    if completed(row, record):
+        structural_results.append((row, record))
+structural_results.sort(key=ranking_key, reverse=True)
+if not structural_results:
+    raise RuntimeError("Every structural interaction run failed.")
+
+
+# Stage C: for the three strongest structures, fully cross the four best Huber
+# transitions and correction-weight caps found by one-factor screening.
+top_betas = top_values("huber_beta", 4)
+top_weights = top_values("max_weight", 4)
+top_structures = structural_results[:3]
+shape_results = []
+for structural_row, structural_record in top_structures:
+    structural_configuration = structural_record["configuration"]
+    for beta, maximum in itertools.product(top_betas, top_weights):
+        configuration = make_configuration(
+            lambda_gap_core=structural_configuration["lambda_gap_core"],
+            direction=structural_configuration["direction"],
+            min_correction=structural_configuration["min_correction"],
+            huber_beta=beta,
+            max_weight=maximum,
+            stage="loss_shape_interaction",
+        )
+        condition = (
+            "shape_l"
+            + safe_name(configuration["lambda_gap_core"])
+            + "_"
+            + configuration["direction"]
+            + "_m"
+            + safe_name(configuration["min_correction"])
+            + "_b"
+            + safe_name(beta)
+            + "_w"
+            + safe_name(maximum)
+        )
+        row, record, _ = launch_verified(condition, configuration)
+        if completed(row, record):
+            shape_results.append((row, record))
+
+
+verified_ranking = [
+    item for item in verified_by_key.values() if completed(item[0], item[1])
+]
+verified_ranking.sort(key=ranking_key, reverse=True)
+if not verified_ranking:
+    raise RuntimeError("Every verified Gap-CoRe run failed.")
+best_row, best_record = verified_ranking[0]
+selected_configuration = dict(best_record["configuration"])
+
+
+# Controls use the exact selected loss hyperparameters on the same fixed main.
+control_results = {}
+for control in ("shuffled", "reversed"):
+    configuration = {
+        **selected_configuration,
+        "control": control,
+        "stage": "selected_control",
     }
-
-primary_main = paired_report["selected_mAP200"]["verified_minus_main"]
-primary_shuffle = paired_report["selected_mAP200"]["verified_minus_shuffled"]
-claim_checks = {
-    "five_confirmation_seeds_complete": primary_main["n"] == 5
-    and primary_shuffle["n"] == 5,
-    "verified_improves_selected_mAP_mean": primary_main["mean"] > 0,
-    "verified_vs_main_exact_p_le_0.05": (
-        primary_main["exact_one_sided_sign_flip_p"] <= 0.05
-    ),
-    "verified_vs_main_ci95_above_zero": primary_main["ci95_low"] > 0,
-    "verified_beats_shuffled_selected_mAP_mean": primary_shuffle["mean"] > 0,
-    "verified_vs_shuffled_exact_p_le_0.05": (
-        primary_shuffle["exact_one_sided_sign_flip_p"] <= 0.05
-    ),
-    "verified_vs_shuffled_ci95_above_zero": primary_shuffle["ci95_low"] > 0,
-}
-claim_checks["significant"] = all(claim_checks.values())
+    row, record = launch("best_" + control, configuration)
+    annotate_against_main(row)
+    control_results[control] = (row, record)
 
 
-base_rows = [row for row, _ in base_results]
-base_rows.sort(
-    key=lambda row: (row["selected_mAP200"], row["selected_P200"]),
+sensitivity = {}
+for parameter, results in one_factor_results.items():
+    successful = [item for item in results if "selected_mAP200" in item[0]]
+    values = [item[0]["selected_mAP200"] for item in successful]
+    sensitivity[parameter] = {
+        "tested_values": list(SENSITIVITY_GRIDS[parameter]),
+        "completed_values": len(successful),
+        "best_value": successful[0][2] if successful else None,
+        "best_selected_mAP200": successful[0][0]["selected_mAP200"] if successful else None,
+        "selected_mAP200_span_pp": 100 * (max(values) - min(values)) if values else None,
+    }
+sensitivity_order = sorted(
+    sensitivity,
+    key=lambda name: sensitivity[name]["selected_mAP200_span_pp"] or -1.0,
     reverse=True,
 )
-gap_rows = [row for row, _ in all_gap_candidates]
-gap_rows.sort(
-    key=lambda row: (row["selected_mAP200"], row["selected_P200"]),
-    reverse=True,
-)
-write_csv(OUT / "baseline_search.csv", base_rows)
-write_csv(OUT / "gap_search.csv", gap_rows)
-write_csv(OUT / "confirmation_runs.csv", confirmation_rows)
+
+
+verified_rows = [row for row, _ in verified_ranking]
+write_csv(OUT / "one_factor_sensitivity.csv", one_factor_rows)
+write_csv(OUT / "structural_interactions.csv", [row for row, _ in structural_results])
+write_csv(OUT / "loss_shape_interactions.csv", [row for row, _ in shape_results])
+write_csv(OUT / "verified_ranking.csv", verified_rows)
 write_csv(OUT / "all_runs.csv", all_rows)
 
+
+best_shuffled_row = control_results["shuffled"][0]
+best_reversed_row = control_results["reversed"][0]
 analysis = {
-    "selection_protocol": {
-        "tuning_seed": 42,
-        "confirmation_seeds": [43, 44, 45, 46, 47],
-        "baseline_selection": (
-            "best selected mAP@200/P@200 using only lambda_gap_core=0"
-        ),
-        "gap_selection": (
-            "highest selected mAP@200, then P@200, within the locked best base"
-        ),
-        "primary_confirmation_metric": "selected_mAP200",
-        "significance_test": "exact one-sided paired sign-flip over five new seeds",
+    "protocol": {
+        "student_seed": 42,
+        "student_epochs_per_run": 3,
+        "main_hyperparameters_tuned": False,
+        "fixed_main": FIXED_MAIN,
+        "teacher_hyperparameters_tuned": False,
+        "search_stages": [
+            "one_factor_sensitivity",
+            "lambda_direction_threshold_interaction",
+            "huber_beta_max_weight_interaction",
+            "selected_shuffled_and_reversed_controls",
+        ],
+        "selection_rule": "maximum selected mAP@200; selected P@200 breaks ties",
+        "statistical_significance_assessed": False,
     },
-    "selected_search_result": best_search_row,
+    "sensitivity": sensitivity,
+    "sensitivity_order": sensitivity_order,
+    "selected_result": best_row,
     "selected_configuration": selected_configuration,
-    "paired_confirmation": paired_report,
-    "claim_checks": claim_checks,
-    "interpretation": (
-        "claim_supported"
-        if claim_checks["significant"]
-        else "claim_not_yet_supported"
-    ),
+    "controls": {
+        "shuffled": best_shuffled_row,
+        "reversed": best_reversed_row,
+    },
+    "selected_deltas": {
+        "verified_minus_main_mAP200_pp": 100
+        * (best_row["selected_mAP200"] - main_row["selected_mAP200"]),
+        "verified_minus_shuffled_mAP200_pp": 100
+        * (best_row["selected_mAP200"] - best_shuffled_row["selected_mAP200"]),
+        "verified_minus_reversed_mAP200_pp": 100
+        * (best_row["selected_mAP200"] - best_reversed_row["selected_mAP200"]),
+    },
+    "interpretation": "seed42_candidate_selected_for_later_multiseed_confirmation",
 }
 (OUT / "analysis.json").write_text(
     json.dumps(analysis, indent=2), encoding="utf-8"
 )
+(OUT / "best_configuration.json").write_text(
+    json.dumps(
+        {
+            "fixed_main": main_row,
+            "best_verified": best_row,
+            "best_configuration": selected_configuration,
+            "controls": {
+                "shuffled": best_shuffled_row,
+                "reversed": best_reversed_row,
+            },
+        },
+        indent=2,
+    ),
+    encoding="utf-8",
+)
 (OUT / "commands.json").write_text(
     json.dumps(
         [
-            {
-                key: value
-                for key, value in record.items()
-                if key not in {"log_path"}
-            }
+            {key: value for key, value in record.items() if key != "log_path"}
             for record in all_runs
         ],
         indent=2,
@@ -760,12 +707,20 @@ analysis = {
 )
 
 
-# Detailed curves and logs are kept only for confirmation runs and failures.
-confirmation_curves = []
-for condition, record, metrics in confirmation_metric_sets:
+# Keep detailed curves and logs only for main, selected verified, controls, and
+# failed runs. Summary rows for every candidate remain in compact CSV files.
+detailed_records = {
+    "main": main_record,
+    "best_verified": best_record,
+    "best_shuffled": control_results["shuffled"][1],
+    "best_reversed": control_results["reversed"][1],
+}
+detailed_curves = []
+for condition, record in detailed_records.items():
+    metrics = all_metrics.get(record["run"], {})
     for tag in sorted(metrics):
         for value in metrics[tag]:
-            confirmation_curves.append(
+            detailed_curves.append(
                 {
                     "condition": condition,
                     "run": record["run"],
@@ -773,12 +728,9 @@ for condition, record, metrics in confirmation_metric_sets:
                     **value,
                 }
             )
-write_csv(OUT / "confirmation_scalar_curves.csv", confirmation_curves)
+    shutil.copy2(record["log_path"], OUT / (condition + ".log"))
+write_csv(OUT / "best_scalar_curves.csv", detailed_curves)
 shutil.copy2(cache_log, OUT / "gap_cache.log")
-for record in confirmation_records:
-    shutil.copy2(
-        record["log_path"], OUT / (record["condition"] + ".log")
-    )
 failed_records = [record for record in all_runs if record["return_code"] != 0]
 for index, record in enumerate(failed_records):
     shutil.copy2(
@@ -792,46 +744,35 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-seeds = [43, 44, 45, 46, 47]
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-for condition, color in (
-    ("main", "#7f7f7f"),
-    ("verified", "#2ca02c"),
-    ("shuffled", "#d62728"),
-):
-    values = [
-        100 * by_seed_condition[(seed, condition)]["selected_mAP200"]
-        for seed in seeds
-        if (seed, condition) in by_seed_condition
-    ]
-    axes[0].plot(seeds[: len(values)], values, marker="o", label=condition, color=color)
-axes[0].set_xlabel("Confirmation student seed")
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+comparison = (
+    ("main", main_row),
+    ("verified", best_row),
+    ("shuffled", best_shuffled_row),
+    ("reversed", best_reversed_row),
+)
+axes[0].bar(
+    [name for name, _ in comparison],
+    [100 * row["selected_mAP200"] for _, row in comparison],
+    color=("#7f7f7f", "#2ca02c", "#d62728", "#9467bd"),
+)
 axes[0].set_ylabel("Selected mAP@200 (%)")
-axes[0].legend()
-axes[0].grid(alpha=0.2)
-verified_main_pp = [100 * value for value in primary_main["values"]]
-verified_shuffle_pp = [100 * value for value in primary_shuffle["values"]]
-x = list(range(len(seeds)))
-width = 0.36
-axes[1].bar(
-    [value - width / 2 for value in x],
-    verified_main_pp,
-    width,
-    label="verified - main",
+axes[0].tick_params(axis="x", rotation=20)
+spans = [sensitivity[name]["selected_mAP200_span_pp"] for name in sensitivity_order]
+axes[1].barh(sensitivity_order[::-1], spans[::-1], color="#1f77b4")
+axes[1].set_xlabel("One-factor mAP span (pp)")
+axes[1].set_title("Gap-CoRe parameter sensitivity")
+top_rows = verified_rows[:20][::-1]
+axes[2].barh(
+    [str(index + 1) for index in range(len(top_rows))],
+    [100 * row["delta_selected_mAP200_vs_main"] for row in top_rows],
+    color="#2ca02c",
 )
-axes[1].bar(
-    [value + width / 2 for value in x],
-    verified_shuffle_pp,
-    width,
-    label="verified - shuffled",
-)
-axes[1].axhline(0, color="black", linewidth=0.8)
-axes[1].set_xticks(x, [str(seed) for seed in seeds])
-axes[1].set_xlabel("Confirmation student seed")
-axes[1].set_ylabel("Selected mAP@200 delta (pp)")
-axes[1].legend()
+axes[2].axvline(0, color="black", linewidth=0.8)
+axes[2].set_xlabel("Verified - fixed main mAP (pp)")
+axes[2].set_ylabel("Top candidate rank (reversed)")
 fig.tight_layout()
-fig.savefig(OUT / "confirmation.png", dpi=170)
+fig.savefig(OUT / "seed42_sensitivity.png", dpi=170)
 plt.close(fig)
 
 
@@ -847,21 +788,25 @@ manifest = {
     "created": datetime.now(UTC).isoformat(),
     "source_commit": source_commit,
     "dataset": "sketchy_2",
+    "student_seed": 42,
+    "student_epochs_per_run": 3,
+    "main_hyperparameters_tuned": False,
+    "fixed_main": FIXED_MAIN,
     "teacher_cache": str(TEACHER_CACHE),
     "teacher_training_seed": 42,
     "teacher_pretrain_epochs": 1,
-    "student_epochs_per_run": 3,
-    "baseline_search_runs": len(unique_base_candidates),
-    "gap_search_runs": len(gap_results),
-    "gap_refinement_runs": len(refinement_results),
-    "confirmation_runs": len(confirmation_rows),
+    "teacher_hyperparameters_tuned": False,
+    "unique_verified_gap_runs": len(verified_by_key),
+    "structural_interaction_results": len(structural_results),
+    "loss_shape_interaction_results": len(shape_results),
+    "control_runs": list(control_results),
     "completed_runs": sum(record["return_code"] == 0 for record in all_runs),
     "failed_runs": len(failed_records),
     "checkpoint_creation_disabled": TRAIN_SUPPORTS_NO_CHECKPOINTS,
     "fallback_checkpoint_cleanup": not TRAIN_SUPPORTS_NO_CHECKPOINTS,
     "checkpoint_files_found": checkpoint_files,
     "weights_included": False,
-    "claim_supported": claim_checks["significant"],
+    "statistical_significance_assessed": False,
 }
 (OUT / "manifest.json").write_text(
     json.dumps(manifest, indent=2), encoding="utf-8"
@@ -878,13 +823,20 @@ with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
 
 from IPython.display import FileLink, Image, display
 
-display(Image(filename=str(OUT / "confirmation.png")))
+display(Image(filename=str(OUT / "seed42_sensitivity.png")))
 print("Completed runs:", manifest["completed_runs"])
-print("Selected configuration:", selected_configuration)
-print("Verified-main selected mAP mean delta:", primary_main["mean"])
-print("Verified-main exact p:", primary_main["exact_one_sided_sign_flip_p"])
-print("Verified-shuffled exact p:", primary_shuffle["exact_one_sided_sign_flip_p"])
-print("Significant claim supported:", claim_checks["significant"])
+print("Main hyperparameters tuned: no")
+print("Most sensitive Gap-CoRe parameters:", sensitivity_order)
+print("Selected Gap-CoRe configuration:", selected_configuration)
+print(
+    "Verified-main selected mAP delta (pp):",
+    analysis["selected_deltas"]["verified_minus_main_mAP200_pp"],
+)
+print(
+    "Verified-shuffled selected mAP delta (pp):",
+    analysis["selected_deltas"]["verified_minus_shuffled_mAP200_pp"],
+)
+print("Statistical significance assessed: no (seed 42 tuning only)")
 print("Weights/checkpoints included: no")
 print("Send this ZIP:", archive)
 display(FileLink(str(archive)))
