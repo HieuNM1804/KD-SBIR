@@ -26,7 +26,7 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 
 REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/gap-core-teacher-audit"
-COMMIT = "7549d77aa2157247757255e883d87d4609d009fb"
+COMMIT = "9ecf33c57a3772a5ce67b6c433d492640c8f3f8a"
 TASK = "gap_core_distillation"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
@@ -200,6 +200,7 @@ required_paths = (
     project / "tests" / "test_gap_core_audit.py",
     project / "test" / "kaggle_gap_core_teacher_audit.py",
     project / "test" / "kaggle_gap_core_compare.py",
+    project / "test" / "kaggle_gap_core_sweep.py",
     project / "docs" / "gap_core_teacher_audit.md",
     project / "docs" / "gap_core_kd.md",
     dfn_target,
