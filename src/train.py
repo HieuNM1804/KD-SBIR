@@ -477,7 +477,9 @@ if __name__ == "__main__":
             "--rebuild_teacher_cache requires --teacher_cache_path or "
             "--teacher_pretrain_epochs greater than 0."
         )
-    progress_bar = TQDMProgressBar(refresh_rate=20)
+    callbacks = [checkpoint_callback]
+    if args.progress:
+        callbacks.append(TQDMProgressBar(refresh_rate=20))
 
     trainer = Trainer(
         accelerator="gpu",
@@ -489,7 +491,7 @@ if __name__ == "__main__":
         logger=logger,
         check_val_every_n_epoch=1,
         enable_progress_bar=args.progress,
-        callbacks=[checkpoint_callback, progress_bar],
+        callbacks=callbacks,
     )
 
     model = ZS_SBIR(args=args, classnames=train_loader.dataset.all_categories)
