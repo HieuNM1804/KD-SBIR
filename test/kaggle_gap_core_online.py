@@ -26,7 +26,7 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 
 REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/gap-core-teacher-audit"
-COMMIT = "9ecf33c57a3772a5ce67b6c433d492640c8f3f8a"
+COMMIT = "bb1c2bc685cae5545c61afb48006da240a03803f"
 TASK = "gap_core_distillation"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
