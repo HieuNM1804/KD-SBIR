@@ -72,6 +72,9 @@ teacher-only gate before training a student:
 1. `test/kaggle_cgrd_teacher_audit.py`
 2. `test/kaggle_cgrd_compare.py`
 
+Use `test/kaggle_cgrd_sweep.py` instead of the comparison cell for the bounded
+18-configuration seed-42 hyperparameter search.
+
 Both cells reuse the one-epoch format-v9 teacher cache. The comparison runs
 three student epochs and disables checkpoints. See [docs/cgrd.md](docs/cgrd.md)
 for the objective, controls, diagnostics, and cache upgrade path.

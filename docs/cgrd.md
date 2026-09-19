@@ -99,10 +99,22 @@ v9 target: sketchy2_cgrd_teacher1_v9.pt
 4. Run `test/kaggle_cgrd_teacher_audit.py`.
 5. If the teacher gate passes, run `test/kaggle_cgrd_compare.py`.
 
+For seed-42 method development, replace step 5 with
+`test/kaggle_cgrd_sweep.py`. It runs one fixed main baseline, 18 verified CGRD
+configurations, and shuffled/reversed controls for the selected configuration.
+The trials vary one sensitive factor at a time around the reference:
+`lambda_cgrd`, hard-negative count, direction, both evidence thresholds,
+swapped-term weight, Huber transition, and correction-weight clipping.
+
 The comparison trains each student for three epochs on seed 42 and evaluates
 matched main, one-sided Gap-CoRe, verified CGRD, shuffled CGRD, and reversed
 CGRD. Checkpoint creation is disabled. The result ZIP contains scalar curves,
 compact metrics, necessary logs, and no model weights.
+
+The sweep also uses three student epochs and keeps all main hyperparameters
+fixed. Its ZIP contains all-run summaries, a sensitivity table, and detailed
+curves/logs only for main, selected verified, shuffled, reversed, and failed
+runs. It runs 21 students in total: 1 main + 18 tuning + 2 controls.
 
 The starting CGRD configuration is deliberately conservative:
 

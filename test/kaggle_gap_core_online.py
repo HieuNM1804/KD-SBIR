@@ -204,6 +204,7 @@ required_paths = (
     project / "test" / "kaggle_gap_core_significance_sweep.py",
     project / "test" / "kaggle_cgrd_teacher_audit.py",
     project / "test" / "kaggle_cgrd_compare.py",
+    project / "test" / "kaggle_cgrd_sweep.py",
     project / "docs" / "gap_core_teacher_audit.md",
     project / "docs" / "gap_core_kd.md",
     project / "docs" / "cgrd.md",

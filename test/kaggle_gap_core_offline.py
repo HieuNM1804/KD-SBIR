@@ -101,6 +101,7 @@ required = (
     source_project / "test" / "kaggle_gap_core_significance_sweep.py",
     source_project / "test" / "kaggle_cgrd_teacher_audit.py",
     source_project / "test" / "kaggle_cgrd_compare.py",
+    source_project / "test" / "kaggle_cgrd_sweep.py",
     source_project / "docs" / "gap_core_teacher_audit.md",
     source_project / "docs" / "gap_core_kd.md",
     source_project / "docs" / "cgrd.md",
@@ -229,7 +230,7 @@ for cache_name in (CGRD_CACHE_NAME, GAP_CACHE_NAME, CORE_CACHE_NAME):
         restored_cache_names.append(cache_name)
         print("Restored teacher cache:", cache_target)
 if not restored_cache_names:
-    print("No compatible teacher cache attached; comparison will build v9 once.")
+    print("No compatible teacher cache attached; the next CGRD cell will build v9 once.")
 
 smoke_test = """
 import os
