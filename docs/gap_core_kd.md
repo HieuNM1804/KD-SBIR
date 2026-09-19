@@ -76,6 +76,9 @@ The initial weight is `lambda_gap_core=0.25`. Interpret the gradient ratio
 before tuning: an auxiliary/main ratio around 0.1--0.3 is the intended range.
 If it is much larger, lower the weight before running additional seeds.
 
+All follow-up runs pretrain the teacher prompt for one epoch. Every compared
+condition reuses the same resulting cache, so teacher cost is paid once.
+
 ## Cache
 
 Format v8 adds full-dataset common teacher features. If the format-v7 CoRe

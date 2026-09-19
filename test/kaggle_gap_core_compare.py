@@ -16,10 +16,10 @@ from pathlib import Path
 PROJECT = Path("/kaggle/working/KD-SBIR-AVKD")
 ROOT = "/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy"
 LEGACY_TEACHER_CACHE = Path(
-    "/kaggle/working/teacher_cache/sketchy2_core_teacher2_v7.pt"
+    "/kaggle/working/teacher_cache/sketchy2_core_teacher1_v7.pt"
 )
 TEACHER_CACHE = Path(
-    "/kaggle/working/teacher_cache/sketchy2_gap_core_teacher2_v8.pt"
+    "/kaggle/working/teacher_cache/sketchy2_gap_core_teacher1_v8.pt"
 )
 STAMP = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
 OUT = Path("/kaggle/working") / ("gap_core_sketchy2_comparison_" + STAMP)
@@ -86,7 +86,7 @@ shared = [
     "--prompt_depth",
     "12",
     "--teacher_pretrain_epochs",
-    "2",
+    "1",
     "--teacher_cache_path",
     str(TEACHER_CACHE),
     "--teacher_pretrain_batch_size",

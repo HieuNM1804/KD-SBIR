@@ -20,10 +20,10 @@ os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 PROJECT = Path("/kaggle/working/KD-SBIR-AVKD")
 ROOT = Path("/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy")
 LEGACY_TEACHER_CACHE = Path(
-    "/kaggle/working/teacher_cache/sketchy2_core_teacher2_v7.pt"
+    "/kaggle/working/teacher_cache/sketchy2_core_teacher1_v7.pt"
 )
 GAP_TEACHER_CACHE = Path(
-    "/kaggle/working/teacher_cache/sketchy2_gap_core_teacher2_v8.pt"
+    "/kaggle/working/teacher_cache/sketchy2_gap_core_teacher1_v8.pt"
 )
 TEACHER_CACHE = (
     LEGACY_TEACHER_CACHE
@@ -87,7 +87,7 @@ cache_command = [
     "--prompt_depth",
     "12",
     "--teacher_pretrain_epochs",
-    "2",
+    "1",
     "--teacher_cache_path",
     str(TEACHER_CACHE),
     "--teacher_pretrain_batch_size",

@@ -55,5 +55,6 @@ Run in this order:
 3. Run `test/kaggle_gap_core_teacher_audit.py` as one cell and send the emitted
    ZIP for analysis.
 
-An existing `sketchy2_core_teacher2_v7.pt` can be attached as a Kaggle input.
+Future runs use one teacher-pretraining epoch and the cache names
+`sketchy2_core_teacher1_v7.pt` or `sketchy2_gap_core_teacher1_v8.pt`.
 If absent, the audit prepares it once with the exact matched teacher settings.

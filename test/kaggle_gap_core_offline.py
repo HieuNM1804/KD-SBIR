@@ -20,8 +20,8 @@ EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
 WORKING_ROOT = Path("/kaggle/working")
 WORKING_PROJECT = WORKING_ROOT / "KD-SBIR-AVKD"
 SKETCHY_ROOT = Path("/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy")
-CORE_CACHE_NAME = "sketchy2_core_teacher2_v7.pt"
-GAP_CACHE_NAME = "sketchy2_gap_core_teacher2_v8.pt"
+CORE_CACHE_NAME = "sketchy2_core_teacher1_v7.pt"
+GAP_CACHE_NAME = "sketchy2_gap_core_teacher1_v8.pt"
 
 
 def file_sha256(path):
