@@ -107,7 +107,7 @@ def _teacher_training_config(args):
         "scheduler_step_size": args.teacher_scheduler_step_size,
         "scheduler_gamma": args.teacher_scheduler_gamma,
         "checkpoint_selection": "best_unseen_precision",
-        "seed": args.seed,
+        "seed": args.teacher_training_seed,
     }
 
 
@@ -499,13 +499,16 @@ class CustomCLIP(nn.Module):
             train_dataset,
             batch_size=cfg.teacher_pretrain_batch_size,
             shuffle=False,
-            sampler=WorkerInvariantSampler(train_dataset, cfg.seed),
+            sampler=WorkerInvariantSampler(
+                train_dataset,
+                cfg.teacher_training_seed,
+            ),
             drop_last=True,
             num_workers=workers,
             pin_memory=True,
             persistent_workers=workers > 0,
             prefetch_factor=4 if workers > 0 else None,
-            generator=torch.Generator().manual_seed(cfg.seed),
+            generator=torch.Generator().manual_seed(cfg.teacher_training_seed),
         )
         optimizer = torch.optim.SGD(
             self.teacher_prompts.parameters(),

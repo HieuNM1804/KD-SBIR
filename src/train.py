@@ -197,6 +197,15 @@ if __name__ == "__main__":
         help="Teacher-prompt initialization seed; defaults to --seed.",
     )
     parser.add_argument(
+        "--teacher_training_seed",
+        type=int,
+        default=42,
+        help=(
+            "Fixed seed for teacher prompt pretraining and cache identity. "
+            "Keep this fixed while varying --seed for student replications."
+        ),
+    )
+    parser.add_argument(
         "--teacher_prompt_gradient_checkpointing",
         action="store_true",
         default=True,

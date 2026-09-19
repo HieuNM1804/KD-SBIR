@@ -102,3 +102,13 @@ settings, and then runs shuffled and reversed controls for the selected best
 configuration. Checkpoint creation is disabled. The ZIP contains compact
 metrics for every trial and detailed curves/logs only for main, best verified,
 and its controls.
+
+For broader method validation, use
+`test/kaggle_gap_core_significance_sweep.py`. It first tunes the main model on
+student seed 42 over domain/modality weights, prompt count/depth, learning rate,
+and weight decay without observing Gap-CoRe. It then tunes Gap-CoRe only on the
+two selected main configurations. After locking all hyperparameters, it runs
+paired main/verified/shuffled confirmation on student seeds 43--47 with a fixed
+teacher trained at seed 42. The primary claim requires positive selected-mAP
+deltas, 95% paired t intervals above zero, and exact one-sided sign-flip
+`p <= 0.05` against both main and shuffled. No checkpoint is retained.
