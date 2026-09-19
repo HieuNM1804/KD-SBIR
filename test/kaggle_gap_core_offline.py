@@ -12,7 +12,7 @@ from pathlib import Path
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/gap-core-teacher-audit"
-EXPECTED_COMMIT = "5975d0cbc8add11221cf1b0e6b3d3daeedab3967"
+EXPECTED_COMMIT = "3272d840bdedc13e214e8901069fe346d34f7bec"
 EXPECTED_TASK = "gap_core_distillation"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
