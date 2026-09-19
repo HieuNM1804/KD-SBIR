@@ -136,6 +136,12 @@ if cache_code != 0 or not TEACHER_CACHE.is_file():
     print("Failure diagnostics ZIP:", archive)
     raise RuntimeError("Teacher cache preparation failed; inspect teacher_cache.log.")
 
+# The cache command uses PROJECT as its subprocess cwd, which does not change
+# the notebook kernel cwd. Make the repository package importable explicitly.
+os.chdir(PROJECT)
+if str(PROJECT) not in sys.path:
+    sys.path.insert(0, str(PROJECT))
+
 import open_clip
 import torch
 from torch.nn import functional as F
