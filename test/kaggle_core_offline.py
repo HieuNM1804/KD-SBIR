@@ -12,7 +12,7 @@ from pathlib import Path
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/core-cross-modal-margin-kd"
-EXPECTED_COMMIT = "__CORE_COMMIT__"
+EXPECTED_COMMIT = "5e12c0d28c5e80dddd40f24671cb9087a51c7035"
 EXPECTED_TASK = "core_cross_modal_margin_distillation"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
