@@ -314,10 +314,10 @@ def launch(condition, configuration, retain_metrics=False):
         str(configuration["prompt_depth"]),
         "--lr",
         str(configuration["lr"]),
-            "--weight_decay",
-            str(configuration["weight_decay"]),
-            "--momentum",
-            str(configuration["momentum"]),
+        "--weight_decay",
+        str(configuration["weight_decay"]),
+        "--momentum",
+        str(configuration["momentum"]),
         "--seed",
         str(configuration["seed"]),
         "--lambda_domain",
@@ -474,13 +474,16 @@ matched_base_rows = {row["base_id"]: row for row, _ in base_results}
 
 
 # Stage B: tune Gap-CoRe only on the best base selected without using Gap loss.
+# The previous five-epoch seed-42 pilot put the useful region near lambda 0.5,
+# min_correction 0.05, while lambda 2--4 was usually harmful. Search the low
+# lambda region densely and retain 2.0 as a boundary check.
 gap_results = []
 for base_row, base_record in top_bases:
     base = dict(base_record["configuration"])
     for lambda_value, direction, minimum in itertools.product(
-        (0.5, 1.0, 2.0, 4.0, 8.0),
+        (0.25, 0.5, 0.75, 1.0, 1.5, 2.0),
         ("bidirectional", "sketch_to_photo"),
-        (0.0, 0.01, 0.02, 0.05),
+        (0.0, 0.01, 0.02, 0.035, 0.05),
     ):
         configuration = {
             **base,
@@ -519,7 +522,9 @@ gap_results.sort(
 )
 
 
-# Stage C: refine loss curvature and correction clipping around top two.
+# Stage C: refine loss curvature and correction clipping around the top three.
+# beta=0.02 produced the best previous pilot, so curvature is sampled more
+# densely around it. Each variant changes one loss-shape parameter at a time.
 refinement_results = []
 seen_gap_keys = set()
 gap_names = (
@@ -532,12 +537,12 @@ gap_names = (
 )
 for row, _ in gap_results:
     seen_gap_keys.add(tuple(row[name] for name in gap_names))
-for top_row, top_record in gap_results[:2]:
+for top_row, top_record in gap_results[:3]:
     base = dict(top_record["configuration"])
     variants = []
-    for beta in (0.02, 0.10):
+    for beta in (0.01, 0.02, 0.035, 0.075, 0.10):
         variants.append({**base, "huber_beta": beta})
-    for maximum in (0.15, 0.35):
+    for maximum in (0.10, 0.15, 0.20, 0.35):
         variants.append({**base, "max_weight": maximum})
     for configuration in variants:
         configuration["stage"] = "gap_refinement"
