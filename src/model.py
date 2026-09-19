@@ -1029,16 +1029,27 @@ class CustomCLIP(nn.Module):
         common_photo_features = None
         common_sketch_features = None
         if self.cfg.lambda_gap_core > 0:
-            common_photo_features = self.encode_student_image(
-                photo_tensor,
-                "photo",
-                prompt_mode="common",
-            )
-            common_sketch_features = self.encode_student_image(
-                sk_tensor,
-                "sketch",
-                prompt_mode="common",
-            )
+            def encode_common(current_images, modality):
+                return self.encode_student_image(
+                    current_images,
+                    modality,
+                    prompt_mode="common",
+                )
+
+            if torch.is_grad_enabled():
+                common_photo_features = checkpoint(
+                    lambda images: encode_common(images, "photo"),
+                    photo_tensor,
+                    use_reentrant=False,
+                )
+                common_sketch_features = checkpoint(
+                    lambda images: encode_common(images, "sketch"),
+                    sk_tensor,
+                    use_reentrant=False,
+                )
+            else:
+                common_photo_features = encode_common(photo_tensor, "photo")
+                common_sketch_features = encode_common(sk_tensor, "sketch")
         student_photo_text = (
             F.normalize(self.get_student_text_features("photo"), dim=-1)
             if self.photo_text_active
