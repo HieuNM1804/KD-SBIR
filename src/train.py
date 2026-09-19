@@ -9,13 +9,13 @@ import random
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
 from pytorch_lightning.loggers import TensorBoardLogger
+from torch.utils.data import DataLoader
 
-from src.dataset import TrainDataset, ValidDataset, WorkerInvariantSampler
 from src.data_config import UNSEEN_CLASSES
+from src.dataset import TrainDataset, ValidDataset, WorkerInvariantSampler
 from src.model import ZS_SBIR, default_teacher_cache_path
 
 
@@ -43,18 +43,18 @@ def seed_worker(_worker_id):
 
 def get_loaders(args):
     seed_everything(args.seed)
-    
+
     train_dataset = TrainDataset(args)
-    val_sketch = ValidDataset(args, mode='sketch')
+    val_sketch = ValidDataset(args, mode="sketch")
     val_photo = ValidDataset(args)
 
-    loader_kwargs = dict(
-        num_workers=args.workers,
-        pin_memory=True,
-        persistent_workers=args.workers > 0,
-        prefetch_factor=4 if args.workers > 0 else None,
-        worker_init_fn=seed_worker,
-    )
+    loader_kwargs = {
+        "num_workers": args.workers,
+        "pin_memory": True,
+        "persistent_workers": args.workers > 0,
+        "prefetch_factor": 4 if args.workers > 0 else None,
+        "worker_init_fn": seed_worker,
+    }
 
     train_loader = DataLoader(
         dataset=train_dataset,
@@ -119,9 +119,7 @@ if __name__ == "__main__":
         "--prompt_depth",
         type=int,
         default=12,
-        help=(
-            "Number of visual transformer layers receiving independent prompts."
-        ),
+        help=("Number of visual transformer layers receiving independent prompts."),
     )
     parser.add_argument(
         "--seed",
@@ -317,6 +315,63 @@ if __name__ == "__main__":
         help="Sketch-text KD temperature; defaults to the shared temperature.",
     )
     parser.add_argument(
+        "--lambda_core",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight for adaptation-induced cross-modal margin correction "
+            "distillation. Zero preserves the main baseline exactly."
+        ),
+    )
+    parser.add_argument(
+        "--core_teacher_temperature",
+        type=float,
+        default=0.05,
+        help="Temperature for teacher margin-correction probabilities.",
+    )
+    parser.add_argument(
+        "--core_student_temperature",
+        type=float,
+        default=0.05,
+        help="Temperature for student margin-correction probabilities.",
+    )
+    parser.add_argument(
+        "--core_hard_negative_topk",
+        type=int,
+        default=8,
+        help=(
+            "Search this many base-teacher hard negatives per query before "
+            "choosing the negative most suppressed by adaptation."
+        ),
+    )
+    parser.add_argument(
+        "--core_min_teacher_correction",
+        type=float,
+        default=0.0,
+        help="Minimum positive teacher margin correction retained for CoRe-KD.",
+    )
+    parser.add_argument(
+        "--core_max_weight",
+        type=float,
+        default=0.25,
+        help="Clip teacher correction weights before batch normalization.",
+    )
+    parser.add_argument(
+        "--core_control",
+        choices=("verified", "shuffled", "reversed"),
+        default="verified",
+        help=(
+            "Correction target: verified method, anchor-identity shuffle, or "
+            "sign reversal control."
+        ),
+    )
+    parser.add_argument(
+        "--core_direction",
+        choices=("bidirectional", "sketch_to_photo", "photo_to_sketch"),
+        default="bidirectional",
+        help="Cross-modal correction direction used for training.",
+    )
+    parser.add_argument(
         "--exp_name",
         type=str,
         default="teacher_visual_student_visual_only",
@@ -363,6 +418,23 @@ if __name__ == "__main__":
         parser.error("--lambda_domain must be non-negative.")
     if args.lambda_modality < 0:
         parser.error("--lambda_modality must be non-negative.")
+    if args.lambda_core < 0:
+        parser.error("--lambda_core must be non-negative.")
+    if args.lambda_core > 0 and args.teacher_pretrain_epochs <= 0:
+        parser.error(
+            "--lambda_core requires --teacher_pretrain_epochs greater than 0 "
+            "so T0 and adapted T1 are distinct."
+        )
+    if args.core_teacher_temperature <= 0:
+        parser.error("--core_teacher_temperature must be greater than 0.")
+    if args.core_student_temperature <= 0:
+        parser.error("--core_student_temperature must be greater than 0.")
+    if args.core_hard_negative_topk < 1:
+        parser.error("--core_hard_negative_topk must be at least 1.")
+    if args.core_min_teacher_correction < 0:
+        parser.error("--core_min_teacher_correction must be non-negative.")
+    if args.core_max_weight <= 0:
+        parser.error("--core_max_weight must be greater than 0.")
     if args.image_text_kd_temperature <= 0:
         parser.error("--image_text_kd_temperature must be greater than 0.")
     if args.photo_text_kd_temperature <= 0:

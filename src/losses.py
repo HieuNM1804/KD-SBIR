@@ -71,8 +71,8 @@ def image_text_kd_loss(
         reduction="batchmean",
     )
     student_to_teacher = (
-        student_probs * (student_log_probs - teacher_log_probs)
-    ).sum(dim=-1).mean()
+        (student_probs * (student_log_probs - teacher_log_probs)).sum(dim=-1).mean()
+    )
     return 0.5 * (teacher_to_student + student_to_teacher)
 
 
@@ -93,18 +93,219 @@ def batch_hard_teacher_triplet_loss(
 
     def one_direction(dist):
         valid_negative = negative_mask.any(dim=-1)
-        hardest_positive = dist.masked_fill(
-            ~positive_mask, -torch.inf
-        ).max(dim=-1).values
-        hardest_negative = dist.masked_fill(
-            ~negative_mask, torch.inf
-        ).min(dim=-1).values
+        hardest_positive = (
+            dist.masked_fill(~positive_mask, -torch.inf).max(dim=-1).values
+        )
+        hardest_negative = (
+            dist.masked_fill(~negative_mask, torch.inf).min(dim=-1).values
+        )
         losses = F.relu(hardest_positive - hardest_negative + margin)
         if valid_negative.any():
             return losses[valid_negative].mean()
         return dist.new_zeros(())
 
     return 0.5 * (one_direction(distance) + one_direction(distance.t()))
+
+
+def _controlled_teacher_delta(delta, control):
+    if control == "verified":
+        return delta
+    if control == "shuffled":
+        # A deterministic identity shuffle preserves the delta distribution but
+        # breaks the association between a correction and its anchor.
+        return delta.roll(shifts=1, dims=1)
+    if control == "reversed":
+        return -delta
+    raise ValueError(f"Unsupported CoRe control: {control}")
+
+
+def _margin_correction_direction(
+    prompted_query,
+    prompted_anchor,
+    base_student_query,
+    base_student_anchor,
+    adapted_teacher_query,
+    adapted_teacher_anchor,
+    base_teacher_query,
+    base_teacher_anchor,
+    query_labels,
+    anchor_labels,
+    teacher_temperature,
+    student_temperature,
+    hard_negative_topk,
+    minimum_teacher_correction,
+    maximum_weight,
+    control,
+):
+    """Distill beneficial changes in positive-negative retrieval margins."""
+    prompted_query = F.normalize(prompted_query.float(), dim=-1)
+    prompted_anchor = F.normalize(prompted_anchor.float(), dim=-1)
+    base_student_query = F.normalize(base_student_query.float(), dim=-1)
+    base_student_anchor = F.normalize(base_student_anchor.float(), dim=-1)
+    student_delta = (
+        prompted_query @ prompted_anchor.t()
+        - base_student_query @ base_student_anchor.t()
+    )
+
+    with torch.no_grad():
+        device = prompted_query.device
+        adapted_teacher_query = F.normalize(
+            adapted_teacher_query.to(device=device, dtype=torch.float32), dim=-1
+        )
+        adapted_teacher_anchor = F.normalize(
+            adapted_teacher_anchor.to(device=device, dtype=torch.float32), dim=-1
+        )
+        base_teacher_query = F.normalize(
+            base_teacher_query.to(device=device, dtype=torch.float32), dim=-1
+        )
+        base_teacher_anchor = F.normalize(
+            base_teacher_anchor.to(device=device, dtype=torch.float32), dim=-1
+        )
+        base_teacher_scores = base_teacher_query @ base_teacher_anchor.t()
+        teacher_delta = (
+            adapted_teacher_query @ adapted_teacher_anchor.t() - base_teacher_scores
+        )
+        teacher_delta = _controlled_teacher_delta(teacher_delta, control)
+
+        query_labels = query_labels.to(device)
+        anchor_labels = anchor_labels.to(device)
+        positive_mask = query_labels[:, None].eq(anchor_labels[None, :])
+        negative_mask = ~positive_mask
+        has_positive = positive_mask.any(dim=1)
+        has_negative = negative_mask.any(dim=1)
+
+        promoted_positive = teacher_delta.masked_fill(
+            ~positive_mask, -torch.inf
+        ).argmax(dim=1)
+
+        available_negatives = max(1, int(negative_mask.sum(dim=1).min().item()))
+        topk = min(hard_negative_topk, available_negatives)
+        hard_negative_indices = (
+            base_teacher_scores.masked_fill(~negative_mask, -torch.inf)
+            .topk(topk, dim=1)
+            .indices
+        )
+        hard_negative_deltas = teacher_delta.gather(1, hard_negative_indices)
+        suppressed_offset = hard_negative_deltas.argmin(dim=1, keepdim=True)
+        suppressed_negative = hard_negative_indices.gather(
+            1, suppressed_offset
+        ).squeeze(1)
+
+        row = torch.arange(len(query_labels), device=device)
+        positive_delta = teacher_delta[row, promoted_positive]
+        negative_delta = teacher_delta[row, suppressed_negative]
+        teacher_correction = positive_delta - negative_delta
+        valid = (
+            has_positive
+            & has_negative
+            & teacher_correction.gt(minimum_teacher_correction)
+        )
+
+    if not valid.any():
+        zero = student_delta.sum() * 0.0
+        return zero, {
+            "coverage": zero.detach(),
+            "teacher_correction": zero.detach(),
+            "student_correction": zero.detach(),
+            "promote": zero.detach(),
+            "suppress": zero.detach(),
+            "agreement": zero.detach(),
+        }
+
+    row = torch.arange(len(query_labels), device=student_delta.device)
+    student_correction = (
+        student_delta[row, promoted_positive] - student_delta[row, suppressed_negative]
+    )
+    teacher_target = torch.sigmoid(teacher_correction.detach() / teacher_temperature)
+    pair_loss = F.binary_cross_entropy_with_logits(
+        student_correction / student_temperature,
+        teacher_target,
+        reduction="none",
+    )
+    weights = teacher_correction.detach().clamp(min=0.0, max=maximum_weight)
+    valid_weights = weights[valid]
+    valid_weights = valid_weights / valid_weights.mean().clamp_min(1e-6)
+    loss = (pair_loss[valid] * valid_weights).mean()
+
+    valid_teacher = teacher_correction[valid]
+    valid_student = student_correction[valid]
+    return loss, {
+        "coverage": valid.float().mean(),
+        "teacher_correction": valid_teacher.mean(),
+        "student_correction": valid_student.detach().mean(),
+        "promote": positive_delta[valid].mean(),
+        "suppress": (-negative_delta[valid]).mean(),
+        "agreement": valid_student.detach().gt(0).float().mean(),
+    }
+
+
+def cross_modal_margin_correction_loss(
+    prompted_photo,
+    prompted_sketch,
+    base_student_photo,
+    base_student_sketch,
+    adapted_teacher_photo,
+    adapted_teacher_sketch,
+    base_teacher_photo,
+    base_teacher_sketch,
+    labels,
+    teacher_temperature=0.05,
+    student_temperature=0.05,
+    hard_negative_topk=8,
+    minimum_teacher_correction=0.0,
+    maximum_weight=0.25,
+    control="verified",
+    direction="bidirectional",
+):
+    """Transfer adaptation-induced margin corrections in both modalities."""
+    common = {
+        "query_labels": labels,
+        "anchor_labels": labels,
+        "teacher_temperature": teacher_temperature,
+        "student_temperature": student_temperature,
+        "hard_negative_topk": hard_negative_topk,
+        "minimum_teacher_correction": minimum_teacher_correction,
+        "maximum_weight": maximum_weight,
+        "control": control,
+    }
+    results = []
+    if direction in {"bidirectional", "sketch_to_photo"}:
+        results.append(
+            _margin_correction_direction(
+                prompted_sketch,
+                prompted_photo,
+                base_student_sketch,
+                base_student_photo,
+                adapted_teacher_sketch,
+                adapted_teacher_photo,
+                base_teacher_sketch,
+                base_teacher_photo,
+                **common,
+            )
+        )
+    if direction in {"bidirectional", "photo_to_sketch"}:
+        results.append(
+            _margin_correction_direction(
+                prompted_photo,
+                prompted_sketch,
+                base_student_photo,
+                base_student_sketch,
+                adapted_teacher_photo,
+                adapted_teacher_sketch,
+                base_teacher_photo,
+                base_teacher_sketch,
+                **common,
+            )
+        )
+    if not results:
+        raise ValueError(f"Unsupported CoRe direction: {direction}")
+
+    loss = torch.stack([value[0] for value in results]).mean()
+    diagnostics = {
+        name: torch.stack([value[1][name] for value in results]).mean()
+        for name in results[0][1]
+    }
+    return loss, diagnostics
 
 
 def loss_fn(args, features):
@@ -118,6 +319,11 @@ def loss_fn(args, features):
         student_photo_text,
         teacher_sketch_text,
         teacher_photo_text,
+        base_teacher_photo,
+        base_teacher_sketch,
+        base_student_photo,
+        base_student_sketch,
+        labels,
     ) = features
 
     zero = torch.zeros((), device=photo_features.device)
@@ -151,11 +357,43 @@ def loss_fn(args, features):
         )
     modality_loss = photo_text_kd + sketch_text_kd
 
+    core_loss = zero
+    core_diagnostics = {
+        "coverage": zero,
+        "teacher_correction": zero,
+        "student_correction": zero,
+        "promote": zero,
+        "suppress": zero,
+        "agreement": zero,
+    }
+    if teacher_active and args.lambda_core > 0:
+        core_loss, core_diagnostics = cross_modal_margin_correction_loss(
+            prompted_photo=photo_features,
+            prompted_sketch=sketch_features,
+            base_student_photo=base_student_photo,
+            base_student_sketch=base_student_sketch,
+            adapted_teacher_photo=teacher_photo_features,
+            adapted_teacher_sketch=teacher_sketch_features,
+            base_teacher_photo=base_teacher_photo,
+            base_teacher_sketch=base_teacher_sketch,
+            labels=labels,
+            teacher_temperature=args.core_teacher_temperature,
+            student_temperature=args.core_student_temperature,
+            hard_negative_topk=args.core_hard_negative_topk,
+            minimum_teacher_correction=args.core_min_teacher_correction,
+            maximum_weight=args.core_max_weight,
+            control=args.core_control,
+            direction=args.core_direction,
+        )
+
     total_loss = (
         args.lambda_domain * domain_loss
         + args.lambda_modality * modality_loss
+        + args.lambda_core * core_loss
     )
     return total_loss, {
         "domain_kd": domain_loss,
         "modality_kd": modality_loss,
+        "core_kd": core_loss,
+        **{f"core_{name}": value for name, value in core_diagnostics.items()},
     }

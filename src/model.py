@@ -3,17 +3,17 @@ import json
 import os
 from pathlib import Path
 
-import torch
-import torch.nn as nn
+import open_clip
 import pytorch_lightning as pl
+import torch
+from torch import nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
+from torch.utils.data import DataLoader
 from torchmetrics.functional.retrieval import (
     retrieval_average_precision,
     retrieval_precision,
 )
-import open_clip
-from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from clip import clip
@@ -36,7 +36,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DFN5B_MODEL = "ViT-H-14-quickgelu"
 DFN5B_PRETRAINED = "dfn5b"
 DFN5B_OUTPUT_DIM = 1024
-TEACHER_CACHE_FORMAT_VERSION = 6
+TEACHER_CACHE_FORMAT_VERSION = 7
 
 
 def _retrieval_metrics(
@@ -58,9 +58,7 @@ def _retrieval_metrics(
         p_k = 200 if dataset == "quickdraw" else 100
 
     for index, query_feature in enumerate(query_features):
-        cosine = F.cosine_similarity(
-            query_feature.unsqueeze(0), gallery_features
-        ).cpu()
+        cosine = F.cosine_similarity(query_feature.unsqueeze(0), gallery_features).cpu()
         score = ((cosine + 1.0) * 0.5).clamp(
             min=torch.finfo(cosine.dtype).eps,
             max=1.0,
@@ -90,6 +88,7 @@ def _teacher_training_config(args):
         "teacher_pretrained": DFN5B_PRETRAINED,
         "teacher_output_dim": DFN5B_OUTPUT_DIM,
         "teacher_precision": "fp16",
+        "student_backbone": args.backbone,
         "teacher_n_ctx_visual": args.teacher_n_ctx_visual,
         "teacher_prompt_depth": args.teacher_prompt_depth,
         "teacher_prompt_std": args.teacher_prompt_std,
@@ -195,10 +194,7 @@ def _build_teacher_prompts(args, teacher):
 
 def _load_teacher(args):
     if _persistent_teacher_cache_available(args):
-        print(
-            "[Teacher Cache] persistent cache found; "
-            "skipping DFN5B loading."
-        )
+        print("[Teacher Cache] persistent cache found; skipping DFN5B loading.")
         return None
 
     if (
@@ -297,12 +293,10 @@ class CustomCLIP(nn.Module):
             prompt_depth,
         )
         photo_texts = [
-            f"a photo of a {name.replace('_', ' ')}."
-            for name in self.classnames
+            f"a photo of a {name.replace('_', ' ')}." for name in self.classnames
         ]
         sketch_texts = [
-            f"a sketch of a {name.replace('_', ' ')}."
-            for name in self.classnames
+            f"a sketch of a {name.replace('_', ' ')}." for name in self.classnames
         ]
         self.register_buffer(
             "_student_photo_tokens",
@@ -351,6 +345,13 @@ class CustomCLIP(nn.Module):
             f"lambda={cfg.lambda_modality}, "
             f"photo_temperature={cfg.photo_text_kd_temperature}, "
             f"sketch_temperature={cfg.sketch_text_kd_temperature}"
+        )
+        print(
+            "[CoRe-KD] adaptation-induced cross-modal margin correction -> "
+            f"lambda={cfg.lambda_core}, control={cfg.core_control}, "
+            f"direction={cfg.core_direction}, "
+            f"teacher_temperature={cfg.core_teacher_temperature}, "
+            f"student_temperature={cfg.core_student_temperature}"
         )
 
     @staticmethod
@@ -401,6 +402,10 @@ class CustomCLIP(nn.Module):
         required_tensors = (
             "teacher_sketch_features",
             "teacher_photo_features",
+            "base_teacher_sketch_features",
+            "base_teacher_photo_features",
+            "base_student_sketch_features",
+            "base_student_photo_features",
             "teacher_sketch_text",
             "teacher_photo_text",
         )
@@ -421,6 +426,12 @@ class CustomCLIP(nn.Module):
             payload["teacher_sketch_features"],
             payload["teacher_photo_features"],
         )
+        train_dataset.set_core_features(
+            payload["base_teacher_sketch_features"],
+            payload["base_teacher_photo_features"],
+            payload["base_student_sketch_features"],
+            payload["base_student_photo_features"],
+        )
         self._teacher_sketch_text = payload["teacher_sketch_text"]
         self._teacher_photo_text = payload["teacher_photo_text"]
         self.teacher_active = True
@@ -439,10 +450,7 @@ class CustomCLIP(nn.Module):
         def encode(current_images):
             return self.teacher_prompts(current_images, modality)
 
-        if (
-            self.cfg.teacher_prompt_gradient_checkpointing
-            and torch.is_grad_enabled()
-        ):
+        if self.cfg.teacher_prompt_gradient_checkpointing and torch.is_grad_enabled():
             return checkpoint(encode, images, use_reentrant=False)
         return encode(images)
 
@@ -456,8 +464,7 @@ class CustomCLIP(nn.Module):
     ):
         if self.teacher_prompts is None:
             raise RuntimeError(
-                "Teacher prompt pretraining requires "
-                "teacher_pretrain_epochs > 0."
+                "Teacher prompt pretraining requires teacher_pretrain_epochs > 0."
             )
 
         cfg = self.cfg
@@ -502,13 +509,12 @@ class CustomCLIP(nn.Module):
             batches = tqdm(
                 loader,
                 desc=(
-                    "Teacher prompt pretrain "
-                    f"{epoch + 1}/{cfg.teacher_pretrain_epochs}"
+                    f"Teacher prompt pretrain {epoch + 1}/{cfg.teacher_pretrain_epochs}"
                 ),
                 disable=not show_progress,
             )
             with torch.enable_grad():
-                for photo, sketch, _, _, labels in batches:
+                for photo, sketch, *_, labels in batches:
                     photo = photo.to(
                         teacher_device, dtype=teacher_dtype, non_blocking=True
                     )
@@ -521,12 +527,8 @@ class CustomCLIP(nn.Module):
                         dtype=torch.float16,
                         enabled=teacher_device.type == "cuda",
                     ):
-                        photo_features = self._encode_teacher_image(
-                            photo, "photo"
-                        )
-                        sketch_features = self._encode_teacher_image(
-                            sketch, "sketch"
-                        )
+                        photo_features = self._encode_teacher_image(photo, "photo")
+                        sketch_features = self._encode_teacher_image(sketch, "sketch")
                         retrieval = batch_hard_teacher_triplet_loss(
                             sketch_features,
                             photo_features,
@@ -547,9 +549,7 @@ class CustomCLIP(nn.Module):
                         )
             scheduler.step()
             if steps == 0:
-                raise RuntimeError(
-                    "Teacher pretraining produced no complete batches."
-                )
+                raise RuntimeError("Teacher pretraining produced no complete batches.")
             print(
                 f"[Teacher Pretrain] epoch={epoch + 1}, "
                 f"retrieval={retrieval_total / steps:.6f}"
@@ -606,19 +606,13 @@ class CustomCLIP(nn.Module):
                     dtype=teacher_dtype,
                     non_blocking=True,
                 )
-                current_features = self._encode_teacher_image(
-                    images, modality
-                )
+                current_features = self._encode_teacher_image(images, modality)
                 features.append(current_features.float().cpu())
                 labels.append(current_labels.cpu())
             return torch.cat(features), torch.cat(labels)
 
-        sketch_features, sketch_labels = encode_loader(
-            val_sketch_loader, "sketch"
-        )
-        photo_features, photo_labels = encode_loader(
-            val_photo_loader, "photo"
-        )
+        sketch_features, sketch_labels = encode_loader(val_sketch_loader, "sketch")
+        photo_features, photo_labels = encode_loader(val_photo_loader, "photo")
         mean_ap, precision, map_k, p_k = _retrieval_metrics(
             sketch_features,
             photo_features,
@@ -642,6 +636,7 @@ class CustomCLIP(nn.Module):
         batch_size,
         workers,
         show_progress,
+        adapted=True,
     ):
         teacher_parameter = self._teacher.visual.conv1.weight
         teacher_device = teacher_parameter.device
@@ -664,14 +659,55 @@ class CustomCLIP(nn.Module):
         offset = 0
         batches = tqdm(
             loader,
-            desc=f"Caching {modality} teacher features",
+            desc=(
+                f"Caching {modality} "
+                f"{'adapted' if adapted else 'base'} teacher features"
+            ),
             disable=not show_progress,
         )
         for images in batches:
-            images = images.to(
-                teacher_device, dtype=teacher_dtype, non_blocking=True
-            )
-            features = self._encode_teacher_image(images, modality)
+            images = images.to(teacher_device, dtype=teacher_dtype, non_blocking=True)
+            if adapted:
+                features = self._encode_teacher_image(images, modality)
+            else:
+                features = self._teacher.encode_image(images)
+            end = offset + len(features)
+            output[offset:end].copy_(features.to(dtype=torch.float16).cpu())
+            offset = end
+        return output
+
+    @torch.no_grad()
+    def _materialize_base_student_features(
+        self,
+        paths,
+        modality,
+        batch_size,
+        workers,
+        show_progress,
+    ):
+        dataset = TeacherFeatureDataset(paths, self.cfg.max_size)
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=workers,
+            pin_memory=True,
+            persistent_workers=False,
+            prefetch_factor=4 if workers > 0 else None,
+        )
+        student_device = device
+        self.clip_model.to(student_device)
+        output_dim = self.clip_model.visual.output_dim
+        output = torch.empty(len(paths), output_dim, dtype=torch.float16)
+        offset = 0
+        batches = tqdm(
+            loader,
+            desc=f"Caching {modality} base student features",
+            disable=not show_progress,
+        )
+        for images in batches:
+            images = images.to(student_device, dtype=self.dtype, non_blocking=True)
+            features = F.normalize(self.clip_model.encode_image(images).float(), dim=-1)
             end = offset + len(features)
             output[offset:end].copy_(features.to(dtype=torch.float16).cpu())
             offset = end
@@ -682,6 +718,10 @@ class CustomCLIP(nn.Module):
         train_dataset,
         sketch_features,
         photo_features,
+        base_teacher_sketch_features,
+        base_teacher_photo_features,
+        base_student_sketch_features,
+        base_student_photo_features,
         prompt_state,
     ):
         if not self.cfg.teacher_cache_path:
@@ -694,6 +734,10 @@ class CustomCLIP(nn.Module):
             "metadata": self._teacher_cache_metadata(train_dataset),
             "teacher_sketch_features": sketch_features.cpu(),
             "teacher_photo_features": photo_features.cpu(),
+            "base_teacher_sketch_features": base_teacher_sketch_features.cpu(),
+            "base_teacher_photo_features": base_teacher_photo_features.cpu(),
+            "base_student_sketch_features": base_student_sketch_features.cpu(),
+            "base_student_photo_features": base_student_photo_features.cpu(),
             "teacher_sketch_text": self._teacher_sketch_text.detach().cpu(),
             "teacher_photo_text": self._teacher_photo_text.detach().cpu(),
             "teacher_prompt_state_dict": prompt_state,
@@ -707,9 +751,7 @@ class CustomCLIP(nn.Module):
         torch.save(payload, temporary_path)
         os.replace(temporary_path, cache_path)
         cache_size_mb = cache_path.stat().st_size / 1024**2
-        print(
-            f"[Teacher Cache] saved {cache_path} ({cache_size_mb:.1f} MB)."
-        )
+        print(f"[Teacher Cache] saved {cache_path} ({cache_size_mb:.1f} MB).")
 
     def cache_teacher_features(
         self,
@@ -726,9 +768,8 @@ class CustomCLIP(nn.Module):
         if self._teacher is None:
             return
 
-        image_count = (
-            len(train_dataset.all_sketches_path)
-            + len(train_dataset.all_photo_paths)
+        image_count = len(train_dataset.all_sketches_path) + len(
+            train_dataset.all_photo_paths
         )
         cache_size_mb = (
             image_count
@@ -749,6 +790,23 @@ class CustomCLIP(nn.Module):
         if self.image_text_kd_active or self.cfg.teacher_pretrain_epochs > 0:
             self.get_teacher_text_features()
 
+        base_teacher_sketch_features = self._materialize_teacher_features(
+            train_dataset.all_sketches_path,
+            "sketch",
+            batch_size,
+            workers,
+            show_progress,
+            adapted=False,
+        )
+        base_teacher_photo_features = self._materialize_teacher_features(
+            train_dataset.all_photo_paths,
+            "photo",
+            batch_size,
+            workers,
+            show_progress,
+            adapted=False,
+        )
+
         sketch_features = self._materialize_teacher_features(
             train_dataset.all_sketches_path,
             "sketch",
@@ -765,17 +823,12 @@ class CustomCLIP(nn.Module):
         )
         train_dataset.set_teacher_features(sketch_features, photo_features)
 
+        prompt_state = None
         if self.cfg.teacher_pretrain_epochs > 0:
             prompt_state = {
                 key: value.detach().cpu()
                 for key, value in self.teacher_prompts.state_dict().items()
             }
-            self._save_persistent_teacher_cache(
-                train_dataset,
-                sketch_features,
-                photo_features,
-                prompt_state,
-            )
 
         teacher = self._teacher
         self.teacher_prompts = None
@@ -784,10 +837,46 @@ class CustomCLIP(nn.Module):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+        base_student_sketch_features = self._materialize_base_student_features(
+            train_dataset.all_sketches_path,
+            "sketch",
+            batch_size,
+            workers,
+            show_progress,
+        )
+        base_student_photo_features = self._materialize_base_student_features(
+            train_dataset.all_photo_paths,
+            "photo",
+            batch_size,
+            workers,
+            show_progress,
+        )
+        self.clip_model.to("cpu")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        train_dataset.set_core_features(
+            base_teacher_sketch_features,
+            base_teacher_photo_features,
+            base_student_sketch_features,
+            base_student_photo_features,
+        )
+
+        if self.cfg.teacher_pretrain_epochs > 0:
+            self._save_persistent_teacher_cache(
+                train_dataset,
+                sketch_features,
+                photo_features,
+                base_teacher_sketch_features,
+                base_teacher_photo_features,
+                base_student_sketch_features,
+                base_student_photo_features,
+                prompt_state,
+            )
+
         print(
-            "[Teacher Cache] materialized tuned seen-image features; "
-            f"images={image_count:,}, memory={cache_size_mb:.1f} MB. "
-            "DFN5B released."
+            "[Teacher Cache] materialized adapted/base teacher and base "
+            f"student features; images={image_count:,}, "
+            f"adapted_teacher_memory={cache_size_mb:.1f} MB. DFN5B released."
         )
 
     def train(self, mode=True):
@@ -802,17 +891,15 @@ class CustomCLIP(nn.Module):
             return self._teacher_sketch_text, self._teacher_photo_text
 
         sketch_texts = [
-            f"a sketch of a {name.replace('_', ' ')}."
-            for name in self.classnames
+            f"a sketch of a {name.replace('_', ' ')}." for name in self.classnames
         ]
         photo_texts = [
-            f"a photo of a {name.replace('_', ' ')}."
-            for name in self.classnames
+            f"a photo of a {name.replace('_', ' ')}." for name in self.classnames
         ]
         teacher_device = next(self._teacher.parameters()).device
-        tokens = self._teacher.text_tokenizer(
-            sketch_texts + photo_texts
-        ).to(teacher_device)
+        tokens = self._teacher.text_tokenizer(sketch_texts + photo_texts).to(
+            teacher_device
+        )
         with torch.no_grad():
             text_features = F.normalize(
                 self._teacher.encode_text(tokens).float(), dim=-1
@@ -856,9 +943,13 @@ class CustomCLIP(nn.Module):
         (
             photo_tensor,
             sk_tensor,
-            teacher_photo_base,
-            teacher_sketch_base,
-            _label,
+            teacher_photo_adapted,
+            teacher_sketch_adapted,
+            base_teacher_photo,
+            base_teacher_sketch,
+            base_student_photo,
+            base_student_sketch,
+            labels,
         ) = x
         photo_features = self.encode_student_image(photo_tensor, "photo")
         sketch_features = self.encode_student_image(sk_tensor, "sketch")
@@ -877,8 +968,8 @@ class CustomCLIP(nn.Module):
         teacher_sketch_text = None
         teacher_photo_text = None
         if self.teacher_active:
-            teacher_photo_features = teacher_photo_base
-            teacher_sketch_features = teacher_sketch_base
+            teacher_photo_features = teacher_photo_adapted
+            teacher_sketch_features = teacher_sketch_adapted
             if self.image_text_kd_active:
                 teacher_sketch_text, teacher_photo_text = (
                     self.get_teacher_text_features()
@@ -894,6 +985,11 @@ class CustomCLIP(nn.Module):
             student_photo_text,
             teacher_sketch_text,
             teacher_photo_text,
+            base_teacher_photo,
+            base_teacher_sketch,
+            base_student_photo,
+            base_student_sketch,
+            labels,
         )
 
     def extract_feature(self, image, modality):
@@ -937,7 +1033,7 @@ class ZS_SBIR(pl.LightningModule):
             workers,
             show_progress,
         )
-        
+
     def configure_optimizers(self):
         student_params = [
             parameter
@@ -970,7 +1066,7 @@ class ZS_SBIR(pl.LightningModule):
             f"weight_decay={self.args.weight_decay}, "
             f"trainable_params={trainable:,}"
         )
-        
+
         scheduler = torch.optim.lr_scheduler.StepLR(
             optimizer=optimizer,
             step_size=5,
@@ -981,14 +1077,15 @@ class ZS_SBIR(pl.LightningModule):
 
     def forward(self, data):
         return self.model(data)
-    
+
     def training_step(self, batch, batch_idx):
         features = self(batch)
         loss, loss_dict = loss_fn(self.args, features)
-        self.log('train_loss', loss, on_step=False, on_epoch=True)
+        self.log("train_loss", loss, on_step=False, on_epoch=True)
         bar_names = {
             "domain_kd": "DOMAIN",
             "modality_kd": "MODALITY",
+            "core_kd": "CORE",
         }
         for key, bar_name in bar_names.items():
             self.log(
@@ -998,8 +1095,17 @@ class ZS_SBIR(pl.LightningModule):
                 on_epoch=False,
                 prog_bar=True,
             )
+        for key in (
+            "core_coverage",
+            "core_teacher_correction",
+            "core_student_correction",
+            "core_promote",
+            "core_suppress",
+            "core_agreement",
+        ):
+            self.log(key, loss_dict[key], on_step=False, on_epoch=True)
         return loss
-    
+
     def validation_step(self, batch, batch_idx, dataloader_idx):
         image_tensor, label = batch
         if dataloader_idx == 0:

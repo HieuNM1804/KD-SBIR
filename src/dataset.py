@@ -1,10 +1,12 @@
-import os
 import glob
 import hashlib
+import os
+
 import numpy as np
 import torch
-from torchvision import transforms
 from PIL import Image
+from torchvision import transforms
+
 from src.data_config import UNSEEN_CLASSES
 
 CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073]
@@ -13,7 +15,7 @@ CLIP_STD = [0.26862954, 0.26130258, 0.27577711]
 
 def sample_seed(global_seed, epoch, index):
     """Stable seed that does not depend on which DataLoader worker gets a sample."""
-    key = f"{global_seed}:{epoch}:{index}".encode("utf-8")
+    key = f"{global_seed}:{epoch}:{index}".encode()
     digest = hashlib.blake2b(key, digest_size=8).digest()
     return int.from_bytes(digest, "little") & ((1 << 63) - 1)
 
@@ -38,11 +40,13 @@ class WorkerInvariantSampler(torch.utils.data.Sampler):
 
 
 def normal_transform(size=224):
-    return transforms.Compose([
-        transforms.Resize((size, size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
-    ])
+    return transforms.Compose(
+        [
+            transforms.Resize((size, size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
+        ]
+    )
 
 
 class TrainDataset(torch.utils.data.Dataset):
@@ -63,6 +67,10 @@ class TrainDataset(torch.utils.data.Dataset):
         self.photo_path_to_index = {}
         self.teacher_sketch_features = None
         self.teacher_photo_features = None
+        self.base_teacher_sketch_features = None
+        self.base_teacher_photo_features = None
+        self.base_student_sketch_features = None
+        self.base_student_photo_features = None
 
         for category in self.all_categories:
             sketch_paths = sorted(
@@ -85,9 +93,30 @@ class TrainDataset(torch.utils.data.Dataset):
         self.teacher_sketch_features = sketch_features
         self.teacher_photo_features = photo_features
 
+    def set_core_features(
+        self,
+        base_teacher_sketch_features,
+        base_teacher_photo_features,
+        base_student_sketch_features,
+        base_student_photo_features,
+    ):
+        """Attach frozen base-model features used by CoRe-KD."""
+        expected = (
+            (base_teacher_sketch_features, len(self.all_sketches_path)),
+            (base_teacher_photo_features, len(self.all_photo_paths)),
+            (base_student_sketch_features, len(self.all_sketches_path)),
+            (base_student_photo_features, len(self.all_photo_paths)),
+        )
+        if any(len(features) != count for features, count in expected):
+            raise ValueError("CoRe feature cache has the wrong length.")
+        self.base_teacher_sketch_features = base_teacher_sketch_features
+        self.base_teacher_photo_features = base_teacher_photo_features
+        self.base_student_sketch_features = base_student_sketch_features
+        self.base_student_photo_features = base_student_photo_features
+
     def __len__(self):
         return len(self.all_sketches_path)
-        
+
     def __getitem__(self, sample_key):
         if isinstance(sample_key, tuple):
             epoch, index = sample_key
@@ -110,17 +139,38 @@ class TrainDataset(torch.utils.data.Dataset):
         if self.teacher_sketch_features is None:
             teacher_sketch_feature = torch.empty(0)
             teacher_photo_feature = torch.empty(0)
+            base_teacher_sketch_feature = torch.empty(0)
+            base_teacher_photo_feature = torch.empty(0)
+            base_student_sketch_feature = torch.empty(0)
+            base_student_photo_feature = torch.empty(0)
         else:
             teacher_sketch_feature = self.teacher_sketch_features[index]
-            teacher_photo_feature = self.teacher_photo_features[
-                self.photo_path_to_index[img_path]
-            ]
+            photo_index = self.photo_path_to_index[img_path]
+            teacher_photo_feature = self.teacher_photo_features[photo_index]
+            if self.base_teacher_sketch_features is None:
+                base_teacher_sketch_feature = torch.empty(0)
+                base_teacher_photo_feature = torch.empty(0)
+                base_student_sketch_feature = torch.empty(0)
+                base_student_photo_feature = torch.empty(0)
+            else:
+                base_teacher_sketch_feature = self.base_teacher_sketch_features[index]
+                base_teacher_photo_feature = self.base_teacher_photo_features[
+                    photo_index
+                ]
+                base_student_sketch_feature = self.base_student_sketch_features[index]
+                base_student_photo_feature = self.base_student_photo_features[
+                    photo_index
+                ]
 
         return (
             img_tensor,
             sk_tensor,
             teacher_photo_feature,
             teacher_sketch_feature,
+            base_teacher_photo_feature,
+            base_teacher_sketch_feature,
+            base_student_photo_feature,
+            base_student_sketch_feature,
             self.category_to_label[category],
         )
 
@@ -148,9 +198,7 @@ class ValidDataset(torch.utils.data.Dataset):
 
         unseen_paths = []
         for category in self.unseen_classes:
-            paths = glob.glob(
-                os.path.join(args.root, mode, category, "*")
-            )
+            paths = glob.glob(os.path.join(args.root, mode, category, "*"))
             unseen_paths.extend(sorted(paths))
 
         self.paths = unseen_paths
@@ -163,7 +211,7 @@ class ValidDataset(torch.utils.data.Dataset):
         image_tensor = self.transform(image)
 
         return image_tensor, self.unseen_classes.index(category)
-    
+
     def __len__(self):
         return len(self.paths)
 
