@@ -12,7 +12,7 @@ from pathlib import Path
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/gap-core-teacher-audit"
-EXPECTED_COMMIT = "bb1c2bc685cae5545c61afb48006da240a03803f"
+EXPECTED_COMMIT = "baf27a963408812524be17fb1451ac05884762f4"
 EXPECTED_TASK = "gap_core_distillation"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
@@ -97,6 +97,7 @@ required = (
     source_project / "test" / "kaggle_gap_core_teacher_audit.py",
     source_project / "test" / "kaggle_gap_core_compare.py",
     source_project / "test" / "kaggle_gap_core_sweep.py",
+    source_project / "test" / "kaggle_gap_core_significance_sweep.py",
     source_project / "docs" / "gap_core_teacher_audit.md",
     source_project / "docs" / "gap_core_kd.md",
     dfn_source,
@@ -247,4 +248,4 @@ print("OFFLINE GAP-CORE SETUP COMPLETE")
 print("=" * 70)
 print("Project:", WORKING_PROJECT)
 print("Commit:", actual_commit)
-print("Next: run test/kaggle_gap_core_sweep.py as one notebook cell.")
+print("Next: run test/kaggle_gap_core_significance_sweep.py as one notebook cell.")
