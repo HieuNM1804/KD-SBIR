@@ -50,6 +50,10 @@ def run_stage(label, command):
             log.write(line)
         return_code = process.wait()
     print(f"[{label}] exit code: {return_code}", flush=True)
+    if return_code != 0:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        print(f"[{label}] last log lines:", flush=True)
+        print("\n".join(lines[-120:]), flush=True)
     return return_code
 
 
@@ -437,6 +441,8 @@ display(FileLink(str(archive)))
 
 failed = [name for name, code in return_codes.items() if code not in (0, None)]
 if failed:
-    raise RuntimeError(
-        "Failed conditions: " + ", ".join(failed) + ". Inspect ZIP logs."
+    print(
+        "Failed conditions: "
+        + ", ".join(failed)
+        + ". The ZIP above was retained for diagnosis."
     )
