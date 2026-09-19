@@ -33,10 +33,26 @@ class ModalityVisualPrompts(nn.Module):
                 )
             self.prompts[modality] = layer_prompts
 
-    def for_layer(self, modality, layer_index, batch_size, dtype, device):
+    def for_layer(
+        self,
+        modality,
+        layer_index,
+        batch_size,
+        dtype,
+        device,
+        prompt_mode="full",
+    ):
         if modality not in self._MODALITIES:
             raise ValueError(f"Unsupported teacher modality: {modality}")
-        prompt = self.prompts[modality][layer_index]
+        if prompt_mode == "full":
+            prompt = self.prompts[modality][layer_index]
+        elif prompt_mode == "common":
+            prompt = 0.5 * (
+                self.prompts["photo"][layer_index]
+                + self.prompts["sketch"][layer_index]
+            )
+        else:
+            raise ValueError(f"Unsupported teacher prompt mode: {prompt_mode}")
         return prompt.to(device=device, dtype=dtype).unsqueeze(0).expand(
             batch_size, -1, -1
         )
@@ -75,7 +91,7 @@ class TeacherPromptController(nn.Module):
     def trainable_parameter_count(self):
         return sum(parameter.numel() for parameter in self.parameters())
 
-    def forward(self, images, modality):
+    def forward(self, images, modality, prompt_mode="full"):
         visual = self._visual
         x = visual.conv1(images)
         x = x.reshape(x.shape[0], x.shape[1], -1).permute(0, 2, 1)
@@ -91,6 +107,7 @@ class TeacherPromptController(nn.Module):
             batch_size=x.shape[0],
             dtype=x.dtype,
             device=x.device,
+            prompt_mode=prompt_mode,
         )
         x = visual.ln_pre(torch.cat((x, prompt), dim=1))
 
@@ -106,6 +123,7 @@ class TeacherPromptController(nn.Module):
                     batch_size=(x.shape[0] if batch_first else x.shape[1]),
                     dtype=x.dtype,
                     device=x.device,
+                    prompt_mode=prompt_mode,
                 )
                 if batch_first:
                     x = torch.cat((x[:, :-self.n_ctx], prompt), dim=1)

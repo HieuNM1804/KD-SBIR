@@ -269,6 +269,14 @@ if __name__ == "__main__":
         help="Ignore and overwrite an existing persistent teacher cache.",
     )
     parser.add_argument(
+        "--teacher_cache_only",
+        action="store_true",
+        help=(
+            "Prepare or validate the persistent teacher cache, then exit before "
+            "student training. Intended for teacher-only diagnostics."
+        ),
+    )
+    parser.add_argument(
         "--lambda_teacher_retrieval",
         type=float,
         default=1.5,
@@ -508,5 +516,9 @@ if __name__ == "__main__":
         workers=args.workers,
         show_progress=args.progress,
     )
+
+    if args.teacher_cache_only:
+        print("[Teacher Cache] cache-only stage complete; student training skipped.")
+        raise SystemExit(0)
 
     trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])

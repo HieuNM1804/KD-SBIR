@@ -443,12 +443,16 @@ class CustomCLIP(nn.Module):
             "skipped DFN5B encoding and teacher pretraining."
         )
 
-    def _encode_teacher_image(self, images, modality):
+    def _encode_teacher_image(self, images, modality, prompt_mode="full"):
         if self.teacher_prompts is None:
             return self._teacher.encode_image(images)
 
         def encode(current_images):
-            return self.teacher_prompts(current_images, modality)
+            return self.teacher_prompts(
+                current_images,
+                modality,
+                prompt_mode=prompt_mode,
+            )
 
         if self.cfg.teacher_prompt_gradient_checkpointing and torch.is_grad_enabled():
             return checkpoint(encode, images, use_reentrant=False)
