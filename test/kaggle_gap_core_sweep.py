@@ -30,6 +30,9 @@ WORK_LOGS = OUT / "work_logs"
 OUT.mkdir(parents=True, exist_ok=False)
 WORK_LOGS.mkdir(parents=True, exist_ok=False)
 TEACHER_CACHE.parent.mkdir(parents=True, exist_ok=True)
+TRAIN_SUPPORTS_NO_CHECKPOINTS = "--no_checkpoints" in (
+    PROJECT / "src" / "train.py"
+).read_text(encoding="utf-8")
 
 
 def safe_name(value):
@@ -221,8 +224,15 @@ shared = [
     "--lambda_core",
     "0.0",
     "--no_progress",
-    "--no_checkpoints",
 ]
+if TRAIN_SUPPORTS_NO_CHECKPOINTS:
+    shared.append("--no_checkpoints")
+else:
+    print(
+        "[Compatibility] source lacks --no_checkpoints; weights will be "
+        "deleted immediately after every run.",
+        flush=True,
+    )
 
 
 if TEACHER_CACHE.is_file():
@@ -318,6 +328,15 @@ def launch(condition, configuration):
         code,
         configuration,
     )
+    checkpoint_directory = PROJECT / "saved_models" / run_name
+    checkpoint_bytes_removed = 0
+    if checkpoint_directory.is_dir():
+        checkpoint_bytes_removed = sum(
+            path.stat().st_size
+            for path in checkpoint_directory.rglob("*")
+            if path.is_file()
+        )
+        shutil.rmtree(checkpoint_directory)
     record = {
         "condition": condition,
         "run": run_name,
@@ -326,6 +345,7 @@ def launch(condition, configuration):
         "return_code": code,
         "log_path": str(log_path),
         "version": str(version) if version is not None else None,
+        "checkpoint_bytes_removed": checkpoint_bytes_removed,
     }
     all_runs.append(record)
     all_rows.append(row)
@@ -606,7 +626,9 @@ manifest = {
     "seed": 42,
     "teacher_pretrain_epochs": 1,
     "teacher_cache": str(TEACHER_CACHE),
-    "checkpoint_creation_disabled": True,
+    "checkpoint_creation_disabled": TRAIN_SUPPORTS_NO_CHECKPOINTS,
+    "native_no_checkpoint_support": TRAIN_SUPPORTS_NO_CHECKPOINTS,
+    "fallback_checkpoint_cleanup": not TRAIN_SUPPORTS_NO_CHECKPOINTS,
     "checkpoint_files_found": [str(path) for path in checkpoint_files],
     "stage1_verified_runs": len(stage1_configurations),
     "stage2_verified_runs": len(stage2_configurations),
