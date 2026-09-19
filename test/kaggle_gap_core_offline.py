@@ -1,4 +1,4 @@
-"""Restore the Gap-CoRe teacher audit in an offline Kaggle GPU notebook."""
+"""Restore Gap-CoRe distillation in an offline Kaggle GPU notebook."""
 
 import glob
 import hashlib
@@ -12,8 +12,8 @@ from pathlib import Path
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/gap-core-teacher-audit"
-EXPECTED_COMMIT = "93ea7b799b06357a7175e9887c7bb21a6019edca"
-EXPECTED_TASK = "gap_core_teacher_audit"
+EXPECTED_COMMIT = "ee28e6655bf4fedefb42ff685fbe9e7ef7d2c4b5"
+EXPECTED_TASK = "gap_core_distillation"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
 
@@ -21,6 +21,7 @@ WORKING_ROOT = Path("/kaggle/working")
 WORKING_PROJECT = WORKING_ROOT / "KD-SBIR-AVKD"
 SKETCHY_ROOT = Path("/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy")
 CORE_CACHE_NAME = "sketchy2_core_teacher2_v7.pt"
+GAP_CACHE_NAME = "sketchy2_gap_core_teacher2_v8.pt"
 
 
 def file_sha256(path):
@@ -90,10 +91,13 @@ required = (
     source_project / "src" / "model.py",
     source_project / "src" / "teacher_prompts.py",
     source_project / "src" / "gap_core_audit.py",
+    source_project / "src" / "gap_core_cache.py",
     source_project / "src" / "train.py",
     source_project / "tests" / "test_gap_core_audit.py",
     source_project / "test" / "kaggle_gap_core_teacher_audit.py",
+    source_project / "test" / "kaggle_gap_core_compare.py",
     source_project / "docs" / "gap_core_teacher_audit.md",
+    source_project / "docs" / "gap_core_kd.md",
     dfn_source,
     student_source,
 )
@@ -194,27 +198,32 @@ for directory in (SKETCHY_ROOT / "sketch", SKETCHY_ROOT / "photo"):
     if not directory.is_dir():
         raise FileNotFoundError(f"Missing dataset directory: {directory}")
 
-# Format-v7 caches are optional. An old main cache is intentionally ignored.
-cache_target = WORKING_ROOT / "teacher_cache" / CORE_CACHE_NAME
-if not cache_target.is_file():
+# Format-v8 is preferred. Format-v7 can be upgraded without teacher pretraining.
+restored_cache_names = []
+for cache_name in (GAP_CACHE_NAME, CORE_CACHE_NAME):
+    cache_target = WORKING_ROOT / "teacher_cache" / cache_name
+    if cache_target.is_file():
+        restored_cache_names.append(cache_name)
+        continue
     candidates = []
     for pattern in (
-        f"/kaggle/input/*/teacher_cache/{CORE_CACHE_NAME}",
-        f"/kaggle/input/*/*/teacher_cache/{CORE_CACHE_NAME}",
-        f"/kaggle/input/*/*/*/teacher_cache/{CORE_CACHE_NAME}",
+        f"/kaggle/input/*/teacher_cache/{cache_name}",
+        f"/kaggle/input/*/*/teacher_cache/{cache_name}",
+        f"/kaggle/input/*/*/*/teacher_cache/{cache_name}",
     ):
         candidates.extend(Path(path) for path in glob.glob(pattern))
     candidates = sorted(set(candidates))
     if len(candidates) > 1:
         raise RuntimeError(
-            "Attach at most one CoRe cache:\n" + "\n".join(map(str, candidates))
+            f"Attach at most one {cache_name}:\n" + "\n".join(map(str, candidates))
         )
     if candidates:
         cache_target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(candidates[0], cache_target)
-        print("Restored CoRe cache:", cache_target)
-    else:
-        print("No format-v7 CoRe cache attached; comparison will build it once.")
+        restored_cache_names.append(cache_name)
+        print("Restored teacher cache:", cache_target)
+if not restored_cache_names:
+    print("No compatible teacher cache attached; comparison will build v8 once.")
 
 smoke_test = """
 import os
@@ -237,4 +246,4 @@ print("OFFLINE GAP-CORE SETUP COMPLETE")
 print("=" * 70)
 print("Project:", WORKING_PROJECT)
 print("Commit:", actual_commit)
-print("Next: run test/kaggle_gap_core_teacher_audit.py as one notebook cell.")
+print("Next: run test/kaggle_gap_core_compare.py as one notebook cell.")

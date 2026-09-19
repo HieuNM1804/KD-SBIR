@@ -1,4 +1,4 @@
-"""Build the pinned offline Kaggle bundle for the Gap-CoRe teacher audit.
+"""Build the pinned offline Kaggle bundle for Gap-CoRe distillation.
 
 Run this file as one Kaggle cell with Internet enabled. Save the notebook
 output, then attach that output to the offline GPU notebook.
@@ -26,8 +26,8 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 
 REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/gap-core-teacher-audit"
-COMMIT = "93ea7b799b06357a7175e9887c7bb21a6019edca"
-TASK = "gap_core_teacher_audit"
+COMMIT = "ee28e6655bf4fedefb42ff685fbe9e7ef7d2c4b5"
+TASK = "gap_core_distillation"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
 
@@ -195,10 +195,13 @@ required_paths = (
     project / "src" / "model.py",
     project / "src" / "teacher_prompts.py",
     project / "src" / "gap_core_audit.py",
+    project / "src" / "gap_core_cache.py",
     project / "src" / "train.py",
     project / "tests" / "test_gap_core_audit.py",
     project / "test" / "kaggle_gap_core_teacher_audit.py",
+    project / "test" / "kaggle_gap_core_compare.py",
     project / "docs" / "gap_core_teacher_audit.md",
+    project / "docs" / "gap_core_kd.md",
     dfn_target,
     student_target,
 )
