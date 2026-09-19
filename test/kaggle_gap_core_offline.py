@@ -1,4 +1,4 @@
-"""Restore Gap-CoRe distillation in an offline Kaggle GPU notebook."""
+"""Restore CGRD distillation in an offline Kaggle GPU notebook."""
 
 import glob
 import hashlib
@@ -12,8 +12,8 @@ from pathlib import Path
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/gap-core-teacher-audit"
-EXPECTED_COMMIT = "3272d840bdedc13e214e8901069fe346d34f7bec"
-EXPECTED_TASK = "gap_core_distillation"
+EXPECTED_COMMIT = "6c1a0926fcac31f500a7fa02352f0d3807bab1fa"
+EXPECTED_TASK = "cgrd_distillation"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
 
@@ -72,7 +72,7 @@ for manifest_path in manifest_paths:
 
 if len(matching) != 1:
     raise RuntimeError(
-        f"Expected exactly one Gap-CoRe bundle, found {len(matching)}.\n"
+        f"Expected exactly one CGRD bundle, found {len(matching)}.\n"
         + "\n".join(reports)
     )
 
@@ -99,8 +99,11 @@ required = (
     source_project / "test" / "kaggle_gap_core_compare.py",
     source_project / "test" / "kaggle_gap_core_sweep.py",
     source_project / "test" / "kaggle_gap_core_significance_sweep.py",
+    source_project / "test" / "kaggle_cgrd_teacher_audit.py",
+    source_project / "test" / "kaggle_cgrd_compare.py",
     source_project / "docs" / "gap_core_teacher_audit.md",
     source_project / "docs" / "gap_core_kd.md",
+    source_project / "docs" / "cgrd.md",
     dfn_source,
     student_source,
 )
@@ -235,7 +238,7 @@ import unittest
 suite = unittest.defaultTestLoader.discover('tests', pattern='test_gap_core_audit.py')
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 if not result.wasSuccessful():
-    raise SystemExit('Gap-CoRe smoke test failed')
+    raise SystemExit('CGRD smoke test failed')
 """
 subprocess.run(
     [sys.executable, "-c", smoke_test],
@@ -245,8 +248,8 @@ subprocess.run(
 )
 
 print("=" * 70)
-print("OFFLINE GAP-CORE SETUP COMPLETE")
+print("OFFLINE CGRD SETUP COMPLETE")
 print("=" * 70)
 print("Project:", WORKING_PROJECT)
 print("Commit:", actual_commit)
-print("Next: run test/kaggle_gap_core_significance_sweep.py as one notebook cell.")
+print("Next: run test/kaggle_cgrd_teacher_audit.py as one notebook cell.")

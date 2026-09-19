@@ -1,4 +1,4 @@
-"""Build the pinned offline Kaggle bundle for Gap-CoRe distillation.
+"""Build the pinned offline Kaggle bundle for CGRD distillation.
 
 Run this file as one Kaggle cell with Internet enabled. Save the notebook
 output, then attach that output to the offline GPU notebook.
@@ -16,7 +16,7 @@ from pathlib import Path
 WORKING = Path("/kaggle/working")
 BUNDLE = (
     WORKING
-    / ("gap_core_bundle_" + datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f"))
+    / ("cgrd_bundle_" + datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f"))
     / "offline_bundle"
 )
 WHEELS = BUNDLE / "wheels"
@@ -26,8 +26,8 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 
 REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/gap-core-teacher-audit"
-COMMIT = "3272d840bdedc13e214e8901069fe346d34f7bec"
-TASK = "gap_core_distillation"
+COMMIT = "6c1a0926fcac31f500a7fa02352f0d3807bab1fa"
+TASK = "cgrd_distillation"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
 
@@ -202,8 +202,11 @@ required_paths = (
     project / "test" / "kaggle_gap_core_compare.py",
     project / "test" / "kaggle_gap_core_sweep.py",
     project / "test" / "kaggle_gap_core_significance_sweep.py",
+    project / "test" / "kaggle_cgrd_teacher_audit.py",
+    project / "test" / "kaggle_cgrd_compare.py",
     project / "docs" / "gap_core_teacher_audit.md",
     project / "docs" / "gap_core_kd.md",
+    project / "docs" / "cgrd.md",
     dfn_target,
     student_target,
 )
@@ -238,7 +241,7 @@ manifest = {
 bundle_size = sum(path.stat().st_size for path in BUNDLE.rglob("*") if path.is_file())
 print("[6/6] Bundle validated")
 print("=" * 70)
-print("ONLINE GAP-CORE BUNDLE COMPLETE")
+print("ONLINE CGRD BUNDLE COMPLETE")
 print("=" * 70)
 print("Bundle:", BUNDLE)
 print("Branch:", BRANCH)
