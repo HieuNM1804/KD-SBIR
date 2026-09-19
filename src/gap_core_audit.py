@@ -150,7 +150,7 @@ def bootstrap_mean_interval(values, seed=42, samples=2000):
         "mean": float(values.mean()),
         "ci95_low": float(torch.quantile(means, 0.025)),
         "ci95_high": float(torch.quantile(means, 0.975)),
-        "samples": int(len(values)),
+        "samples": len(values),
     }
 
 
@@ -179,5 +179,171 @@ def summarize_gap_rows(rows, seed=42, bootstrap_samples=2000):
     useful_total = max(promote, 0.0) + max(suppress, 0.0)
     summary["positive_contribution_fraction"] = (
         max(promote, 0.0) / useful_total if useful_total > 0 else 0.0
+    )
+    return summary
+
+
+def directional_cgrd_rows(
+    full_queries,
+    common_queries,
+    swapped_queries,
+    query_labels,
+    full_gallery,
+    common_gallery,
+    swapped_gallery,
+    gallery_labels,
+    direction,
+    hard_negative_topk=8,
+):
+    """Measure two-sided prompt interventions on fixed common-state pairs."""
+    feature_sets = (
+        full_queries,
+        common_queries,
+        swapped_queries,
+        full_gallery,
+        common_gallery,
+        swapped_gallery,
+    )
+    (
+        full_queries,
+        common_queries,
+        swapped_queries,
+        full_gallery,
+        common_gallery,
+        swapped_gallery,
+    ) = tuple(_normalized(features) for features in feature_sets)
+    query_labels = query_labels.cpu()
+    gallery_labels = gallery_labels.cpu()
+    full_similarity = full_queries @ full_gallery.T
+    common_similarity = common_queries @ common_gallery.T
+    swapped_similarity = swapped_queries @ swapped_gallery.T
+
+    rows = []
+    for query_index in range(len(query_labels)):
+        positive_mask = gallery_labels.eq(query_labels[query_index])
+        negative_mask = ~positive_mask
+        if not positive_mask.any() or not negative_mask.any():
+            continue
+        positive_indices = positive_mask.nonzero(as_tuple=False).flatten()
+        negative_indices = negative_mask.nonzero(as_tuple=False).flatten()
+        positive_index = positive_indices[
+            common_similarity[query_index, positive_indices].argmax()
+        ]
+        topk = min(hard_negative_topk, len(negative_indices))
+        hard_order = common_similarity[query_index, negative_indices].topk(topk).indices
+        hard_negative_indices = negative_indices[hard_order]
+        for negative_rank, negative_index in enumerate(hard_negative_indices, start=1):
+            common_margin = (
+                common_similarity[query_index, positive_index]
+                - common_similarity[query_index, negative_index]
+            )
+            full_margin = (
+                full_similarity[query_index, positive_index]
+                - full_similarity[query_index, negative_index]
+            )
+            swapped_margin = (
+                swapped_similarity[query_index, positive_index]
+                - swapped_similarity[query_index, negative_index]
+            )
+            full_correction = full_margin - common_margin
+            swap_correction = common_margin - swapped_margin
+            rows.append(
+                {
+                    "direction": direction,
+                    "query_index": query_index,
+                    "label": int(query_labels[query_index]),
+                    "positive_index": int(positive_index),
+                    "negative_index": int(negative_index),
+                    "negative_rank": negative_rank,
+                    "full_margin": float(full_margin),
+                    "common_margin": float(common_margin),
+                    "swapped_margin": float(swapped_margin),
+                    "full_correction": float(full_correction),
+                    "swap_correction": float(swap_correction),
+                    "bottleneck_correction": float(
+                        torch.minimum(full_correction, swap_correction)
+                    ),
+                    "monotonic": int(full_correction > 0 and swap_correction > 0),
+                }
+            )
+    return rows
+
+
+def build_cgrd_audit_rows(
+    full_sketch,
+    common_sketch,
+    swapped_sketch,
+    sketch_labels,
+    full_photo,
+    common_photo,
+    swapped_photo,
+    photo_labels,
+    hard_negative_topk=8,
+):
+    rows = directional_cgrd_rows(
+        full_sketch,
+        common_sketch,
+        swapped_sketch,
+        sketch_labels,
+        full_photo,
+        common_photo,
+        swapped_photo,
+        photo_labels,
+        "sketch_to_photo",
+        hard_negative_topk,
+    )
+    rows.extend(
+        directional_cgrd_rows(
+            full_photo,
+            common_photo,
+            swapped_photo,
+            photo_labels,
+            full_sketch,
+            common_sketch,
+            swapped_sketch,
+            sketch_labels,
+            "photo_to_sketch",
+            hard_negative_topk,
+        )
+    )
+    return rows
+
+
+def summarize_cgrd_rows(rows, seed=42, bootstrap_samples=2000):
+    if not rows:
+        raise ValueError("CGRD audit produced no query-negative rows.")
+    grouped = {}
+    for row in rows:
+        key = (row["direction"], row["query_index"])
+        grouped.setdefault(key, []).append(row)
+    summary = {
+        "pairs": len(rows),
+        "queries": len(grouped),
+        "bootstrap_unit": "query",
+    }
+    for index, name in enumerate(
+        (
+            "full_correction",
+            "swap_correction",
+            "bottleneck_correction",
+            "monotonic",
+        )
+    ):
+        summary[name] = bootstrap_mean_interval(
+            [
+                sum(row[name] for row in query_rows) / len(query_rows)
+                for query_rows in grouped.values()
+            ],
+            seed=seed + index,
+            samples=bootstrap_samples,
+        )
+    per_query = [
+        sum(row["monotonic"] for row in query_rows) / len(query_rows)
+        for query_rows in grouped.values()
+    ]
+    summary["query_monotonic_fraction"] = bootstrap_mean_interval(
+        per_query,
+        seed=seed + 10,
+        samples=bootstrap_samples,
     )
     return summary

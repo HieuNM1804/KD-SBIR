@@ -1,4 +1,4 @@
-"""Upgrade a format-v7 CoRe teacher cache with common-prompt features."""
+"""Upgrade format-v7/v8 teacher caches with common and swapped prompt states."""
 
 import argparse
 import os
@@ -35,11 +35,13 @@ def _valid_destination(path):
         == TEACHER_CACHE_FORMAT_VERSION
         and "common_teacher_sketch_features" in payload
         and "common_teacher_photo_features" in payload
+        and "swapped_teacher_sketch_features" in payload
+        and "swapped_teacher_photo_features" in payload
     )
 
 
 @torch.no_grad()
-def _encode_common(
+def _encode_prompt_mode(
     controller,
     teacher,
     paths,
@@ -47,6 +49,7 @@ def _encode_common(
     max_size,
     batch_size,
     workers,
+    prompt_mode,
 ):
     dataset = TeacherFeatureDataset(paths, max_size)
     loader = DataLoader(
@@ -66,13 +69,16 @@ def _encode_common(
     last_percent = -10
     for images in loader:
         images = images.to(device=device, dtype=dtype, non_blocking=True)
-        features = controller(images, modality, prompt_mode="common")
+        features = controller(images, modality, prompt_mode=prompt_mode)
         end = offset + len(features)
         output[offset:end].copy_(features.to(dtype=torch.float16).cpu())
         offset = end
         percent = int(100 * offset / len(paths))
         if percent >= last_percent + 10 or percent == 100:
-            print(f"[Gap Cache] common {modality}: {percent}%", flush=True)
+            print(
+                f"[Gap Cache] {prompt_mode} {modality}: {percent}%",
+                flush=True,
+            )
             last_percent = percent
     return output
 
@@ -89,15 +95,16 @@ def upgrade_gap_core_cache(
     source = Path(source)
     destination = Path(destination)
     if _valid_destination(destination):
-        print("[Gap Cache] format-v8 cache already exists:", destination)
+        print("[Gap Cache] format-v9 cache already exists:", destination)
         return destination
     if not source.is_file():
-        raise FileNotFoundError(f"Legacy format-v7 cache is missing: {source}")
+        raise FileNotFoundError(f"Legacy format-v7/v8 cache is missing: {source}")
 
     payload = _load(source)
     metadata = payload.get("metadata", {})
-    if metadata.get("format_version") != 7:
-        raise RuntimeError("Gap cache upgrade requires a format-v7 source cache.")
+    source_format = metadata.get("format_version")
+    if source_format not in {7, 8}:
+        raise RuntimeError("Gap cache upgrade requires a format-v7 or v8 source.")
     prompt_state = payload.get("teacher_prompt_state_dict")
     if not prompt_state:
         raise RuntimeError("Source cache does not contain trained teacher prompts.")
@@ -135,7 +142,32 @@ def upgrade_gap_core_cache(
     controller.load_state_dict(prompt_state, strict=True)
     controller.eval().requires_grad_(False)
 
-    common_sketch = _encode_common(
+    if source_format == 8:
+        common_sketch = payload["common_teacher_sketch_features"]
+        common_photo = payload["common_teacher_photo_features"]
+        print("[Gap Cache] reusing format-v8 common features.", flush=True)
+    else:
+        common_sketch = _encode_prompt_mode(
+            controller,
+            teacher,
+            train_dataset.all_sketches_path,
+            "sketch",
+            max_size,
+            batch_size,
+            workers,
+            "common",
+        )
+        common_photo = _encode_prompt_mode(
+            controller,
+            teacher,
+            train_dataset.all_photo_paths,
+            "photo",
+            max_size,
+            batch_size,
+            workers,
+            "common",
+        )
+    swapped_sketch = _encode_prompt_mode(
         controller,
         teacher,
         train_dataset.all_sketches_path,
@@ -143,8 +175,9 @@ def upgrade_gap_core_cache(
         max_size,
         batch_size,
         workers,
+        "swapped",
     )
-    common_photo = _encode_common(
+    swapped_photo = _encode_prompt_mode(
         controller,
         teacher,
         train_dataset.all_photo_paths,
@@ -152,9 +185,12 @@ def upgrade_gap_core_cache(
         max_size,
         batch_size,
         workers,
+        "swapped",
     )
     payload["common_teacher_sketch_features"] = common_sketch
     payload["common_teacher_photo_features"] = common_photo
+    payload["swapped_teacher_sketch_features"] = swapped_sketch
+    payload["swapped_teacher_photo_features"] = swapped_photo
     payload["metadata"] = dict(metadata)
     payload["metadata"]["format_version"] = TEACHER_CACHE_FORMAT_VERSION
     payload["upgraded_from"] = str(source)

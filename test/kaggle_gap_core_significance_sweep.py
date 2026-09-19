@@ -20,10 +20,10 @@ from pathlib import Path
 PROJECT = Path("/kaggle/working/KD-SBIR-AVKD")
 ROOT = "/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy"
 LEGACY_TEACHER_CACHE = Path(
-    "/kaggle/working/teacher_cache/sketchy2_core_teacher1_v7.pt"
+    "/kaggle/working/teacher_cache/sketchy2_gap_core_teacher1_v8.pt"
 )
 TEACHER_CACHE = Path(
-    "/kaggle/working/teacher_cache/sketchy2_gap_core_teacher1_v8.pt"
+    "/kaggle/working/teacher_cache/sketchy2_cgrd_teacher1_v9.pt"
 )
 STAMP = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
 RUN_PREFIX = "gap_core_seed42_sensitivity_" + STAMP
@@ -243,7 +243,7 @@ if TEACHER_CACHE.is_file():
     cache_code = 0
     cache_log = WORK_LOGS / "gap_cache.log"
     cache_log.write_text(
-        f"Reusing format-v8 cache: {TEACHER_CACHE}\n", encoding="utf-8"
+        f"Reusing format-v9 cache: {TEACHER_CACHE}\n", encoding="utf-8"
     )
 elif LEGACY_TEACHER_CACHE.is_file():
     cache_code, cache_log = run_stage(

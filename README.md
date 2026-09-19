@@ -60,3 +60,18 @@ checkpoints are also ranked by unseen P@K instead of mAP. Ties keep the earlier
 teacher epoch. Neither state cloning nor checkpoint serialization consumes RNG.
 Because unseen labels determine both selections, this setting has test-set
 model-selection leakage and is not a strict inductive ZS-SBIR protocol.
+
+## Counterfactual gap ranking
+
+This branch also implements CGRD, a two-sided sketch/photo prompt
+intervention. It compares correct, averaged, and modality-swapped prompt
+assignments on fixed positive and hard-negative identities, then distills only
+teacher relations satisfying `correct > common > swapped`. Start with the
+teacher-only gate before training a student:
+
+1. `test/kaggle_cgrd_teacher_audit.py`
+2. `test/kaggle_cgrd_compare.py`
+
+Both cells reuse the one-epoch format-v9 teacher cache. The comparison runs
+three student epochs and disables checkpoints. See [docs/cgrd.md](docs/cgrd.md)
+for the objective, controls, diagnostics, and cache upgrade path.

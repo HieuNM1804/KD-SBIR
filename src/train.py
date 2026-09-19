@@ -433,6 +433,63 @@ if __name__ == "__main__":
         help="Cross-modal direction used by Gap-CoRe.",
     )
     parser.add_argument(
+        "--lambda_cgrd",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight for correct/common/swapped counterfactual partial-ranking "
+            "distillation. Zero preserves the existing forward path."
+        ),
+    )
+    parser.add_argument(
+        "--cgrd_hard_negative_topk",
+        type=int,
+        default=8,
+        help="Number of common-state hard negatives retained per query.",
+    )
+    parser.add_argument(
+        "--cgrd_huber_beta",
+        type=float,
+        default=0.02,
+        help="Smooth-L1 transition for both counterfactual corrections.",
+    )
+    parser.add_argument(
+        "--cgrd_min_full_correction",
+        type=float,
+        default=0.0,
+        help="Minimum correct-minus-common teacher correction retained.",
+    )
+    parser.add_argument(
+        "--cgrd_min_swap_correction",
+        type=float,
+        default=0.0,
+        help="Minimum common-minus-swapped teacher correction retained.",
+    )
+    parser.add_argument(
+        "--cgrd_max_weight",
+        type=float,
+        default=0.25,
+        help="Maximum bottleneck correction used for pair weighting.",
+    )
+    parser.add_argument(
+        "--cgrd_swapped_loss_weight",
+        type=float,
+        default=1.0,
+        help="Relative weight of common-minus-swapped target matching.",
+    )
+    parser.add_argument(
+        "--cgrd_control",
+        choices=("verified", "shuffled", "reversed"),
+        default="verified",
+        help="Verified, query-shuffled, or sign-reversed counterfactual target.",
+    )
+    parser.add_argument(
+        "--cgrd_direction",
+        choices=("bidirectional", "sketch_to_photo", "photo_to_sketch"),
+        default="bidirectional",
+        help="Cross-modal direction used by CGRD.",
+    )
+    parser.add_argument(
         "--exp_name",
         type=str,
         default="teacher_visual_student_visual_only",
@@ -509,6 +566,25 @@ if __name__ == "__main__":
         parser.error("--gap_core_min_correction must be non-negative.")
     if args.gap_core_max_weight <= 0:
         parser.error("--gap_core_max_weight must be greater than 0.")
+    if args.lambda_cgrd < 0:
+        parser.error("--lambda_cgrd must be non-negative.")
+    if args.lambda_cgrd > 0 and args.teacher_pretrain_epochs <= 0:
+        parser.error(
+            "--lambda_cgrd requires --teacher_pretrain_epochs greater than 0 "
+            "so correct, common, and swapped teacher states are distinct."
+        )
+    if args.cgrd_hard_negative_topk < 1:
+        parser.error("--cgrd_hard_negative_topk must be at least 1.")
+    if args.cgrd_huber_beta <= 0:
+        parser.error("--cgrd_huber_beta must be greater than 0.")
+    if args.cgrd_min_full_correction < 0:
+        parser.error("--cgrd_min_full_correction must be non-negative.")
+    if args.cgrd_min_swap_correction < 0:
+        parser.error("--cgrd_min_swap_correction must be non-negative.")
+    if args.cgrd_max_weight <= 0:
+        parser.error("--cgrd_max_weight must be greater than 0.")
+    if args.cgrd_swapped_loss_weight < 0:
+        parser.error("--cgrd_swapped_loss_weight must be non-negative.")
     if args.image_text_kd_temperature <= 0:
         parser.error("--image_text_kd_temperature must be greater than 0.")
     if args.photo_text_kd_temperature <= 0:

@@ -1,4 +1,4 @@
-"""Run matched Sketchy2 main, Gap-CoRe, and shuffled control; export one ZIP.
+"""Run matched Sketchy2 main, Gap-CoRe, and CGRD controls; export one ZIP.
 
 Paste this whole file into one offline Kaggle GPU notebook cell after running
 `kaggle_gap_core_offline.py`.
@@ -22,12 +22,9 @@ TEACHER_CACHE = Path(
     "/kaggle/working/teacher_cache/sketchy2_cgrd_teacher1_v9.pt"
 )
 STAMP = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
-OUT = Path("/kaggle/working") / ("gap_core_sketchy2_comparison_" + STAMP)
+OUT = Path("/kaggle/working") / ("cgrd_sketchy2_comparison_" + STAMP)
 OUT.mkdir(parents=True, exist_ok=False)
 Path(TEACHER_CACHE).parent.mkdir(parents=True, exist_ok=True)
-
-# The first report runs the claim-critical shuffled control. Reversed is optional.
-RUN_REVERSED_CONTROL = False
 
 
 def run_stage(label, command):
@@ -74,7 +71,7 @@ shared = [
     "--dataset",
     "sketchy_2",
     "--epochs",
-    "5",
+    "3",
     "--workers",
     "8",
     "--batch_size",
@@ -129,6 +126,7 @@ shared = [
     "--lambda_core",
     "0.0",
     "--no_progress",
+    "--no_checkpoints",
 ]
 
 if TEACHER_CACHE.is_file():
@@ -169,64 +167,124 @@ else:
             *shared,
             "--lambda_gap_core",
             "0.0",
+            "--lambda_cgrd",
+            "0.0",
             "--teacher_cache_only",
             "--exp_name",
-            "gap_core_cache_sketchy2_s42_" + STAMP,
+            "cgrd_cache_sketchy2_s42_" + STAMP,
         ],
     )
 
 conditions = [
     {
         "condition": "main",
-        "run": "main_gap_core_matched_sketchy2_s42_" + STAMP,
-        "arguments": ["--lambda_gap_core", "0.0"],
-    },
-    {
-        "condition": "gap_core_verified",
-        "run": "gap_core_verified_sketchy2_s42_" + STAMP,
+        "run": "main_cgrd_matched_sketchy2_s42_" + STAMP,
         "arguments": [
             "--lambda_gap_core",
-            "2.0",
+            "0.0",
+            "--lambda_cgrd",
+            "0.0",
+        ],
+    },
+    {
+        "condition": "gap_core",
+        "run": "gap_core_ablation_sketchy2_s42_" + STAMP,
+        "arguments": [
+            "--lambda_gap_core",
+            "0.5",
             "--gap_core_control",
             "verified",
             "--gap_core_direction",
             "bidirectional",
             "--gap_core_huber_beta",
-            "0.05",
+            "0.02",
             "--gap_core_min_correction",
-            "0.0",
+            "0.05",
             "--gap_core_max_weight",
             "0.25",
+            "--lambda_cgrd",
+            "0.0",
         ],
     },
     {
-        "condition": "gap_core_shuffled",
-        "run": "gap_core_shuffled_sketchy2_s42_" + STAMP,
+        "condition": "cgrd_verified",
+        "run": "cgrd_verified_sketchy2_s42_" + STAMP,
         "arguments": [
             "--lambda_gap_core",
-            "2.0",
-            "--gap_core_control",
-            "shuffled",
-            "--gap_core_direction",
-            "bidirectional",
-            "--gap_core_huber_beta",
-            "0.05",
-            "--gap_core_min_correction",
             "0.0",
-            "--gap_core_max_weight",
+            "--lambda_cgrd",
+            "0.5",
+            "--cgrd_hard_negative_topk",
+            "8",
+            "--cgrd_control",
+            "verified",
+            "--cgrd_direction",
+            "bidirectional",
+            "--cgrd_huber_beta",
+            "0.02",
+            "--cgrd_min_full_correction",
+            "0.0",
+            "--cgrd_min_swap_correction",
+            "0.0",
+            "--cgrd_max_weight",
             "0.25",
+            "--cgrd_swapped_loss_weight",
+            "1.0",
+        ],
+    },
+    {
+        "condition": "cgrd_shuffled",
+        "run": "cgrd_shuffled_sketchy2_s42_" + STAMP,
+        "arguments": [
+            "--lambda_gap_core",
+            "0.0",
+            "--lambda_cgrd",
+            "0.5",
+            "--cgrd_hard_negative_topk",
+            "8",
+            "--cgrd_control",
+            "shuffled",
+            "--cgrd_direction",
+            "bidirectional",
+            "--cgrd_huber_beta",
+            "0.02",
+            "--cgrd_min_full_correction",
+            "0.0",
+            "--cgrd_min_swap_correction",
+            "0.0",
+            "--cgrd_max_weight",
+            "0.25",
+            "--cgrd_swapped_loss_weight",
+            "1.0",
+        ],
+    },
+    {
+        "condition": "cgrd_reversed",
+        "run": "cgrd_reversed_sketchy2_s42_" + STAMP,
+        "arguments": [
+            "--lambda_gap_core",
+            "0.0",
+            "--lambda_cgrd",
+            "0.5",
+            "--cgrd_hard_negative_topk",
+            "8",
+            "--cgrd_control",
+            "reversed",
+            "--cgrd_direction",
+            "bidirectional",
+            "--cgrd_huber_beta",
+            "0.02",
+            "--cgrd_min_full_correction",
+            "0.0",
+            "--cgrd_min_swap_correction",
+            "0.0",
+            "--cgrd_max_weight",
+            "0.25",
+            "--cgrd_swapped_loss_weight",
+            "1.0",
         ],
     },
 ]
-if RUN_REVERSED_CONTROL:
-    reversed_condition = dict(conditions[1])
-    reversed_condition["condition"] = "gap_core_reversed"
-    reversed_condition["run"] = "gap_core_reversed_sketchy2_s42_" + STAMP
-    reversed_condition["arguments"] = [
-        "reversed" if value == "verified" else value
-        for value in reversed_condition["arguments"]
-    ]
-    conditions.append(reversed_condition)
 
 (OUT / "commands.json").write_text(json.dumps(conditions, indent=2), encoding="utf-8")
 
@@ -366,10 +424,24 @@ mechanism_tags = (
     "gap_core_full_margin",
     "gap_core_grad_ratio",
     "gap_core_grad_cosine",
+    "cgrd_coverage",
+    "cgrd_query_coverage",
+    "cgrd_monotonicity",
+    "cgrd_teacher_full_correction",
+    "cgrd_teacher_swap_correction",
+    "cgrd_student_full_correction",
+    "cgrd_student_swap_correction",
+    "cgrd_agreement",
+    "cgrd_absolute_error",
+    "cgrd_full_margin",
+    "cgrd_common_margin",
+    "cgrd_swapped_margin",
+    "cgrd_grad_ratio",
+    "cgrd_grad_cosine",
 )
 for condition in conditions:
     metrics = metric_sets.get(condition["condition"]) or {}
-    if not metrics.get("gap_core_coverage"):
+    if not metrics.get("gap_core_coverage") and not metrics.get("cgrd_coverage"):
         continue
     row = {"condition": condition["condition"], "run": condition["run"]}
     for tag in mechanism_tags:
@@ -379,7 +451,7 @@ for condition in conditions:
             sum(value["value"] for value in values) / len(values) if values else None
         )
     mechanism_rows.append(row)
-write_csv(OUT / "gap_core_mechanisms.csv", mechanism_rows)
+write_csv(OUT / "mechanisms.csv", mechanism_rows)
 
 checkpoint_rows = []
 for condition in conditions:
@@ -448,18 +520,24 @@ manifest = {
     "cache": cache_inventory,
     "claim_checks": {
         "matched_main_present": main_row is not None,
-        "verified_present": any(
-            row["condition"] == "gap_core_verified" for row in summary_rows
+        "gap_core_ablation_present": any(
+            row["condition"] == "gap_core" for row in summary_rows
         ),
-        "shuffled_control_present": any(
-            row["condition"] == "gap_core_shuffled" for row in summary_rows
+        "cgrd_verified_present": any(
+            row["condition"] == "cgrd_verified" for row in summary_rows
+        ),
+        "cgrd_shuffled_present": any(
+            row["condition"] == "cgrd_shuffled" for row in summary_rows
+        ),
+        "cgrd_reversed_present": any(
+            row["condition"] == "cgrd_reversed" for row in summary_rows
         ),
     },
     "notes": [
         "All conditions share seed, main losses, optimizer, teacher cache and epochs.",
-        "Only lambda_gap_core and the declared correction control differ.",
-        "Gap-CoRe matches full-minus-common margin magnitude with Smooth-L1.",
-        "lambda_gap_core=2.0 targets an auxiliary/main gradient ratio near 0.1 based on the 0.25 pilot.",
+        "Gap-CoRe is retained as the one-sided full-minus-common ablation.",
+        "CGRD matches correct-common and common-swapped margins on fixed pairs.",
+        "Shuffled and reversed controls use the exact CGRD hyperparameters.",
         "Selected mAP@200 and P@200 come from the same P@200-selected step.",
         "No checkpoint, teacher cache or feature tensor is copied into the ZIP.",
     ],

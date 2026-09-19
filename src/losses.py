@@ -497,6 +497,293 @@ def gap_core_margin_correction_loss(
     )
 
 
+def _counterfactual_rank_direction(
+    full_student_query,
+    full_student_gallery,
+    common_student_query,
+    common_student_gallery,
+    swapped_student_query,
+    swapped_student_gallery,
+    full_teacher_query,
+    full_teacher_gallery,
+    common_teacher_query,
+    common_teacher_gallery,
+    swapped_teacher_query,
+    swapped_teacher_gallery,
+    query_labels,
+    gallery_labels,
+    hard_negative_topk,
+    huber_beta,
+    minimum_full_correction,
+    minimum_swap_correction,
+    maximum_weight,
+    swapped_loss_weight,
+    control,
+):
+    """Distill correct/common/swapped margin effects over common hard negatives."""
+    student_features = (
+        full_student_query,
+        full_student_gallery,
+        common_student_query,
+        common_student_gallery,
+        swapped_student_query,
+        swapped_student_gallery,
+    )
+    (
+        full_student_query,
+        full_student_gallery,
+        common_student_query,
+        common_student_gallery,
+        swapped_student_query,
+        swapped_student_gallery,
+    ) = tuple(F.normalize(feature.float(), dim=-1) for feature in student_features)
+
+    device = full_student_query.device
+    with torch.no_grad():
+        teacher_features = (
+            full_teacher_query,
+            full_teacher_gallery,
+            common_teacher_query,
+            common_teacher_gallery,
+            swapped_teacher_query,
+            swapped_teacher_gallery,
+        )
+        (
+            full_teacher_query,
+            full_teacher_gallery,
+            common_teacher_query,
+            common_teacher_gallery,
+            swapped_teacher_query,
+            swapped_teacher_gallery,
+        ) = tuple(
+            F.normalize(feature.to(device=device, dtype=torch.float32), dim=-1)
+            for feature in teacher_features
+        )
+        full_scores = full_teacher_query @ full_teacher_gallery.t()
+        common_scores = common_teacher_query @ common_teacher_gallery.t()
+        swapped_scores = swapped_teacher_query @ swapped_teacher_gallery.t()
+        query_labels = query_labels.to(device)
+        gallery_labels = gallery_labels.to(device)
+        positive_mask = query_labels[:, None].eq(gallery_labels[None, :])
+        negative_mask = ~positive_mask
+        has_positive = positive_mask.any(dim=1)
+        positive_index = common_scores.masked_fill(
+            ~positive_mask, -torch.inf
+        ).argmax(dim=1)
+        negative_candidates = common_scores.masked_fill(
+            ~negative_mask, -torch.inf
+        )
+        topk = min(hard_negative_topk, negative_candidates.shape[1])
+        negative_values, negative_index = negative_candidates.topk(topk, dim=1)
+        finite_negative = torch.isfinite(negative_values)
+        row = torch.arange(len(query_labels), device=device)[:, None]
+
+        def fixed_margins(scores):
+            positive = scores[
+                torch.arange(len(query_labels), device=device), positive_index
+            ][:, None]
+            negatives = scores[row, negative_index]
+            return positive - negatives
+
+        full_margin = fixed_margins(full_scores)
+        common_margin = fixed_margins(common_scores)
+        swapped_margin = fixed_margins(swapped_scores)
+        full_correction = full_margin - common_margin
+        swap_correction = common_margin - swapped_margin
+        feasible = has_positive[:, None] & finite_negative
+        monotonic = feasible & full_correction.gt(0) & swap_correction.gt(0)
+        verified_valid = (
+            feasible
+            & full_correction.gt(minimum_full_correction)
+            & swap_correction.gt(minimum_swap_correction)
+        )
+        if control == "verified":
+            target_full = full_correction
+            target_swap = swap_correction
+            valid = verified_valid
+            weight_full = full_correction
+            weight_swap = swap_correction
+        elif control == "shuffled":
+            target_full = full_correction.roll(shifts=1, dims=0)
+            target_swap = swap_correction.roll(shifts=1, dims=0)
+            valid = verified_valid.roll(shifts=1, dims=0)
+            weight_full = target_full
+            weight_swap = target_swap
+        elif control == "reversed":
+            target_full = -full_correction
+            target_swap = -swap_correction
+            valid = verified_valid
+            weight_full = full_correction
+            weight_swap = swap_correction
+        else:
+            raise ValueError(f"Unsupported CGRD control: {control}")
+
+    full_student_scores = full_student_query @ full_student_gallery.t()
+    common_student_scores = common_student_query @ common_student_gallery.t()
+    swapped_student_scores = swapped_student_query @ swapped_student_gallery.t()
+
+    def student_fixed_margins(scores):
+        positive = scores[
+            torch.arange(len(query_labels), device=device), positive_index
+        ][:, None]
+        negatives = scores[row, negative_index]
+        return positive - negatives
+
+    full_student_margin = student_fixed_margins(full_student_scores)
+    common_student_margin = student_fixed_margins(common_student_scores)
+    swapped_student_margin = student_fixed_margins(swapped_student_scores)
+    student_full_correction = full_student_margin - common_student_margin
+    student_swap_correction = common_student_margin - swapped_student_margin
+    if not valid.any():
+        zero = (
+            student_full_correction.sum() + student_swap_correction.sum()
+        ) * 0.0
+        return zero, {
+            "coverage": zero.detach(),
+            "query_coverage": zero.detach(),
+            "monotonicity": monotonic.float().mean(),
+            "teacher_full_correction": zero.detach(),
+            "teacher_swap_correction": zero.detach(),
+            "student_full_correction": zero.detach(),
+            "student_swap_correction": zero.detach(),
+            "agreement": zero.detach(),
+            "absolute_error": zero.detach(),
+            "full_margin": zero.detach(),
+            "common_margin": zero.detach(),
+            "swapped_margin": zero.detach(),
+        }
+
+    full_loss = F.smooth_l1_loss(
+        student_full_correction,
+        target_full.detach(),
+        beta=huber_beta,
+        reduction="none",
+    )
+    swap_loss = F.smooth_l1_loss(
+        student_swap_correction,
+        target_swap.detach(),
+        beta=huber_beta,
+        reduction="none",
+    )
+    evidence = torch.minimum(
+        weight_full.detach().clamp(min=0.0, max=maximum_weight),
+        weight_swap.detach().clamp(min=0.0, max=maximum_weight),
+    )
+    valid_weights = evidence[valid]
+    valid_weights = valid_weights / valid_weights.mean().clamp_min(1e-6)
+    pair_loss = full_loss + swapped_loss_weight * swap_loss
+    loss = (pair_loss[valid] * valid_weights).mean()
+
+    valid_target_full = target_full[valid]
+    valid_target_swap = target_swap[valid]
+    valid_student_full = student_full_correction[valid]
+    valid_student_swap = student_swap_correction[valid]
+    agreement = 0.5 * (
+        valid_student_full.detach().sign().eq(valid_target_full.sign()).float().mean()
+        + valid_student_swap.detach().sign().eq(valid_target_swap.sign()).float().mean()
+    )
+    absolute_error = 0.5 * (
+        (valid_student_full.detach() - valid_target_full).abs().mean()
+        + (valid_student_swap.detach() - valid_target_swap).abs().mean()
+    )
+    return loss, {
+        "coverage": valid.float().mean(),
+        "query_coverage": valid.any(dim=1).float().mean(),
+        "monotonicity": monotonic.float().mean(),
+        "teacher_full_correction": valid_target_full.mean(),
+        "teacher_swap_correction": valid_target_swap.mean(),
+        "student_full_correction": valid_student_full.detach().mean(),
+        "student_swap_correction": valid_student_swap.detach().mean(),
+        "agreement": agreement,
+        "absolute_error": absolute_error,
+        "full_margin": full_margin[valid].mean(),
+        "common_margin": common_margin[valid].mean(),
+        "swapped_margin": swapped_margin[valid].mean(),
+    }
+
+
+def counterfactual_gap_ranking_loss(
+    full_student_photo,
+    full_student_sketch,
+    common_student_photo,
+    common_student_sketch,
+    swapped_student_photo,
+    swapped_student_sketch,
+    full_teacher_photo,
+    full_teacher_sketch,
+    common_teacher_photo,
+    common_teacher_sketch,
+    swapped_teacher_photo,
+    swapped_teacher_sketch,
+    labels,
+    hard_negative_topk=8,
+    huber_beta=0.02,
+    minimum_full_correction=0.0,
+    minimum_swap_correction=0.0,
+    maximum_weight=0.25,
+    swapped_loss_weight=1.0,
+    control="verified",
+    direction="bidirectional",
+):
+    common = {
+        "query_labels": labels,
+        "gallery_labels": labels,
+        "hard_negative_topk": hard_negative_topk,
+        "huber_beta": huber_beta,
+        "minimum_full_correction": minimum_full_correction,
+        "minimum_swap_correction": minimum_swap_correction,
+        "maximum_weight": maximum_weight,
+        "swapped_loss_weight": swapped_loss_weight,
+        "control": control,
+    }
+    results = []
+    if direction in {"bidirectional", "sketch_to_photo"}:
+        results.append(
+            _counterfactual_rank_direction(
+                full_student_sketch,
+                full_student_photo,
+                common_student_sketch,
+                common_student_photo,
+                swapped_student_sketch,
+                swapped_student_photo,
+                full_teacher_sketch,
+                full_teacher_photo,
+                common_teacher_sketch,
+                common_teacher_photo,
+                swapped_teacher_sketch,
+                swapped_teacher_photo,
+                **common,
+            )
+        )
+    if direction in {"bidirectional", "photo_to_sketch"}:
+        results.append(
+            _counterfactual_rank_direction(
+                full_student_photo,
+                full_student_sketch,
+                common_student_photo,
+                common_student_sketch,
+                swapped_student_photo,
+                swapped_student_sketch,
+                full_teacher_photo,
+                full_teacher_sketch,
+                common_teacher_photo,
+                common_teacher_sketch,
+                swapped_teacher_photo,
+                swapped_teacher_sketch,
+                **common,
+            )
+        )
+    if not results:
+        raise ValueError(f"Unsupported CGRD direction: {direction}")
+    return (
+        torch.stack([value[0] for value in results]).mean(),
+        {
+            name: torch.stack([value[1][name] for value in results]).mean()
+            for name in results[0][1]
+        },
+    )
+
+
 def loss_fn(args, features):
     (
         photo_features,
@@ -517,6 +804,10 @@ def loss_fn(args, features):
         common_student_sketch,
         common_teacher_photo,
         common_teacher_sketch,
+        swapped_student_photo,
+        swapped_student_sketch,
+        swapped_teacher_photo,
+        swapped_teacher_sketch,
     ) = features
 
     zero = torch.zeros((), device=photo_features.device)
@@ -607,23 +898,67 @@ def loss_fn(args, features):
             direction=args.gap_core_direction,
         )
 
+    cgrd_loss = zero
+    cgrd_diagnostics = {
+        "coverage": zero,
+        "query_coverage": zero,
+        "monotonicity": zero,
+        "teacher_full_correction": zero,
+        "teacher_swap_correction": zero,
+        "student_full_correction": zero,
+        "student_swap_correction": zero,
+        "agreement": zero,
+        "absolute_error": zero,
+        "full_margin": zero,
+        "common_margin": zero,
+        "swapped_margin": zero,
+    }
+    if teacher_active and args.lambda_cgrd > 0:
+        cgrd_loss, cgrd_diagnostics = counterfactual_gap_ranking_loss(
+            full_student_photo=photo_features,
+            full_student_sketch=sketch_features,
+            common_student_photo=common_student_photo,
+            common_student_sketch=common_student_sketch,
+            swapped_student_photo=swapped_student_photo,
+            swapped_student_sketch=swapped_student_sketch,
+            full_teacher_photo=teacher_photo_features,
+            full_teacher_sketch=teacher_sketch_features,
+            common_teacher_photo=common_teacher_photo,
+            common_teacher_sketch=common_teacher_sketch,
+            swapped_teacher_photo=swapped_teacher_photo,
+            swapped_teacher_sketch=swapped_teacher_sketch,
+            labels=labels,
+            hard_negative_topk=args.cgrd_hard_negative_topk,
+            huber_beta=args.cgrd_huber_beta,
+            minimum_full_correction=args.cgrd_min_full_correction,
+            minimum_swap_correction=args.cgrd_min_swap_correction,
+            maximum_weight=args.cgrd_max_weight,
+            swapped_loss_weight=args.cgrd_swapped_loss_weight,
+            control=args.cgrd_control,
+            direction=args.cgrd_direction,
+        )
+
     main_objective = (
         args.lambda_domain * domain_loss
         + args.lambda_modality * modality_loss
         + args.lambda_core * core_loss
     )
     gap_objective = args.lambda_gap_core * gap_core_loss
-    total_loss = main_objective + gap_objective
+    cgrd_objective = args.lambda_cgrd * cgrd_loss
+    total_loss = main_objective + gap_objective + cgrd_objective
     return total_loss, {
         "domain_kd": domain_loss,
         "modality_kd": modality_loss,
         "core_kd": core_loss,
         "gap_core_kd": gap_core_loss,
+        "cgrd_kd": cgrd_loss,
         "main_objective": main_objective,
         "gap_objective": gap_objective,
+        "cgrd_objective": cgrd_objective,
         **{f"core_{name}": value for name, value in core_diagnostics.items()},
         **{
             f"gap_core_{name}": value
             for name, value in gap_core_diagnostics.items()
         },
+        **{f"cgrd_{name}": value for name, value in cgrd_diagnostics.items()},
     }

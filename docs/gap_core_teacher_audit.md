@@ -55,6 +55,7 @@ Run in this order:
 3. Run `test/kaggle_gap_core_teacher_audit.py` as one cell and send the emitted
    ZIP for analysis.
 
-Future runs use one teacher-pretraining epoch and the cache names
-`sketchy2_core_teacher1_v7.pt` or `sketchy2_gap_core_teacher1_v8.pt`.
-If absent, the audit prepares it once with the exact matched teacher settings.
+Future runs use one teacher-pretraining epoch. The current cache is
+`sketchy2_cgrd_teacher1_v9.pt`; `sketchy2_gap_core_teacher1_v8.pt` can be
+upgraded without retraining prompts. If neither is present, the audit prepares
+v9 once with the exact matched teacher settings.

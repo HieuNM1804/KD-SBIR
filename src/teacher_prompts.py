@@ -1,5 +1,5 @@
 import torch
-import torch.nn as nn
+from torch import nn
 
 
 def _random_prompt(rows, width, std, seed, device):
@@ -51,6 +51,9 @@ class ModalityVisualPrompts(nn.Module):
                 self.prompts["photo"][layer_index]
                 + self.prompts["sketch"][layer_index]
             )
+        elif prompt_mode == "swapped":
+            other_modality = "sketch" if modality == "photo" else "photo"
+            prompt = self.prompts[other_modality][layer_index]
         else:
             raise ValueError(f"Unsupported teacher prompt mode: {prompt_mode}")
         return prompt.to(device=device, dtype=dtype).unsqueeze(0).expand(

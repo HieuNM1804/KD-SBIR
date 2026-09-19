@@ -22,6 +22,7 @@ WORKING_PROJECT = WORKING_ROOT / "KD-SBIR-AVKD"
 SKETCHY_ROOT = Path("/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy")
 CORE_CACHE_NAME = "sketchy2_core_teacher1_v7.pt"
 GAP_CACHE_NAME = "sketchy2_gap_core_teacher1_v8.pt"
+CGRD_CACHE_NAME = "sketchy2_cgrd_teacher1_v9.pt"
 
 
 def file_sha256(path):
@@ -200,9 +201,9 @@ for directory in (SKETCHY_ROOT / "sketch", SKETCHY_ROOT / "photo"):
     if not directory.is_dir():
         raise FileNotFoundError(f"Missing dataset directory: {directory}")
 
-# Format-v8 is preferred. Format-v7 can be upgraded without teacher pretraining.
+# Format-v9 is preferred. Formats v7/v8 can be upgraded without teacher pretraining.
 restored_cache_names = []
-for cache_name in (GAP_CACHE_NAME, CORE_CACHE_NAME):
+for cache_name in (CGRD_CACHE_NAME, GAP_CACHE_NAME, CORE_CACHE_NAME):
     cache_target = WORKING_ROOT / "teacher_cache" / cache_name
     if cache_target.is_file():
         restored_cache_names.append(cache_name)
@@ -225,7 +226,7 @@ for cache_name in (GAP_CACHE_NAME, CORE_CACHE_NAME):
         restored_cache_names.append(cache_name)
         print("Restored teacher cache:", cache_target)
 if not restored_cache_names:
-    print("No compatible teacher cache attached; comparison will build v8 once.")
+    print("No compatible teacher cache attached; comparison will build v9 once.")
 
 smoke_test = """
 import os

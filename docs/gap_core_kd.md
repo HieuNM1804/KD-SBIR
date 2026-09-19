@@ -83,10 +83,11 @@ condition reuses the same resulting cache, so teacher cost is paid once.
 
 ## Cache
 
-Format v8 adds full-dataset common teacher features. If the format-v7 CoRe
-cache is attached, `src.gap_core_cache` reuses its trained prompt state and
-existing tensors, encodes only the common state, and writes the v8 cache. This
-avoids repeating teacher prompt pretraining.
+Format v9 adds swapped teacher features for CGRD while retaining the common
+features used by Gap-CoRe. `src.gap_core_cache` upgrades format v7 or v8
+without repeating teacher prompt pretraining. A v8 source reuses its common
+features and encodes only the swapped state. Gap-CoRe can read the v9 cache and
+simply ignores the swapped tensors.
 
 ## Kaggle run order
 
@@ -94,6 +95,10 @@ avoids repeating teacher prompt pretraining.
 2. `test/kaggle_gap_core_offline.py` in the offline GPU notebook.
 3. `test/kaggle_gap_core_compare.py` in the same GPU notebook.
 4. Send the emitted `gap_core_sketchy2_comparison_*.zip`.
+
+For the newer two-sided prompt intervention, see `docs/cgrd.md` and use
+`test/kaggle_cgrd_teacher_audit.py` followed by
+`test/kaggle_cgrd_compare.py`.
 
 For the checkpoint-free hyperparameter search, replace step 3 with
 `test/kaggle_gap_core_sweep.py`. It runs 24 broad verified configurations,

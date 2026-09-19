@@ -1,4 +1,4 @@
-"""Audit common/gap teacher prompts on Sketchy2 and export one diagnostics ZIP.
+"""Audit correct/common/swapped teacher prompts and export one diagnostics ZIP.
 
 Paste this whole file into one offline Kaggle GPU notebook cell after running
 `kaggle_gap_core_offline.py`. The script never trains a student.
@@ -21,13 +21,13 @@ ROOT = Path("/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy")
 LEGACY_TEACHER_CACHE = Path(
     "/kaggle/working/teacher_cache/sketchy2_gap_core_teacher1_v8.pt"
 )
-GAP_TEACHER_CACHE = Path(
+CGRD_TEACHER_CACHE = Path(
     "/kaggle/working/teacher_cache/sketchy2_cgrd_teacher1_v9.pt"
 )
-TEACHER_CACHE = GAP_TEACHER_CACHE
+TEACHER_CACHE = CGRD_TEACHER_CACHE
 STAMP = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
-RUN_NAME = "gap_core_teacher_audit_sketchy2_s42_" + STAMP
-OUT = Path("/kaggle/working") / ("gap_core_teacher_audit_" + STAMP)
+RUN_NAME = "cgrd_teacher_audit_sketchy2_s42_" + STAMP
+OUT = Path("/kaggle/working") / ("cgrd_teacher_audit_" + STAMP)
 OUT.mkdir(parents=True, exist_ok=False)
 TEACHER_CACHE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -185,7 +185,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from src.data_config import UNSEEN_CLASSES
 from src.dataset import load_image, normal_transform
-from src.gap_core_audit import build_gap_audit_rows, summarize_gap_rows
+from src.gap_core_audit import build_cgrd_audit_rows, summarize_cgrd_rows
 from src.model import DFN5B_MODEL, DFN5B_PRETRAINED, _retrieval_metrics
 from src.teacher_prompts import build_teacher_prompt_controller
 
@@ -247,22 +247,29 @@ def encode_states(paths, labels, modality, batch_size=64, workers=8):
         persistent_workers=workers > 0,
         prefetch_factor=4 if workers > 0 else None,
     )
-    full, common, output_labels = [], [], []
+    full, common, swapped, output_labels = [], [], [], []
     completed = 0
     for images, current_labels in loader:
         images = images.to(device, dtype=teacher_dtype, non_blocking=True)
         with torch.amp.autocast("cuda", dtype=torch.float16):
             full_batch = controller(images, modality, prompt_mode="full")
             common_batch = controller(images, modality, prompt_mode="common")
+            swapped_batch = controller(images, modality, prompt_mode="swapped")
         full.append(F.normalize(full_batch.float(), dim=-1).cpu())
         common.append(F.normalize(common_batch.float(), dim=-1).cpu())
+        swapped.append(F.normalize(swapped_batch.float(), dim=-1).cpu())
         output_labels.append(current_labels.cpu())
         completed += len(images)
         print(
-            f"[Gap Audit] {modality}: {100 * completed / len(paths):.1f}%",
+            f"[CGRD Audit] {modality}: {100 * completed / len(paths):.1f}%",
             flush=True,
         )
-    return torch.cat(full), torch.cat(common), torch.cat(output_labels)
+    return (
+        torch.cat(full),
+        torch.cat(common),
+        torch.cat(swapped),
+        torch.cat(output_labels),
+    )
 
 
 def paths_and_labels(split_classes, modality, per_class=None):
@@ -291,22 +298,30 @@ seen_sketch_paths, seen_sketch_labels = paths_and_labels(
 seen_photo_paths, seen_photo_labels = paths_and_labels(
     seen_classes, "photo", per_class=4
 )
-seen_full_sketch, seen_common_sketch, seen_sketch_labels = encode_states(
-    seen_sketch_paths, seen_sketch_labels, "sketch"
-)
-seen_full_photo, seen_common_photo, seen_photo_labels = encode_states(
-    seen_photo_paths, seen_photo_labels, "photo"
-)
-rows = build_gap_audit_rows(
+(
     seen_full_sketch,
     seen_common_sketch,
+    seen_swapped_sketch,
+    seen_sketch_labels,
+) = encode_states(seen_sketch_paths, seen_sketch_labels, "sketch")
+(
+    seen_full_photo,
+    seen_common_photo,
+    seen_swapped_photo,
+    seen_photo_labels,
+) = encode_states(seen_photo_paths, seen_photo_labels, "photo")
+rows = build_cgrd_audit_rows(
+    seen_full_sketch,
+    seen_common_sketch,
+    seen_swapped_sketch,
     seen_sketch_labels,
     seen_full_photo,
     seen_common_photo,
+    seen_swapped_photo,
     seen_photo_labels,
-    seed=42,
+    hard_negative_topk=8,
 )
-summary = summarize_gap_rows(rows, seed=42, bootstrap_samples=2000)
+summary = summarize_cgrd_rows(rows, seed=42, bootstrap_samples=2000)
 
 with (OUT / "seen_query_audit.csv").open("w", newline="", encoding="utf-8") as stream:
     writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
@@ -318,10 +333,20 @@ unseen_sketch_paths, unseen_sketch_labels = paths_and_labels(
     unseen_classes, "sketch"
 )
 unseen_photo_paths, unseen_photo_labels = paths_and_labels(unseen_classes, "photo")
-unseen_full_sketch, unseen_common_sketch, unseen_sketch_labels = encode_states(
+(
+    unseen_full_sketch,
+    unseen_common_sketch,
+    unseen_swapped_sketch,
+    unseen_sketch_labels,
+) = encode_states(
     unseen_sketch_paths, unseen_sketch_labels, "sketch"
 )
-unseen_full_photo, unseen_common_photo, unseen_photo_labels = encode_states(
+(
+    unseen_full_photo,
+    unseen_common_photo,
+    unseen_swapped_photo,
+    unseen_photo_labels,
+) = encode_states(
     unseen_photo_paths, unseen_photo_labels, "photo"
 )
 
@@ -344,21 +369,21 @@ def retrieval(features_sketch, features_photo):
 
 retrieval_common = retrieval(unseen_common_sketch, unseen_common_photo)
 retrieval_full = retrieval(unseen_full_sketch, unseen_full_photo)
-retrieval_delta = {
+retrieval_swapped = retrieval(unseen_swapped_sketch, unseen_swapped_photo)
+full_minus_common = {
     "mAP": retrieval_full["mAP"] - retrieval_common["mAP"],
     "precision": retrieval_full["precision"] - retrieval_common["precision"],
 }
+common_minus_swapped = {
+    "mAP": retrieval_common["mAP"] - retrieval_swapped["mAP"],
+    "precision": retrieval_common["precision"] - retrieval_swapped["precision"],
+}
 
 gate_checks = {
-    "full_improves_unseen_mAP": retrieval_delta["mAP"] > 0,
-    "verified_beats_shuffled_ci95": summary["verified_minus_shuffled"][
-        "ci95_low"
-    ]
-    > 0,
-    "positive_margin_correction_ci95": summary[
-        "verified_margin_correction"
-    ]["ci95_low"]
-    > 0,
+    "full_improves_common_unseen_mAP": full_minus_common["mAP"] > 0,
+    "common_improves_swapped_unseen_mAP": common_minus_swapped["mAP"] > 0,
+    "full_correction_ci95": summary["full_correction"]["ci95_low"] > 0,
+    "swap_correction_ci95": summary["swap_correction"]["ci95_low"] > 0,
 }
 gate_checks["passed"] = all(gate_checks.values())
 
@@ -372,6 +397,8 @@ report = {
         "full_photo": "P_common + P_gap",
         "full_sketch": "P_common - P_gap",
         "common_both_modalities": "(P_photo + P_sketch) / 2",
+        "swapped_photo": "P_sketch",
+        "swapped_sketch": "P_photo",
         "trainable_parameters_changed": False,
     },
     "seen_sample": {
@@ -380,27 +407,28 @@ report = {
         "photos": len(seen_photo_paths),
         "per_class_per_modality": 4,
     },
-    "seen_gap_correction": summary,
+    "seen_counterfactual_ranking": summary,
     "unseen_retrieval": {
-        "common": retrieval_common,
         "full": retrieval_full,
-        "full_minus_common": retrieval_delta,
+        "common": retrieval_common,
+        "swapped": retrieval_swapped,
+        "full_minus_common": full_minus_common,
+        "common_minus_swapped": common_minus_swapped,
     },
     "gate": gate_checks,
     "decision": (
-        "implement_student_gap_distillation"
+        "run_cgrd_student_comparison"
         if gate_checks["passed"]
-        else "redesign_or_stop_gap_distillation"
+        else "redesign_or_stop_cgrd"
     ),
     "notes": [
-        "Positive and negative identities are selected once under the common state.",
-        "Full and shuffled corrections are evaluated on those same fixed pairs.",
-        "The shuffled control reassigns full-minus-common feature residuals across image identities.",
-        "Absolute positive cosine is diagnostic only; retrieval depends on the positive-negative margin.",
+        "Positive and top-K negative identities are selected once under common state.",
+        "Correct, common, and swapped margins use those same fixed identities.",
+        "The gate requires two-sided correct > common > swapped evidence.",
         "No student is trained and no checkpoint or feature tensor is included in the ZIP.",
     ],
 }
-(OUT / "gap_core_teacher_audit.json").write_text(
+(OUT / "cgrd_teacher_audit.json").write_text(
     json.dumps(report, indent=2), encoding="utf-8"
 )
 
@@ -411,28 +439,32 @@ import matplotlib.pyplot as plt
 
 fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
 axes[0].bar(
-    ["common", "full"],
-    [100 * retrieval_common["mAP"], 100 * retrieval_full["mAP"]],
+    ["swapped", "common", "correct"],
+    [
+        100 * retrieval_swapped["mAP"],
+        100 * retrieval_common["mAP"],
+        100 * retrieval_full["mAP"],
+    ],
 )
 axes[0].set_ylabel("Unseen mAP@200 (%)")
 axes[0].set_title("Teacher retrieval")
 axes[1].hist(
-    [row["verified_margin_correction"] for row in rows],
+    [row["full_correction"] for row in rows],
     bins=35,
     alpha=0.7,
-    label="verified gap",
+    label="correct - common",
 )
 axes[1].hist(
-    [row["shuffled_margin_correction"] for row in rows],
+    [row["swap_correction"] for row in rows],
     bins=35,
     alpha=0.6,
-    label="shuffled residual",
+    label="common - swapped",
 )
 axes[1].axvline(0, color="black", linewidth=0.8)
-axes[1].set_xlabel("Fixed-pair margin correction")
+axes[1].set_xlabel("Fixed-pair counterfactual margin correction")
 axes[1].legend()
 fig.tight_layout()
-fig.savefig(OUT / "gap_core_teacher_audit.png", dpi=170)
+fig.savefig(OUT / "cgrd_teacher_audit.png", dpi=170)
 plt.close(fig)
 
 source_commit = subprocess.check_output(
@@ -461,8 +493,8 @@ with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
 
 from IPython.display import FileLink, Image, display
 
-display(Image(filename=str(OUT / "gap_core_teacher_audit.png")))
-print("Gap-CoRe teacher gate:", "PASS" if gate_checks["passed"] else "FAIL")
+display(Image(filename=str(OUT / "cgrd_teacher_audit.png")))
+print("CGRD teacher gate:", "PASS" if gate_checks["passed"] else "FAIL")
 print("Decision:", report["decision"])
 print("Send this ZIP:", archive)
 display(FileLink(str(archive)))
