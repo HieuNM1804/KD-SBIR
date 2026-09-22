@@ -280,8 +280,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--lambda_domain",
         type=float,
-        default=3.0,
-        help="Weight for sketch-photo domain distillation.",
+        default=0.0,
+        help="Legacy main loss. Must remain 0 in the isolated AFD branch.",
     )
     parser.add_argument(
         "--kd_temperature",
@@ -293,10 +293,7 @@ if __name__ == "__main__":
         "--lambda_modality",
         type=float,
         default=0.0,
-        help=(
-            "Shared weight for the sum of photo-text and sketch-text "
-            "modality distillation losses."
-        ),
+        help="Legacy main loss. Must remain 0 in the isolated AFD branch.",
     )
     parser.add_argument(
         "--image_text_kd_temperature",
@@ -315,6 +312,71 @@ if __name__ == "__main__":
         type=float,
         default=None,
         help="Sketch-text KD temperature; defaults to the shared temperature.",
+    )
+    parser.add_argument(
+        "--lambda_afd_sp",
+        type=float,
+        default=1.0,
+        help="Weight of augmented sketch-photo contrastive distillation.",
+    )
+    parser.add_argument(
+        "--lambda_afd_it",
+        type=float,
+        default=1.0,
+        help="Weight of augmented image-text contrastive distillation.",
+    )
+    parser.add_argument(
+        "--afd_temperature_sp",
+        type=float,
+        default=0.07,
+        help="Temperature for the augmented sketch-photo objective.",
+    )
+    parser.add_argument(
+        "--afd_temperature_it",
+        type=float,
+        default=0.07,
+        help="Temperature for the augmented image-text objective.",
+    )
+    parser.add_argument(
+        "--afd_fusion_lr",
+        type=float,
+        default=1e-3,
+        help="Learning rate for the two AFD fusion projections.",
+    )
+    parser.add_argument(
+        "--afd_init",
+        choices=("student_identity", "xavier"),
+        default="student_identity",
+        help="Fusion projection initialization.",
+    )
+    parser.add_argument(
+        "--afd_control",
+        choices=(
+            "verified",
+            "shuffled_image",
+            "shuffled_text",
+            "shuffled_both",
+            "student_only",
+            "teacher_only",
+        ),
+        default="verified",
+        help="Teacher-input control used to test whether teacher correspondence matters.",
+    )
+    parser.add_argument(
+        "--afd_grad_every",
+        type=int,
+        default=50,
+        help="Log AFD prompt/head gradient diagnostics every N batches.",
+    )
+    parser.add_argument(
+        "--no_checkpoints",
+        action="store_true",
+        help="Disable student checkpoint files for compact experiment sweeps.",
+    )
+    parser.add_argument(
+        "--teacher_cache_only",
+        action="store_true",
+        help="Prepare/validate the teacher cache and exit before student training.",
     )
     parser.add_argument(
         "--exp_name",
@@ -359,16 +421,26 @@ if __name__ == "__main__":
         parser.error("--teacher_scheduler_step_size must be at least 1.")
     if args.teacher_scheduler_gamma <= 0:
         parser.error("--teacher_scheduler_gamma must be greater than 0.")
-    if args.lambda_domain < 0:
-        parser.error("--lambda_domain must be non-negative.")
-    if args.lambda_modality < 0:
-        parser.error("--lambda_modality must be non-negative.")
+    if args.lambda_domain != 0:
+        parser.error("--lambda_domain must be 0: main domain KD is disabled here.")
+    if args.lambda_modality != 0:
+        parser.error("--lambda_modality must be 0: main modality KD is disabled here.")
     if args.image_text_kd_temperature <= 0:
         parser.error("--image_text_kd_temperature must be greater than 0.")
     if args.photo_text_kd_temperature <= 0:
         parser.error("--photo_text_kd_temperature must be greater than 0.")
     if args.sketch_text_kd_temperature <= 0:
         parser.error("--sketch_text_kd_temperature must be greater than 0.")
+    if args.lambda_afd_sp < 0 or args.lambda_afd_it < 0:
+        parser.error("AFD loss weights must be non-negative.")
+    if args.lambda_afd_sp == 0 and args.lambda_afd_it == 0:
+        parser.error("At least one AFD loss weight must be positive.")
+    if args.afd_temperature_sp <= 0 or args.afd_temperature_it <= 0:
+        parser.error("AFD temperatures must be greater than 0.")
+    if args.afd_fusion_lr <= 0:
+        parser.error("--afd_fusion_lr must be greater than 0.")
+    if args.afd_grad_every < 1:
+        parser.error("--afd_grad_every must be at least 1.")
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
 
     checkpoint_callback = ModelCheckpoint(
@@ -405,7 +477,11 @@ if __name__ == "__main__":
             "--rebuild_teacher_cache requires --teacher_cache_path or "
             "--teacher_pretrain_epochs greater than 0."
         )
-    progress_bar = TQDMProgressBar(refresh_rate=20)
+    callbacks = []
+    if not args.no_checkpoints:
+        callbacks.append(checkpoint_callback)
+    if args.progress:
+        callbacks.append(TQDMProgressBar(refresh_rate=20))
 
     trainer = Trainer(
         accelerator="gpu",
@@ -417,7 +493,8 @@ if __name__ == "__main__":
         logger=logger,
         check_val_every_n_epoch=1,
         enable_progress_bar=args.progress,
-        callbacks=[checkpoint_callback, progress_bar],
+        callbacks=callbacks,
+        enable_checkpointing=not args.no_checkpoints,
     )
 
     model = ZS_SBIR(args=args, classnames=train_loader.dataset.all_categories)
@@ -434,5 +511,9 @@ if __name__ == "__main__":
         workers=args.workers,
         show_progress=args.progress,
     )
+
+    if args.teacher_cache_only:
+        print("[Teacher Cache] preparation complete; student training skipped.")
+        raise SystemExit(0)
 
     trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])

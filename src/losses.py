@@ -3,6 +3,8 @@
 import torch
 from torch.nn import functional as F
 
+from src.afd import dual_axis_afd_loss
+
 
 def relational_kd_loss(
     student_sketch,
@@ -107,55 +109,27 @@ def batch_hard_teacher_triplet_loss(
     return 0.5 * (one_direction(distance) + one_direction(distance.t()))
 
 
-def loss_fn(args, features):
+def loss_fn(args, features, labels):
+    """Compute the isolated AFD objective.
+
+    The legacy domain- and modality-KD losses remain importable for historical
+    checkpoints, but they are deliberately absent from this branch's student
+    objective.
+    """
     (
-        photo_features,
-        sketch_features,
-        teacher_photo_features,
-        teacher_sketch_features,
-        teacher_active,
-        student_sketch_text,
-        student_photo_text,
-        teacher_sketch_text,
-        teacher_photo_text,
+        augmented_photo,
+        augmented_sketch,
+        augmented_sketch_text,
+        augmented_photo_text,
     ) = features
-
-    zero = torch.zeros((), device=photo_features.device)
-
-    domain_loss = zero
-    if teacher_active and args.lambda_domain > 0:
-        domain_loss = relational_kd_loss(
-            sketch_features,
-            photo_features,
-            teacher_sketch_features,
-            teacher_photo_features,
-            args.kd_temperature,
-        )
-
-    photo_text_kd = zero
-    sketch_text_kd = zero
-    if teacher_active and args.lambda_modality > 0:
-        photo_text_kd = image_text_kd_loss(
-            photo_features,
-            student_photo_text,
-            teacher_photo_features,
-            teacher_photo_text,
-            args.photo_text_kd_temperature,
-        )
-        sketch_text_kd = image_text_kd_loss(
-            sketch_features,
-            student_sketch_text,
-            teacher_sketch_features,
-            teacher_sketch_text,
-            args.sketch_text_kd_temperature,
-        )
-    modality_loss = photo_text_kd + sketch_text_kd
-
-    total_loss = (
-        args.lambda_domain * domain_loss
-        + args.lambda_modality * modality_loss
+    return dual_axis_afd_loss(
+        augmented_sketch,
+        augmented_photo,
+        augmented_sketch_text,
+        augmented_photo_text,
+        labels,
+        sketch_photo_weight=args.lambda_afd_sp,
+        image_text_weight=args.lambda_afd_it,
+        sketch_photo_temperature=args.afd_temperature_sp,
+        image_text_temperature=args.afd_temperature_it,
     )
-    return total_loss, {
-        "domain_kd": domain_loss,
-        "modality_kd": modality_loss,
-    }

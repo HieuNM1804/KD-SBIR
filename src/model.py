@@ -18,6 +18,7 @@ from tqdm.auto import tqdm
 
 from clip import clip
 from clip.model import build_model
+from src.afd import AugmentedFeatureFusion, controlled_afd_inputs
 from src.dataset import (
     TeacherFeatureDataset,
     WorkerInvariantSampler,
@@ -151,7 +152,14 @@ def default_teacher_cache_path(args, train_dataset):
 
 
 def _image_text_kd_active(args):
-    return args.lambda_modality > 0
+    return getattr(args, "lambda_afd_it", 0.0) > 0
+
+
+def _afd_active(args):
+    return (
+        getattr(args, "lambda_afd_sp", 0.0) > 0
+        or getattr(args, "lambda_afd_it", 0.0) > 0
+    )
 
 
 def _persistent_teacher_cache_available(args):
@@ -201,11 +209,7 @@ def _load_teacher(args):
         )
         return None
 
-    if (
-        args.lambda_domain <= 0
-        and not _image_text_kd_active(args)
-        and args.teacher_pretrain_epochs == 0
-    ):
+    if not _afd_active(args) and args.teacher_pretrain_epochs == 0:
         return None
 
     print(f"[Teacher] Loading {DFN5B_MODEL} in FP16...")
@@ -296,6 +300,19 @@ class CustomCLIP(nn.Module):
             cfg.seed + 202,
             prompt_depth,
         )
+        student_output_dim = clip_model.text_projection.shape[-1]
+        self.afd_image_fusion = AugmentedFeatureFusion(
+            student_output_dim,
+            DFN5B_OUTPUT_DIM,
+            cfg.afd_init,
+        )
+        self.afd_text_fusion = AugmentedFeatureFusion(
+            student_output_dim,
+            DFN5B_OUTPUT_DIM,
+            cfg.afd_init,
+        )
+        if cfg.lambda_afd_it <= 0:
+            self.afd_text_fusion.requires_grad_(False)
         photo_texts = [
             f"a photo of a {name.replace('_', ' ')}."
             for name in self.classnames
@@ -341,16 +358,13 @@ class CustomCLIP(nn.Module):
             f"n_ctx_visual={cfg.n_ctx_visual}, "
             f"prompt_depth={prompt_depth}"
         )
+        print("[Student Objective] isolated dual-axis AFD; legacy main losses disabled")
         print(
-            "[Domain KD] sketch-photo branch -> "
-            f"active={self.teacher_active}, lambda={cfg.lambda_domain}, "
-            f"temperature={cfg.kd_temperature}"
-        )
-        print(
-            "[Modality KD] photo-text + sketch-text -> "
-            f"lambda={cfg.lambda_modality}, "
-            f"photo_temperature={cfg.photo_text_kd_temperature}, "
-            f"sketch_temperature={cfg.sketch_text_kd_temperature}"
+            "[AFD] "
+            f"sketch_photo_weight={cfg.lambda_afd_sp}, "
+            f"image_text_weight={cfg.lambda_afd_it}, "
+            f"temperatures=({cfg.afd_temperature_sp}, {cfg.afd_temperature_it}), "
+            f"control={cfg.afd_control}, init={cfg.afd_init}"
         )
 
     @staticmethod
@@ -883,17 +897,51 @@ class CustomCLIP(nn.Module):
                 teacher_sketch_text, teacher_photo_text = (
                     self.get_teacher_text_features()
                 )
+        if not self.teacher_active:
+            raise RuntimeError("AFD requires teacher features or a compatible cache.")
+
+        photo_student, photo_teacher = controlled_afd_inputs(
+            photo_features,
+            teacher_photo_features,
+            self.cfg.afd_control,
+            "image",
+        )
+        sketch_student, sketch_teacher = controlled_afd_inputs(
+            sketch_features,
+            teacher_sketch_features,
+            self.cfg.afd_control,
+            "image",
+        )
+        augmented_photo = self.afd_image_fusion(photo_student, photo_teacher)
+        augmented_sketch = self.afd_image_fusion(sketch_student, sketch_teacher)
+
+        augmented_sketch_text = None
+        augmented_photo_text = None
+        if self.image_text_kd_active:
+            sketch_text_student, sketch_text_teacher = controlled_afd_inputs(
+                student_sketch_text,
+                teacher_sketch_text,
+                self.cfg.afd_control,
+                "text",
+            )
+            photo_text_student, photo_text_teacher = controlled_afd_inputs(
+                student_photo_text,
+                teacher_photo_text,
+                self.cfg.afd_control,
+                "text",
+            )
+            augmented_sketch_text = self.afd_text_fusion(
+                sketch_text_student, sketch_text_teacher
+            )
+            augmented_photo_text = self.afd_text_fusion(
+                photo_text_student, photo_text_teacher
+            )
 
         return (
-            photo_features,
-            sketch_features,
-            teacher_photo_features,
-            teacher_sketch_features,
-            self.teacher_active,
-            student_sketch_text,
-            student_photo_text,
-            teacher_sketch_text,
-            teacher_photo_text,
+            augmented_photo,
+            augmented_sketch,
+            augmented_sketch_text,
+            augmented_photo_text,
         )
 
     def extract_feature(self, image, modality):
@@ -939,18 +987,34 @@ class ZS_SBIR(pl.LightningModule):
         )
         
     def configure_optimizers(self):
-        student_params = [
+        fusion_params = [
+            parameter
+            for module in (
+                self.model.afd_image_fusion,
+                self.model.afd_text_fusion,
+            )
+            for parameter in module.parameters()
+            if parameter.requires_grad
+        ]
+        fusion_ids = {id(parameter) for parameter in fusion_params}
+        prompt_params = [
             parameter
             for parameter in self.model.parameters()
-            if parameter.requires_grad
+            if parameter.requires_grad and id(parameter) not in fusion_ids
         ]
         param_groups = [
             {
-                "params": student_params,
+                "params": prompt_params,
                 "lr": self.args.lr,
                 "momentum": self.args.momentum,
                 "weight_decay": self.args.weight_decay,
-            }
+            },
+            {
+                "params": fusion_params,
+                "lr": self.args.afd_fusion_lr,
+                "momentum": self.args.momentum,
+                "weight_decay": self.args.weight_decay,
+            },
         ]
         optimizer = torch.optim.SGD(
             params=param_groups,
@@ -966,9 +1030,12 @@ class ZS_SBIR(pl.LightningModule):
         )
         print(
             "[Optimizer] SGD "
-            f"lr={self.args.lr}, momentum={self.args.momentum}, "
+            f"prompt_lr={self.args.lr}, fusion_lr={self.args.afd_fusion_lr}, "
+            f"momentum={self.args.momentum}, "
             f"weight_decay={self.args.weight_decay}, "
-            f"trainable_params={trainable:,}"
+            f"trainable_params={trainable:,} "
+            f"(prompts={sum(p.numel() for p in prompt_params):,}, "
+            f"fusion={sum(p.numel() for p in fusion_params):,})"
         )
         
         scheduler = torch.optim.lr_scheduler.StepLR(
@@ -981,23 +1048,110 @@ class ZS_SBIR(pl.LightningModule):
 
     def forward(self, data):
         return self.model(data)
+
+    @staticmethod
+    def _gradient_statistics(loss, parameters, retain_graph=True):
+        if not parameters:
+            return (), loss.new_zeros(())
+        gradients = torch.autograd.grad(
+            loss,
+            parameters,
+            retain_graph=retain_graph,
+            allow_unused=True,
+        )
+        squared_norm = loss.new_zeros(())
+        for gradient in gradients:
+            if gradient is not None:
+                squared_norm = squared_norm + gradient.detach().float().square().sum()
+        return gradients, squared_norm.sqrt()
+
+    @staticmethod
+    def _gradient_cosine(left, right, reference):
+        dot = reference.new_zeros(())
+        left_sq = reference.new_zeros(())
+        right_sq = reference.new_zeros(())
+        for left_gradient, right_gradient in zip(left, right):
+            if left_gradient is None or right_gradient is None:
+                continue
+            left_gradient = left_gradient.detach().float()
+            right_gradient = right_gradient.detach().float()
+            dot = dot + (left_gradient * right_gradient).sum()
+            left_sq = left_sq + left_gradient.square().sum()
+            right_sq = right_sq + right_gradient.square().sum()
+        denominator = left_sq.sqrt() * right_sq.sqrt()
+        if denominator.item() == 0:
+            return reference.new_tensor(float("nan"))
+        return dot / denominator
+
+    def _log_afd_gradient_diagnostics(self, loss, loss_dict):
+        prompt_parameters = [
+            parameter
+            for module in (
+                self.model.photo_visual_prompt,
+                self.model.sketch_visual_prompt,
+            )
+            for parameter in module.parameters()
+            if parameter.requires_grad
+        ]
+        fusion_parameters = [
+            parameter
+            for module in (
+                self.model.afd_image_fusion,
+                self.model.afd_text_fusion,
+            )
+            for parameter in module.parameters()
+            if parameter.requires_grad
+        ]
+        _, prompt_norm = self._gradient_statistics(loss, prompt_parameters)
+        _, fusion_norm = self._gradient_statistics(loss, fusion_parameters)
+        self.log("afd_grad_prompt", prompt_norm, on_step=True, on_epoch=False)
+        self.log("afd_grad_fusion", fusion_norm, on_step=True, on_epoch=False)
+
+        if self.args.lambda_afd_sp > 0 and self.args.lambda_afd_it > 0:
+            sp_gradients, sp_norm = self._gradient_statistics(
+                loss_dict["afd_sp_weighted"], prompt_parameters
+            )
+            it_gradients, it_norm = self._gradient_statistics(
+                loss_dict["afd_it_weighted"], prompt_parameters
+            )
+            cosine = self._gradient_cosine(sp_gradients, it_gradients, loss)
+            self.log("afd_grad_prompt_sp", sp_norm, on_step=True, on_epoch=False)
+            self.log("afd_grad_prompt_it", it_norm, on_step=True, on_epoch=False)
+            self.log(
+                "afd_grad_prompt_sp_it_cosine",
+                cosine,
+                on_step=True,
+                on_epoch=False,
+            )
     
     def training_step(self, batch, batch_idx):
         features = self(batch)
-        loss, loss_dict = loss_fn(self.args, features)
+        loss, loss_dict = loss_fn(self.args, features, batch[4])
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         bar_names = {
-            "domain_kd": "DOMAIN",
-            "modality_kd": "MODALITY",
+            "afd_sp": "AFD_SP",
+            "afd_it": "AFD_IT",
         }
-        for key, bar_name in bar_names.items():
+        for key, value in loss_dict.items():
             self.log(
-                bar_name,
-                loss_dict[key],
+                bar_names.get(key, key),
+                value,
                 on_step=True,
                 on_epoch=False,
-                prog_bar=True,
+                prog_bar=key in bar_names,
             )
+        if batch_idx % self.args.afd_grad_every == 0:
+            self._log_afd_gradient_diagnostics(loss, loss_dict)
+        if batch_idx == 0:
+            image_student, image_teacher = self.model.afd_image_fusion.branch_norms()
+            text_student, text_teacher = self.model.afd_text_fusion.branch_norms()
+            for name, value in (
+                ("afd_image_student_weight_norm", image_student),
+                ("afd_image_teacher_weight_norm", image_teacher),
+                ("afd_text_student_weight_norm", text_student),
+                ("afd_text_teacher_weight_norm", text_teacher),
+            ):
+                self.log(name, value, on_step=False, on_epoch=True)
         return loss
     
     def validation_step(self, batch, batch_idx, dataloader_idx):
