@@ -15,6 +15,14 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
+
+# TensorBoard versions bundled by some Kaggle images still use NumPy 1 aliases.
+if "string_" not in np.__dict__:
+    np.string_ = np.bytes_
+if "unicode_" not in np.__dict__:
+    np.unicode_ = np.str_
+
 
 PROJECT = Path("/kaggle/working/KD-SBIR-AVKD")
 DEFAULT_ROOT = "/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy"
@@ -65,7 +73,11 @@ def read_scalars(run_name):
     if not curves.get("precision") or not curves.get("mAP"):
         raise RuntimeError(f"Retrieval metrics are missing for {run_name}")
     maps = {item["step"]: item["value"] for item in curves["mAP"]}
-    selected = max(curves["precision"], key=lambda item: item["value"])
+    trained_precisions = [item for item in curves["precision"] if item["step"] > 0]
+    selected = max(
+        trained_precisions or curves["precision"],
+        key=lambda item: item["value"],
+    )
     row = {
         "run": run_name,
         "selected_step": selected["step"],
@@ -238,6 +250,35 @@ def main():
     comparisons["best_verified_full_minus_student_only_full_mAP_pp"] = 100 * (
         best["selected_mAP"] - by_name["student_only_full"]["selected_mAP"]
     )
+    matched_full = by_name["verified_full_sp0p3_it0p3"]
+    for control in (
+        "student_only_full",
+        "control_shuffled_image",
+        "control_shuffled_text",
+        "control_shuffled_both",
+        "control_teacher_only",
+    ):
+        comparisons[f"verified_full_0p3_minus_{control}_mAP_pp"] = 100 * (
+            matched_full["selected_mAP"] - by_name[control]["selected_mAP"]
+        )
+    mechanism_checks = {
+        "teacher_improves_sp_axis": (
+            by_name["verified_sp_w1p0"]["selected_mAP"]
+            > by_name["student_only_sp"]["selected_mAP"]
+        ),
+        "teacher_improves_it_axis": (
+            by_name["verified_it_w1p0"]["selected_mAP"]
+            > by_name["student_only_it"]["selected_mAP"]
+        ),
+        "matched_full_beats_student_only": (
+            matched_full["selected_mAP"]
+            > by_name["student_only_full"]["selected_mAP"]
+        ),
+        "matched_full_beats_shuffled_both": (
+            matched_full["selected_mAP"]
+            > by_name["control_shuffled_both"]["selected_mAP"]
+        ),
+    }
     analysis = {
         "protocol": "one-seed AFD mechanism/hyperparameter study; no significance claim",
         "student_objective": "lambda_afd_sp * AFD_SP + lambda_afd_it * AFD_IT",
@@ -258,6 +299,7 @@ def main():
         "main_base": "b2d50842f7831c9eb14f06ddb6cbe5bbd22255b6",
         "best_verified_full": best,
         "comparisons": comparisons,
+        "mechanism_checks": mechanism_checks,
         "rows": rows,
     }
     (output / "analysis.json").write_text(json.dumps(analysis, indent=2), encoding="utf-8")
@@ -282,6 +324,7 @@ def main():
     print("Completed AFD runs:", len(rows))
     print("Best verified full:", best["name"], best["selected_mAP"])
     print("Teacher-use comparisons (mAP pp):", comparisons)
+    print("Mechanism checks:", mechanism_checks)
     print("Main student losses used: no")
     print("Send this ZIP:", archive)
     try:
