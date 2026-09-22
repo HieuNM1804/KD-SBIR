@@ -13,7 +13,7 @@ from pathlib import Path
 
 REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/clip-kd-dual-axis-afd"
-EXPECTED_COMMIT = "__PINNED_AFD_SOURCE_COMMIT__"
+EXPECTED_COMMIT = "baaf68ad0891fcc7d2a7b49a61761ebf52bf5420"
 BASE_COMMIT = "b2d50842f7831c9eb14f06ddb6cbe5bbd22255b6"
 TASK = "clip_kd_dual_axis_afd"
 WORKING_ROOT = Path("/kaggle/working")
