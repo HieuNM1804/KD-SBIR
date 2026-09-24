@@ -1,9 +1,16 @@
-# KD-SBIR: Teacher Visual Prompts, Student Visual-Only Prompts
+# KD-SBIR: LAION-2B CLIP ViT-H/14 Teacher
 
-This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from
-`experiment/teacher-visual-prompt-tuning`. The teacher has separate photo and
-sketch deep visual prompts, learns only from retrieval triplet loss, and is
-validated on the unseen retrieval split after each pretraining epoch.
+This branch is based directly on `main` at
+`b2d50842f7831c9eb14f06ddb6cbe5bbd22255b6`. It replaces the DFN5B
+ViT-H/14 checkpoint with the 224-pixel LAION-2B ViT-H/14 checkpoint while
+leaving the student and distillation objectives unchanged. The teacher uses
+OpenCLIP model `ViT-H-14`, pretrained tag `laion2b_s32b_b79k`, and
+1024-dimensional image/text embeddings.
+
+The teacher has separate photo and sketch deep visual prompts, learns only
+from retrieval triplet loss, and is validated on the unseen retrieval split
+after each pretraining epoch. With three tokens per modality and prompt depth
+12, the ViT-H/14 teacher has 92,160 trainable prompt parameters.
 
 The student CLIP backbone is fully frozen. Its only trainable parameters are
 independent photo and sketch deep visual prompts. The student text encoder has
@@ -45,7 +52,7 @@ sketch-text KD. Setting an objective weight to zero disables that objective.
     --lambda_teacher_retrieval 1.5 \
     --teacher_triplet_margin 0.2 \
     --seed 42 \
-    --exp_name teacher_visual_student_visual_only \
+    --exp_name laion_h14_teacher_visual_student_visual_only \
     --progress
 ```
 
