@@ -31,12 +31,13 @@ from src.teacher_prompts import build_teacher_prompt_controller
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ---------------------------------------------------------------------------
-# DFN5B teacher loader
+# DFN2B ViT-L/14 S39B teacher loader
 # ---------------------------------------------------------------------------
-DFN5B_MODEL = "ViT-H-14-quickgelu"
-DFN5B_PRETRAINED = "dfn5b"
-DFN5B_OUTPUT_DIM = 1024
-TEACHER_CACHE_FORMAT_VERSION = 6
+TEACHER_DISPLAY_NAME = "DFN2B ViT-L/14 S39B"
+TEACHER_MODEL = "ViT-L-14"
+TEACHER_PRETRAINED = "dfn2b_s39b"
+TEACHER_OUTPUT_DIM = 768
+TEACHER_CACHE_FORMAT_VERSION = 7
 
 
 def _retrieval_metrics(
@@ -86,9 +87,9 @@ def _retrieval_metrics(
 def _teacher_training_config(args):
     """Parameters that can change the prompt-tuned teacher targets."""
     return {
-        "teacher_model": DFN5B_MODEL,
-        "teacher_pretrained": DFN5B_PRETRAINED,
-        "teacher_output_dim": DFN5B_OUTPUT_DIM,
+        "teacher_model": TEACHER_MODEL,
+        "teacher_pretrained": TEACHER_PRETRAINED,
+        "teacher_output_dim": TEACHER_OUTPUT_DIM,
         "teacher_precision": "fp16",
         "teacher_n_ctx_visual": args.teacher_n_ctx_visual,
         "teacher_prompt_depth": args.teacher_prompt_depth,
@@ -197,7 +198,7 @@ def _load_teacher(args):
     if _persistent_teacher_cache_available(args):
         print(
             "[Teacher Cache] persistent cache found; "
-            "skipping DFN5B loading."
+            f"skipping {TEACHER_DISPLAY_NAME} loading."
         )
         return None
 
@@ -208,17 +209,20 @@ def _load_teacher(args):
     ):
         return None
 
-    print(f"[Teacher] Loading {DFN5B_MODEL} in FP16...")
+    print(
+        f"[Teacher] Loading {TEACHER_DISPLAY_NAME} "
+        f"({TEACHER_MODEL}, pretrained={TEACHER_PRETRAINED}) in FP16..."
+    )
     teacher = open_clip.create_model(
-        DFN5B_MODEL,
-        pretrained=DFN5B_PRETRAINED,
+        TEACHER_MODEL,
+        pretrained=TEACHER_PRETRAINED,
         precision="fp16",
         device=device,
     )
     teacher.eval().requires_grad_(False)
     if args.teacher_pretrain_epochs > 0 or _image_text_kd_active(args):
-        teacher.text_tokenizer = open_clip.get_tokenizer(DFN5B_MODEL)
-    teacher.output_dim = DFN5B_OUTPUT_DIM
+        teacher.text_tokenizer = open_clip.get_tokenizer(TEACHER_MODEL)
+    teacher.output_dim = TEACHER_OUTPUT_DIM
     return teacher
 
 
@@ -429,7 +433,7 @@ class CustomCLIP(nn.Module):
         cache_size_mb = cache_path.stat().st_size / 1024**2
         print(
             f"[Teacher Cache] loaded {cache_path} ({cache_size_mb:.1f} MB); "
-            "skipped DFN5B encoding and teacher pretraining."
+            f"skipped {TEACHER_DISPLAY_NAME} encoding and teacher pretraining."
         )
 
     def _encode_teacher_image(self, images, modality):
@@ -658,7 +662,7 @@ class CustomCLIP(nn.Module):
         )
         output = torch.empty(
             len(paths),
-            DFN5B_OUTPUT_DIM,
+            TEACHER_OUTPUT_DIM,
             dtype=torch.float16,
         )
         offset = 0
@@ -732,7 +736,7 @@ class CustomCLIP(nn.Module):
         )
         cache_size_mb = (
             image_count
-            * DFN5B_OUTPUT_DIM
+            * TEACHER_OUTPUT_DIM
             * torch.tensor([], dtype=torch.float16).element_size()
             / 1024**2
         )
@@ -787,7 +791,7 @@ class CustomCLIP(nn.Module):
         print(
             "[Teacher Cache] materialized tuned seen-image features; "
             f"images={image_count:,}, memory={cache_size_mb:.1f} MB. "
-            "DFN5B released."
+            f"{TEACHER_DISPLAY_NAME} released."
         )
 
     def train(self, mode=True):
