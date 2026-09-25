@@ -7,17 +7,11 @@ contains every unseen photo plus photos from the fixed seen-category subset in
 `GENERALIZED_CLASSES`. Relevant photos are determined by category; cosine
 values remain a continuous ranking score.
 
-The fixed seen distractors are 21 Sketchy-2 classes (`airplane`, `apple`,
-`beetle`, `bench`, `candle`, `couch`, `deer`, `dog`, `elephant`, `hedgehog`,
-`horse`, `kangaroo`, `pickup_truck`, `pig`, `scorpion`, `shark`, `starfish`,
-`table`, `teapot`, `tiger`, `umbrella`) and 44 TU-Berlin classes (`banana`,
-`bee`, `beer-mug`, `bench`, `bottle opener`, `bulldozer`, `chair`,
-`crocodile`, `elephant`, `envelope`, `fish`, `flower with stem`, `giraffe`,
-`hamburger`, `helmet`, `hourglass`, `human-skeleton`, `ice-cream-cone`,
-`key`, `keyboard`, `lion`, `lobster`, `mailbox`, `monkey`, `nose`, `pen`,
-`pickup truck`, `potted plant`, `pretzel`, `pumpkin`, `revolver`,
-`satellite dish`, `socks`, `spider`, `stapler`, `t-shirt`, `table`, `teapot`,
-`tennis-racket`, `tent`, `tooth`, `trumpet`, `umbrella`, `wine-bottle`).
+The fixed seen distractors are nine Sketchy-2 classes (`teapot`, `harp`,
+`piano`, `trumpet`, `saxophone`, `hourglass`, `mushroom`, `pretzel`, `bell`)
+and five TU-Berlin classes (`blimp`, `tablelamp`, `telephone`,
+`human-skeleton`, `pickup truck`). `airplane` is not a seen distractor because
+it belongs to the fixed TU-Berlin unseen split.
 
 The branch defaults to `--eval_protocol gzs`. Use `--eval_protocol zs` only as
 an unseen-gallery ablation. Sketchy-2 reports mAP@200/P@200; TU-Berlin reports

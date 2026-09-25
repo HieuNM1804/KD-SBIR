@@ -49,8 +49,8 @@ class GZSDatasetProtocolTest(unittest.TestCase):
             )
 
     def test_generalized_classes_are_seen_only(self):
-        self.assertEqual(len(GENERALIZED_CLASSES["sketchy_2"]), 21)
-        self.assertEqual(len(GENERALIZED_CLASSES["tuberlin"]), 44)
+        self.assertEqual(len(GENERALIZED_CLASSES["sketchy_2"]), 9)
+        self.assertEqual(len(GENERALIZED_CLASSES["tuberlin"]), 5)
         for dataset, classes in GENERALIZED_CLASSES.items():
             self.assertEqual(len(classes), len(set(classes)))
             self.assertTrue(set(classes).isdisjoint(UNSEEN_CLASSES[dataset]))
