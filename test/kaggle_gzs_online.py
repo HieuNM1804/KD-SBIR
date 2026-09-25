@@ -1,8 +1,8 @@
-"""Build an offline Kaggle bundle for the fixed-subset GZS branch.
+"""Build an offline Kaggle bundle for the compact fixed-subset GZS branch.
 
 Run this cell in an online Kaggle notebook, save the output, and attach it to
 the offline notebook.  The manifest pins the exact GZS source commit so that
-the expanded seen-class lists cannot silently drift.
+the compact seen-class lists cannot silently drift.
 """
 
 from pathlib import Path
@@ -18,7 +18,7 @@ WORKING = Path("/kaggle/working")
 BUNDLE = WORKING / "offline_bundle"
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/gzs-sbir"
-COMMIT = "3a2a35785de40186064bcec28287622b7d72d4b8"
+COMMIT = "de820fc9a774353f350a8b08fced73390e8dd31b"
 
 WHEELS = BUNDLE / "wheels"
 SOURCE = BUNDLE / "source"
