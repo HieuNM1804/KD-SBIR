@@ -2,15 +2,15 @@
 
 This branch trains the existing teacher/student distillation pipeline on one
 source dataset and evaluates the source-selected student checkpoint on a
-different target dataset. Target sketches/photos are never used by teacher
-pretraining, student training, or checkpoint selection.
+different target dataset. Target images are never used by teacher pretraining,
+student training, or checkpoint selection.
 
-The target query/gallery uses the fixed subsets published by the
-SpLIP/ZSE-SBIR protocol: Sketchy-1 -> TU-Berlin has 21 classes and Sketchy-1 ->
-QuickDraw has 11 classes. They are stored in `src/data_config.py`. Evaluation
-reports mAP@all and P@100. The code prints the exact selected class list and
-fails if a target directory is missing or a target class appears in source
-training. A custom direction remains possible through `--target_classes_file`.
+The target query/gallery uses the fixed shared-category subsets published by
+the SpLIP/ZSE-SBIR protocol: Sketchy-1 -> TU-Berlin has 21 classes and
+Sketchy-1 -> QuickDraw has 11 classes. They are stored in
+`src/data_config.py`. Evaluation reports mAP@all and P@100. The code prints the
+exact selected class list and fails if a target directory is missing. A custom
+direction remains possible through `--target_classes_file`.
 
 This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from
 `experiment/teacher-visual-prompt-tuning`. The teacher has separate photo and

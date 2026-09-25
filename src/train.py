@@ -19,7 +19,6 @@ from src.dataset import (
     TrainDataset,
     ValidDataset,
     WorkerInvariantSampler,
-    canonical_category_name,
 )
 from src.data_config import CROSS_DATASET_CLASSES, UNSEEN_CLASSES
 from src.model import ZS_SBIR, default_teacher_cache_path
@@ -78,21 +77,6 @@ def get_loaders(args):
                 "--target_classes_file for a custom direction."
             )
         target_classes = list(CROSS_DATASET_CLASSES[protocol_key])
-
-    source_semantics = {
-        canonical_category_name(category)
-        for category in train_dataset.all_categories
-    }
-    leaked = [
-        category
-        for category in target_classes
-        if canonical_category_name(category) in source_semantics
-    ]
-    if leaked:
-        raise ValueError(
-            "Cross-dataset target is not zero-shot relative to source train: "
-            + ", ".join(leaked)
-        )
 
     target_val_sketch = CrossDatasetValidDataset(
         args.target_root,
