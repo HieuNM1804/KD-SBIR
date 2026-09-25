@@ -104,7 +104,13 @@ if __name__ == "__main__":
         choices=sorted(UNSEEN_CLASSES),
         help="Zero-shot split.",
     )
-    parser.add_argument("--backbone", type=str, default="ViT-B/32")
+    parser.add_argument(
+        "--backbone",
+        type=str,
+        default="TinyCLIP-ViT-40M-32-Text-19M",
+        choices=("TinyCLIP-ViT-40M-32-Text-19M",),
+        help="Frozen TinyCLIP student backbone used by this branch.",
+    )
     parser.add_argument("--max_size", type=int, default=224)
     parser.add_argument(
         "--n_ctx_visual",
@@ -319,7 +325,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--exp_name",
         type=str,
-        default="teacher_visual_student_visual_only",
+        default="dfn5b_tinyclip40m_visual_prompts",
     )
 
     args = parser.parse_args()

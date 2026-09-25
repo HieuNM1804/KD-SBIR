@@ -16,8 +16,6 @@ import open_clip
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from clip import clip
-from clip.model import build_model
 from src.dataset import (
     TeacherFeatureDataset,
     WorkerInvariantSampler,
@@ -27,6 +25,7 @@ from src.losses import (
     loss_fn,
 )
 from src.teacher_prompts import build_teacher_prompt_controller
+from src.tinyclip_student import load_tinyclip_student
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -163,14 +162,7 @@ def _persistent_teacher_cache_available(args):
 
 
 def _load_clip_model(backbone):
-    model_path = clip.download_model(backbone)
-    try:
-        model = torch.jit.load(model_path, map_location="cpu").eval()
-        state_dict = model.state_dict()
-    except RuntimeError:
-        state_dict = torch.load(model_path, map_location="cpu")
-
-    return build_model(state_dict)
+    return load_tinyclip_student(backbone)
 
 
 def _build_teacher_prompts(args, teacher):
@@ -275,10 +267,10 @@ class CustomCLIP(nn.Module):
         self.clip_model = clip_model
         self.dtype = clip_model.dtype
 
-        visual_width = clip_model.visual.ln_pre.normalized_shape[0]
+        visual_width = clip_model.visual_width
         prompt_depth = min(
             cfg.prompt_depth,
-            clip_model.visual.transformer.layers,
+            clip_model.visual_layers,
         )
         self.classnames = tuple(classnames)
         self.image_text_kd_active = _image_text_kd_active(cfg)
@@ -306,12 +298,12 @@ class CustomCLIP(nn.Module):
         ]
         self.register_buffer(
             "_student_photo_tokens",
-            clip.tokenize(photo_texts),
+            clip_model.tokenize(photo_texts),
             persistent=False,
         )
         self.register_buffer(
             "_student_sketch_tokens",
-            clip.tokenize(sketch_texts),
+            clip_model.tokenize(sketch_texts),
             persistent=False,
         )
         self.register_buffer(

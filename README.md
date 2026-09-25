@@ -1,14 +1,15 @@
-# KD-SBIR: Teacher Visual Prompts, Student Visual-Only Prompts
+# KD-SBIR: DFN5B Teacher, TinyCLIP ViT-40M/32 Student
 
 This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from
 `experiment/teacher-visual-prompt-tuning`. The teacher has separate photo and
 sketch deep visual prompts, learns only from retrieval triplet loss, and is
 validated on the unseen retrieval split after each pretraining epoch.
 
-The student CLIP backbone is fully frozen. Its only trainable parameters are
-independent photo and sketch deep visual prompts. The student text encoder has
-no learnable prompt tokens and remains fully frozen. Image-text distillation
-uses fixed CLIP features from these modality-specific templates:
+The student is `TinyCLIP-ViT-40M-32-Text-19M`, initialized from the official
+LAION-400M checkpoint. Its image and text towers are fully frozen. The only
+trainable student parameters are independent photo and sketch deep visual
+prompts. Image-text distillation uses fixed TinyCLIP text features from these
+modality-specific templates:
 
 - `a photo of a {class}.`
 - `a sketch of a {class}.`
@@ -20,6 +21,7 @@ sketch-text KD. Setting an objective weight to zero disables that objective.
 !python -m src.train \
     --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
     --dataset sketchy_1 \
+    --backbone TinyCLIP-ViT-40M-32-Text-19M \
     --epochs 7 \
     --workers 8 \
     --batch_size 64 \
@@ -45,7 +47,7 @@ sketch-text KD. Setting an objective weight to zero disables that objective.
     --lambda_teacher_retrieval 1.5 \
     --teacher_triplet_margin 0.2 \
     --seed 42 \
-    --exp_name teacher_visual_student_visual_only \
+    --exp_name dfn5b_tinyclip40m_visual_prompts \
     --progress
 ```
 
@@ -53,6 +55,13 @@ Teacher caches are named from the dataset and complete teacher configuration.
 Changing only student prompts, losses, or optimizer settings reuses a compatible
 teacher cache. Use `--rebuild_teacher_cache` only when intentionally replacing
 that cache.
+
+The student checkpoint is pinned to Hugging Face repository
+`wkcn/TinyCLIP-ViT-40M-32-Text-19M-LAION400M`, revision
+`886b932a36b8fa6c18a8e423a67ca21af5316af8`. Set `TINYCLIP_MODEL_PATH` to a
+local snapshot directory for offline execution. The Kaggle offline setup copies
+that snapshot to `/kaggle/working/tinyclip_student`, which is detected
+automatically.
 
 Teacher prompt pretraining keeps the epoch with the highest unseen P@K, restores
 that prompt state, and materializes the distillation cache from it. Student

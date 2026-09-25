@@ -9,3 +9,5 @@ ftfy
 regex
 tqdm
 tensorboard
+transformers
+safetensors
