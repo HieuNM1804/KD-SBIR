@@ -226,7 +226,7 @@ if __name__ == "__main__":
         help=(
             "Pretrain teacher visual prompts for this many epochs, freeze them, "
             "materialize tuned features before student training. Set 0 to "
-            "use the original frozen DFN5B teacher."
+            "use the original frozen MetaCLIP ViT-H/14 teacher."
         ),
     )
     parser.add_argument(
@@ -253,7 +253,7 @@ if __name__ == "__main__":
         default="",
         help=(
             "Optional .pt file for persistent prompt-tuned teacher features and "
-            "text targets. Existing compatible files skip DFN5B entirely."
+            "text targets. Existing compatible files skip teacher loading."
         ),
     )
     parser.add_argument(
@@ -319,7 +319,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--exp_name",
         type=str,
-        default="teacher_visual_student_visual_only",
+        default="metaclip_h14_teacher_visual_student_visual_only",
     )
 
     args = parser.parse_args()
