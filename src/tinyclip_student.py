@@ -7,9 +7,9 @@ import torch
 import torch.nn as nn
 
 
-TINYCLIP_MODEL_NAME = "TinyCLIP-ViT-40M-32-Text-19M"
-TINYCLIP_REPOSITORY = "wkcn/TinyCLIP-ViT-40M-32-Text-19M-LAION400M"
-TINYCLIP_REVISION = "886b932a36b8fa6c18a8e423a67ca21af5316af8"
+TINYCLIP_MODEL_NAME = "TinyCLIP-ViT-61M-32-Text-29M"
+TINYCLIP_REPOSITORY = "wkcn/TinyCLIP-ViT-61M-32-Text-29M-LAION400M"
+TINYCLIP_REVISION = "94cbbea5c7949cfe7bdafde64bcea5e403f59852"
 TINYCLIP_OUTPUT_DIM = 512
 TINYCLIP_IMAGE_SIZE = 224
 TINYCLIP_PATCH_SIZE = 32
@@ -134,7 +134,7 @@ def _model_source():
             raise FileNotFoundError(f"TINYCLIP_MODEL_PATH is not a directory: {path}")
         return str(path), None, True
 
-    kaggle_copy = Path("/kaggle/working/tinyclip_student")
+    kaggle_copy = Path("/kaggle/working/tinyclip61m_student")
     if kaggle_copy.is_dir():
         return str(kaggle_copy), None, True
 
@@ -157,18 +157,23 @@ def load_tinyclip_student(backbone):
     model = CLIPModel.from_pretrained(source, **kwargs)
     tokenizer = AutoTokenizer.from_pretrained(source, **kwargs)
     vision = model.config.vision_config
+    text = model.config.text_config
     actual = {
         "image_size": int(vision.image_size),
         "patch_size": int(vision.patch_size),
         "hidden_size": int(vision.hidden_size),
         "layers": int(vision.num_hidden_layers),
+        "text_hidden_size": int(text.hidden_size),
+        "text_layers": int(text.num_hidden_layers),
         "projection_dim": int(model.config.projection_dim),
     }
     expected = {
         "image_size": TINYCLIP_IMAGE_SIZE,
         "patch_size": TINYCLIP_PATCH_SIZE,
-        "hidden_size": 512,
+        "hidden_size": 640,
         "layers": 12,
+        "text_hidden_size": 512,
+        "text_layers": 9,
         "projection_dim": TINYCLIP_OUTPUT_DIM,
     }
     if actual != expected:

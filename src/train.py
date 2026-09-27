@@ -107,8 +107,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--backbone",
         type=str,
-        default="TinyCLIP-ViT-40M-32-Text-19M",
-        choices=("TinyCLIP-ViT-40M-32-Text-19M",),
+        default="TinyCLIP-ViT-61M-32-Text-29M",
+        choices=("TinyCLIP-ViT-61M-32-Text-29M",),
         help="Frozen TinyCLIP student backbone used by this branch.",
     )
     parser.add_argument("--max_size", type=int, default=224)
@@ -325,7 +325,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--exp_name",
         type=str,
-        default="dfn5b_tinyclip40m_visual_prompts",
+        default="dfn5b_tinyclip61m_visual_prompts",
     )
 
     args = parser.parse_args()
