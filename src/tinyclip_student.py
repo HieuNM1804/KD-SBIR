@@ -60,12 +60,25 @@ class PromptedTinyCLIPVision(nn.Module):
                     hidden.shape[0], -1, -1
                 )
                 hidden = torch.cat((hidden[:, :-prompt_length], deep_prompt), dim=1)
-            hidden = layer(
+            layer_output = layer(
                 hidden,
                 attention_mask=None,
                 causal_attention_mask=None,
                 output_attentions=False,
-            )[0]
+            )
+            # Transformers releases differ here: older CLIPEncoderLayer
+            # versions return ``(hidden_states,)``, while newer versions
+            # return the tensor directly when attentions are disabled.
+            hidden = (
+                layer_output[0]
+                if isinstance(layer_output, (tuple, list))
+                else layer_output
+            )
+            if not isinstance(hidden, torch.Tensor) or hidden.ndim != 3:
+                raise RuntimeError(
+                    "TinyCLIP encoder layer returned an unexpected hidden "
+                    f"state shape: {getattr(hidden, 'shape', None)}."
+                )
 
         pooled = vision_model.post_layernorm(hidden[:, 0, :])
         return self._projection(pooled)

@@ -23,6 +23,20 @@ class RecordingLayer(nn.Module):
         return (hidden_states,)
 
 
+class RecordingTensorLayer(RecordingLayer):
+    """Match recent Transformers CLIPEncoderLayer return semantics."""
+
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        causal_attention_mask=None,
+        output_attentions=False,
+    ):
+        self.seen = hidden_states.detach().clone()
+        return hidden_states
+
+
 class FakeEmbeddings(nn.Module):
     def __init__(self, width):
         super().__init__()
@@ -57,6 +71,32 @@ class PromptedTinyCLIPVisionTest(unittest.TestCase):
         self.assertEqual(output.shape, (4, width))
         self.assertEqual(layers[0].seen.shape, (4, 7, width))
         self.assertTrue(torch.equal(layers[0].seen[:, -2:], shallow.expand(4, -1, -1)))
+        self.assertTrue(torch.equal(layers[1].seen[:, -2:], deep_one.expand(4, -1, -1)))
+        self.assertTrue(torch.equal(layers[2].seen[:, -2:], deep_two.expand(4, -1, -1)))
+
+    def test_accepts_tensor_returned_by_encoder_layer(self):
+        width = 8
+        layers = nn.ModuleList([RecordingTensorLayer() for _ in range(3)])
+        vision = nn.Module()
+        vision.config = SimpleNamespace(hidden_size=width)
+        vision.embeddings = FakeEmbeddings(width)
+        vision.pre_layrnorm = nn.Identity()
+        vision.post_layernorm = nn.Identity()
+        vision.encoder = nn.Module()
+        vision.encoder.layers = layers
+        prompted = PromptedTinyCLIPVision(vision, nn.Identity())
+
+        shallow = torch.ones(2, width)
+        deep_one = torch.full((2, width), 2.0)
+        deep_two = torch.full((2, width), 3.0)
+        output = prompted(
+            torch.randn(4, 3, 16, 16),
+            shallow,
+            [deep_one, deep_two],
+        )
+
+        self.assertEqual(output.shape, (4, width))
+        self.assertEqual(layers[0].seen.shape, (4, 7, width))
         self.assertTrue(torch.equal(layers[1].seen[:, -2:], deep_one.expand(4, -1, -1)))
         self.assertTrue(torch.equal(layers[2].seen[:, -2:], deep_two.expand(4, -1, -1)))
 
