@@ -1,12 +1,12 @@
-# KD-SBIR: DFN5B Teacher, TinyCLIP ViT-40M/32 Student
+# KD-SBIR: DFN5B Teacher, TinyCLIP ViT-8M/16 Student
 
 This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from
 `experiment/teacher-visual-prompt-tuning`. The teacher has separate photo and
 sketch deep visual prompts, learns only from retrieval triplet loss, and is
 validated on the unseen retrieval split after each pretraining epoch.
 
-The student is `TinyCLIP-ViT-40M-32-Text-19M`, initialized from the official
-LAION-400M checkpoint. Its image and text towers are fully frozen. The only
+The student is `TinyCLIP-ViT-8M-16-Text-3M`, initialized from the official
+YFCC-15M checkpoint. Its image and text towers are fully frozen. The only
 trainable student parameters are independent photo and sketch deep visual
 prompts. Image-text distillation uses fixed TinyCLIP text features from these
 modality-specific templates:
@@ -21,13 +21,13 @@ sketch-text KD. Setting an objective weight to zero disables that objective.
 !python -m src.train \
     --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
     --dataset sketchy_1 \
-    --backbone TinyCLIP-ViT-40M-32-Text-19M \
+    --backbone TinyCLIP-ViT-8M-16-Text-3M \
     --epochs 7 \
     --workers 8 \
     --batch_size 64 \
     --test_batch_size 1024 \
     --n_ctx_visual 3 \
-    --prompt_depth 12 \
+    --prompt_depth 10 \
     --lambda_domain 1.0 \
     --lambda_modality 1.0 \
     --photo_text_kd_temperature 0.2 \
@@ -47,7 +47,7 @@ sketch-text KD. Setting an objective weight to zero disables that objective.
     --lambda_teacher_retrieval 1.5 \
     --teacher_triplet_margin 0.2 \
     --seed 42 \
-    --exp_name dfn5b_tinyclip40m_visual_prompts \
+    --exp_name dfn5b_tinyclip8m_visual_prompts \
     --progress
 ```
 
@@ -57,8 +57,8 @@ teacher cache. Use `--rebuild_teacher_cache` only when intentionally replacing
 that cache.
 
 The student checkpoint is pinned to Hugging Face repository
-`wkcn/TinyCLIP-ViT-40M-32-Text-19M-LAION400M`, revision
-`886b932a36b8fa6c18a8e423a67ca21af5316af8`. Set `TINYCLIP_MODEL_PATH` to a
+`wkcn/TinyCLIP-ViT-8M-16-Text-3M-YFCC15M`, revision
+`a2a8c6eaa2549ad66eb7c31b85022bf58273a26c`. Set `TINYCLIP_MODEL_PATH` to a
 local snapshot directory for offline execution. The Kaggle offline setup copies
 that snapshot to `/kaggle/working/tinyclip_student`, which is detected
 automatically.

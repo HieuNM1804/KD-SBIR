@@ -7,12 +7,12 @@ import torch
 import torch.nn as nn
 
 
-TINYCLIP_MODEL_NAME = "TinyCLIP-ViT-40M-32-Text-19M"
-TINYCLIP_REPOSITORY = "wkcn/TinyCLIP-ViT-40M-32-Text-19M-LAION400M"
-TINYCLIP_REVISION = "886b932a36b8fa6c18a8e423a67ca21af5316af8"
+TINYCLIP_MODEL_NAME = "TinyCLIP-ViT-8M-16-Text-3M"
+TINYCLIP_REPOSITORY = "wkcn/TinyCLIP-ViT-8M-16-Text-3M-YFCC15M"
+TINYCLIP_REVISION = "a2a8c6eaa2549ad66eb7c31b85022bf58273a26c"
 TINYCLIP_OUTPUT_DIM = 512
 TINYCLIP_IMAGE_SIZE = 224
-TINYCLIP_PATCH_SIZE = 32
+TINYCLIP_PATCH_SIZE = 16
 
 
 class PromptedTinyCLIPVision(nn.Module):
@@ -167,8 +167,8 @@ def load_tinyclip_student(backbone):
     expected = {
         "image_size": TINYCLIP_IMAGE_SIZE,
         "patch_size": TINYCLIP_PATCH_SIZE,
-        "hidden_size": 512,
-        "layers": 12,
+        "hidden_size": 256,
+        "layers": 10,
         "projection_dim": TINYCLIP_OUTPUT_DIM,
     }
     if actual != expected:
