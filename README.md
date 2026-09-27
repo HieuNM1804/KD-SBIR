@@ -1,11 +1,11 @@
-# KD-SBIR: DFN5B Teacher, TinyCLIP ViT-22M/32 Student
+# KD-SBIR: DFN5B Teacher, TinyCLIP ViT-45M/32 Student
 
 This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from
 `experiment/teacher-visual-prompt-tuning`. The teacher has separate photo and
 sketch deep visual prompts, learns only from retrieval triplet loss, and is
 validated on the unseen retrieval split after each pretraining epoch.
 
-The student is the auto-pruned `TinyCLIP-ViT-22M-32-Text-10M`, initialized
+The student is the auto-pruned `TinyCLIP-ViT-45M-32-Text-18M`, initialized
 from the official LAION-400M checkpoint. Its physically pruned image and text
 towers are fully frozen. The only trainable student parameters are independent
 photo and sketch deep visual prompts. Image-text distillation uses fixed
@@ -21,7 +21,7 @@ sketch-text KD. Setting an objective weight to zero disables that objective.
 !python -m src.train \
     --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
     --dataset sketchy_1 \
-    --backbone TinyCLIP-ViT-22M-32-Text-10M \
+    --backbone TinyCLIP-ViT-45M-32-Text-18M \
     --epochs 7 \
     --workers 8 \
     --batch_size 64 \
@@ -47,7 +47,7 @@ sketch-text KD. Setting an objective weight to zero disables that objective.
     --lambda_teacher_retrieval 1.5 \
     --teacher_triplet_margin 0.2 \
     --seed 42 \
-    --exp_name dfn5b_tinyclip22m_visual_prompts \
+    --exp_name dfn5b_tinyclip45m_visual_prompts \
     --progress
 ```
 
@@ -57,10 +57,10 @@ teacher cache. Use `--rebuild_teacher_cache` only when intentionally replacing
 that cache.
 
 The student checkpoint is the official
-`TinyCLIP-auto-ViT-22M-32-Text-10M-LAION400M.pt` release. Set
+`TinyCLIP-auto-ViT-45M-32-Text-18M-LAION400M.pt` release. Set
 `TINYCLIP_MODEL_PATH` to that file or its containing directory for offline
 execution. The Kaggle offline setup copies it to
-`/kaggle/working/tinyclip22m_student`, which is detected automatically.
+`/kaggle/working/tinyclip45m_student`, which is detected automatically.
 
 Teacher prompt pretraining keeps the epoch with the highest unseen P@K, restores
 that prompt state, and materializes the distillation cache from it. Student

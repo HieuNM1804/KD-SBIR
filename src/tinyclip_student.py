@@ -1,4 +1,4 @@
-"""Frozen auto-pruned TinyCLIP ViT-22M/32 student with visual prompts."""
+"""Frozen auto-pruned TinyCLIP ViT-45M/32 student with visual prompts."""
 
 import os
 import pickle
@@ -8,9 +8,9 @@ import torch
 import torch.nn as nn
 
 
-TINYCLIP_MODEL_NAME = "TinyCLIP-ViT-22M-32-Text-10M"
+TINYCLIP_MODEL_NAME = "TinyCLIP-ViT-45M-32-Text-18M"
 TINYCLIP_CHECKPOINT_FILENAME = (
-    "TinyCLIP-auto-ViT-22M-32-Text-10M-LAION400M.pt"
+    "TinyCLIP-auto-ViT-45M-32-Text-18M-LAION400M.pt"
 )
 TINYCLIP_CHECKPOINT_URL = (
     "https://github.com/wkcn/TinyCLIP-model-zoo/releases/download/"
@@ -147,13 +147,13 @@ def _checkpoint_path():
         return path
 
     kaggle_copy = (
-        Path("/kaggle/working/tinyclip22m_student")
+        Path("/kaggle/working/tinyclip45m_student")
         / TINYCLIP_CHECKPOINT_FILENAME
     )
     if kaggle_copy.is_file():
         return kaggle_copy
     raise FileNotFoundError(
-        "TinyCLIP ViT-22M/32 checkpoint was not found. Set "
+        "TinyCLIP ViT-45M/32 checkpoint was not found. Set "
         "TINYCLIP_MODEL_PATH to the official auto-pruned checkpoint."
     )
 
@@ -214,15 +214,15 @@ def load_tinyclip_student(backbone):
         "projection_dim": int(model.visual.proj.shape[1]),
     }
     expected = {
-        "vision_width": 370,
+        "vision_width": 549,
         "vision_layers": 12,
         "vision_patch_size": 32,
-        "text_width": 509,
+        "text_width": 510,
         "projection_dim": 512,
     }
     if actual != expected:
         raise RuntimeError(
-            f"Unexpected TinyCLIP ViT-22M/32 architecture: {actual}; "
+            f"Unexpected TinyCLIP ViT-45M/32 architecture: {actual}; "
             f"expected {expected}."
         )
 
