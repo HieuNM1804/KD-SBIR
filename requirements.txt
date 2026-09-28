@@ -9,3 +9,7 @@ ftfy
 regex
 tqdm
 tensorboard
+transformers
+huggingface-hub
+safetensors
+tokenizers
