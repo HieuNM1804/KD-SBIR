@@ -36,3 +36,9 @@ retrieval ranking; it measures only batched image-encoder execution after warmup
 Use `--scope all` to evaluate every category shared by `sketch/` and `photo/`.
 Use `--models 8m,40m,61m` for a subset. `--max-per-class` exists only for quick
 smoke tests and defaults to zero, which means every image is evaluated.
+
+For fully offline Kaggle execution, run
+`test/kaggle_tinyclip_suite_online.py` once in an Internet-enabled notebook and
+save its output. Attach that output and the Sketchy dataset to the GPU notebook,
+then run `test/kaggle_tinyclip_suite_offline.py`. The offline script validates
+every wheel and checkpoint before launching this inference entrypoint.
