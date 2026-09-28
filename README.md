@@ -9,9 +9,9 @@ values remain a continuous ranking score.
 
 The fixed seen distractors are nine Sketchy-2 classes (`teapot`, `harp`,
 `piano`, `trumpet`, `saxophone`, `hourglass`, `mushroom`, `pretzel`, `bell`)
-and five TU-Berlin classes (`blimp`, `tablelamp`, `telephone`,
-`human-skeleton`, `pickup truck`). `airplane` is not a seen distractor because
-it belongs to the fixed TU-Berlin unseen split.
+and six TU-Berlin classes (`blimp`, `tablelamp`, `telephone`,
+`human-skeleton`, `pickup truck`, `megaphone`). `airplane` is not a seen
+distractor because it belongs to the fixed TU-Berlin unseen split.
 
 The branch defaults to `--eval_protocol gzs`. Use `--eval_protocol zs` only as
 an unseen-gallery ablation. Sketchy-2 reports mAP@200/P@200; TU-Berlin reports

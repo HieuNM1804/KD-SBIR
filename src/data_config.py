@@ -140,5 +140,6 @@ GENERALIZED_CLASSES = {
         "telephone",
         "human-skeleton",
         "pickup truck",
+        "megaphone",
     ],
 }
