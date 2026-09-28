@@ -172,7 +172,7 @@ def build_parser():
     )
     parser.add_argument("--root", required=True, help="Dataset root with sketch/ and photo/.")
     parser.add_argument(
-        "--dataset", default="sketchy_1", choices=tuple(UNSEEN_CLASSES),
+        "--dataset", default="sketchy_2", choices=tuple(UNSEEN_CLASSES),
         help="Class split and metric convention.",
     )
     parser.add_argument("--scope", choices=("unseen", "all"), default="unseen")

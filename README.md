@@ -12,7 +12,7 @@ sketch-to-photo retrieval split:
 The benchmark performs **no training or prompt learning**. Every checkpoint is
 frozen, `torch.inference_mode()` is active, and raw normalized image embeddings
 are compared by cosine similarity. The default protocol uses the unseen classes
-of `sketchy_1`, reports mAP@all and P@100, and processes the entire gallery.
+of `sketchy_2`, reports mAP@200 and P@200, and processes the entire gallery.
 
 The three standard checkpoints (8M, 40M, and 61M) use pinned Hugging Face
 snapshots. The official auto-pruned `.pt` checkpoints are used for 22M and 45M.
@@ -21,16 +21,17 @@ All inputs use 224x224 resolution and the OpenAI CLIP mean/std.
 ```bash
 python -m src.infer_tinyclip_suite \
     --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
-    --dataset sketchy_1 \
+    --dataset sketchy_2 \
     --scope unseen \
     --models-root /kaggle/working/tinyclip_models \
     --batch-size 256 \
     --workers 4 \
-    --output-dir /kaggle/working/tinyclip_inference_results
+    --output-dir /kaggle/working/tinyclip_inference_results_sketchy2
 ```
 
 The command writes `tinyclip_inference_results.json` and
-`tinyclip_inference_results.csv`. Forward latency excludes image loading and
+`tinyclip_inference_results.csv` under `tinyclip_inference_results_sketchy2`.
+Forward latency excludes image loading and
 retrieval ranking; it measures only batched image-encoder execution after warmup.
 
 Use `--scope all` to evaluate every category shared by `sketch/` and `photo/`.

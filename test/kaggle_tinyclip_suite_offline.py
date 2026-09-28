@@ -26,7 +26,7 @@ EXPECTED_MODELS = ("8m", "22m", "40m", "45m", "61m")
 WORKING = Path("/kaggle/working")
 PROJECT = WORKING / "KD-SBIR-tinyclip-inference"
 SKETCHY_ROOT = Path("/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy")
-RESULTS = WORKING / "tinyclip_inference_results"
+RESULTS = WORKING / "tinyclip_inference_results_sketchy2"
 
 
 def sha256(path):
@@ -194,7 +194,7 @@ subprocess.run(
     [
         sys.executable, "-m", EXPECTED_ENTRYPOINT,
         "--root", str(SKETCHY_ROOT),
-        "--dataset", "sketchy_1",
+        "--dataset", "sketchy_2",
         "--scope", "unseen",
         "--models-root", str(models_root),
         "--batch-size", "256",
@@ -208,7 +208,7 @@ subprocess.run(
 )
 
 print("=" * 72)
-print("RAW TINYCLIP 8M/22M/40M/45M/61M INFERENCE COMPLETE")
+print("RAW TINYCLIP 8M/22M/40M/45M/61M SKETCHY-2 INFERENCE COMPLETE")
 print("=" * 72)
 print("Project:", PROJECT)
 print("Commit:", actual_commit)
