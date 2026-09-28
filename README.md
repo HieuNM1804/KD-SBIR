@@ -82,5 +82,5 @@ model-selection leakage and is not a strict inductive ZS-SBIR protocol.
 For an offline Kaggle run, execute `test/kaggle_gzs_online.py` in an online
 notebook, attach the saved `offline_bundle` output, and then execute
 `test/kaggle_gzs_offline.py`. Both setup cells pin this branch to commit
-`de820fc9a774353f350a8b08fced73390e8dd31b` and record the compact GZS class
+`f941cc82c51e4915b78982c4a177a42ea80c2cf4` and record the compact GZS class
 lists in `bundle_manifest.json`.

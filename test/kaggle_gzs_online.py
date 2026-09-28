@@ -18,7 +18,7 @@ WORKING = Path("/kaggle/working")
 BUNDLE = WORKING / "offline_bundle"
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/gzs-sbir"
-COMMIT = "de820fc9a774353f350a8b08fced73390e8dd31b"
+COMMIT = "f941cc82c51e4915b78982c4a177a42ea80c2cf4"
 
 WHEELS = BUNDLE / "wheels"
 SOURCE = BUNDLE / "source"
