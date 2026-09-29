@@ -152,13 +152,16 @@ def default_teacher_cache_path(args, train_dataset):
 
 
 def _image_text_kd_active(args):
-    return getattr(args, "lambda_afd_it", 0.0) > 0
+    return (
+        getattr(args, "lambda_afd_sketch_text", 0.0) > 0
+        or getattr(args, "lambda_afd_photo_text", 0.0) > 0
+    )
 
 
 def _afd_active(args):
     return (
         getattr(args, "lambda_afd_sp", 0.0) > 0
-        or getattr(args, "lambda_afd_it", 0.0) > 0
+        or _image_text_kd_active(args)
     )
 
 
@@ -286,8 +289,8 @@ class CustomCLIP(nn.Module):
         )
         self.classnames = tuple(classnames)
         self.image_text_kd_active = _image_text_kd_active(cfg)
-        self.photo_text_active = self.image_text_kd_active
-        self.sketch_text_active = self.image_text_kd_active
+        self.photo_text_active = cfg.lambda_afd_photo_text > 0
+        self.sketch_text_active = cfg.lambda_afd_sketch_text > 0
         self.photo_visual_prompt = IndependentVisualPromptLearner(
             cfg.n_ctx_visual,
             visual_width,
@@ -311,7 +314,7 @@ class CustomCLIP(nn.Module):
             DFN5B_OUTPUT_DIM,
             cfg.afd_init,
         )
-        if cfg.lambda_afd_it <= 0:
+        if not self.image_text_kd_active:
             self.afd_text_fusion.requires_grad_(False)
         photo_texts = [
             f"a photo of a {name.replace('_', ' ')}."
@@ -362,7 +365,8 @@ class CustomCLIP(nn.Module):
         print(
             "[AFD] "
             f"sketch_photo_weight={cfg.lambda_afd_sp}, "
-            f"image_text_weight={cfg.lambda_afd_it}, "
+            f"sketch_text_weight={cfg.lambda_afd_sketch_text}, "
+            f"photo_text_weight={cfg.lambda_afd_photo_text}, "
             f"temperatures=({cfg.afd_temperature_sp}, {cfg.afd_temperature_it}), "
             f"control={cfg.afd_control}, init={cfg.afd_init}"
         )
@@ -917,21 +921,22 @@ class CustomCLIP(nn.Module):
 
         augmented_sketch_text = None
         augmented_photo_text = None
-        if self.image_text_kd_active:
+        if self.sketch_text_active:
             sketch_text_student, sketch_text_teacher = controlled_afd_inputs(
                 student_sketch_text,
                 teacher_sketch_text,
                 self.cfg.afd_control,
                 "text",
             )
+            augmented_sketch_text = self.afd_text_fusion(
+                sketch_text_student, sketch_text_teacher
+            )
+        if self.photo_text_active:
             photo_text_student, photo_text_teacher = controlled_afd_inputs(
                 student_photo_text,
                 teacher_photo_text,
                 self.cfg.afd_control,
                 "text",
-            )
-            augmented_sketch_text = self.afd_text_fusion(
-                sketch_text_student, sketch_text_teacher
             )
             augmented_photo_text = self.afd_text_fusion(
                 photo_text_student, photo_text_teacher
@@ -1107,18 +1112,42 @@ class ZS_SBIR(pl.LightningModule):
         self.log("afd_grad_prompt", prompt_norm, on_step=True, on_epoch=False)
         self.log("afd_grad_fusion", fusion_norm, on_step=True, on_epoch=False)
 
-        if self.args.lambda_afd_sp > 0 and self.args.lambda_afd_it > 0:
-            sp_gradients, sp_norm = self._gradient_statistics(
-                loss_dict["afd_sp_weighted"], prompt_parameters
+        components = (
+            ("sp", self.args.lambda_afd_sp, "afd_sp_weighted"),
+            (
+                "sketch_text",
+                self.args.lambda_afd_sketch_text,
+                "afd_sketch_text_weighted",
+            ),
+            (
+                "photo_text",
+                self.args.lambda_afd_photo_text,
+                "afd_photo_text_weighted",
+            ),
+        )
+        component_gradients = {}
+        for name, weight, loss_name in components:
+            if weight <= 0:
+                continue
+            gradients, norm = self._gradient_statistics(
+                loss_dict[loss_name], prompt_parameters
             )
-            it_gradients, it_norm = self._gradient_statistics(
-                loss_dict["afd_it_weighted"], prompt_parameters
-            )
-            cosine = self._gradient_cosine(sp_gradients, it_gradients, loss)
-            self.log("afd_grad_prompt_sp", sp_norm, on_step=True, on_epoch=False)
-            self.log("afd_grad_prompt_it", it_norm, on_step=True, on_epoch=False)
+            component_gradients[name] = gradients
             self.log(
-                "afd_grad_prompt_sp_it_cosine",
+                f"afd_grad_prompt_{name}", norm, on_step=True, on_epoch=False
+            )
+        for left, right in (
+            ("sp", "sketch_text"),
+            ("sp", "photo_text"),
+            ("sketch_text", "photo_text"),
+        ):
+            if left not in component_gradients or right not in component_gradients:
+                continue
+            cosine = self._gradient_cosine(
+                component_gradients[left], component_gradients[right], loss
+            )
+            self.log(
+                f"afd_grad_prompt_{left}_{right}_cosine",
                 cosine,
                 on_step=True,
                 on_epoch=False,
@@ -1130,7 +1159,8 @@ class ZS_SBIR(pl.LightningModule):
         self.log('train_loss', loss, on_step=False, on_epoch=True)
         bar_names = {
             "afd_sp": "AFD_SP",
-            "afd_it": "AFD_IT",
+            "afd_sketch_text": "AFD_ST",
+            "afd_photo_text": "AFD_PT",
         }
         for key, value in loss_dict.items():
             self.log(

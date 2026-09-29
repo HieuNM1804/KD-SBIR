@@ -89,12 +89,16 @@ def read_scalars(run_name):
     diagnostic_tags = (
         "train_loss",
         "AFD_SP",
-        "AFD_IT",
+        "AFD_ST",
+        "AFD_PT",
         "afd_grad_prompt",
         "afd_grad_fusion",
         "afd_grad_prompt_sp",
-        "afd_grad_prompt_it",
-        "afd_grad_prompt_sp_it_cosine",
+        "afd_grad_prompt_sketch_text",
+        "afd_grad_prompt_photo_text",
+        "afd_grad_prompt_sp_sketch_text_cosine",
+        "afd_grad_prompt_sp_photo_text_cosine",
+        "afd_grad_prompt_sketch_text_photo_text_cosine",
         "afd_image_student_weight_norm",
         "afd_image_teacher_weight_norm",
         "afd_text_student_weight_norm",
@@ -111,34 +115,44 @@ def read_scalars(run_name):
 
 def condition_grid():
     conditions = [
-        {"name": "student_only_sp", "sp": 1.0, "it": 0.0, "control": "student_only"},
-        {"name": "student_only_it", "sp": 0.0, "it": 1.0, "control": "student_only"},
-        {"name": "student_only_full", "sp": 0.3, "it": 0.3, "control": "student_only"},
+        {"name": "student_only_sp", "sp": 1.0, "st": 0.0, "pt": 0.0, "control": "student_only"},
+        {"name": "student_only_st", "sp": 0.0, "st": 1.0, "pt": 0.0, "control": "student_only"},
+        {"name": "student_only_pt", "sp": 0.0, "st": 0.0, "pt": 1.0, "control": "student_only"},
+        {"name": "student_only_full", "sp": 0.3, "st": 0.15, "pt": 0.15, "control": "student_only"},
     ]
     for weight in (0.1, 0.3, 1.0):
         suffix = str(weight).replace(".", "p")
         conditions.append(
-            {"name": f"verified_sp_w{suffix}", "sp": weight, "it": 0.0, "control": "verified"}
+            {"name": f"verified_sp_w{suffix}", "sp": weight, "st": 0.0, "pt": 0.0, "control": "verified"}
         )
         conditions.append(
-            {"name": f"verified_it_w{suffix}", "sp": 0.0, "it": weight, "control": "verified"}
+            {"name": f"verified_st_w{suffix}", "sp": 0.0, "st": weight, "pt": 0.0, "control": "verified"}
+        )
+        conditions.append(
+            {"name": f"verified_pt_w{suffix}", "sp": 0.0, "st": 0.0, "pt": weight, "control": "verified"}
         )
     for sp_weight in (0.1, 0.3, 1.0):
-        for it_weight in (0.1, 0.3, 1.0):
+        for text_weight in (0.1, 0.3, 1.0):
             sp = str(sp_weight).replace(".", "p")
-            it = str(it_weight).replace(".", "p")
+            text = str(text_weight).replace(".", "p")
             conditions.append(
-                {"name": f"verified_full_sp{sp}_it{it}", "sp": sp_weight, "it": it_weight, "control": "verified"}
+                {
+                    "name": f"verified_full_sp{sp}_text{text}",
+                    "sp": sp_weight,
+                    "st": 0.5 * text_weight,
+                    "pt": 0.5 * text_weight,
+                    "control": "verified",
+                }
             )
     for control in ("shuffled_image", "shuffled_text", "shuffled_both", "teacher_only"):
         conditions.append(
-            {"name": f"control_{control}", "sp": 0.3, "it": 0.3, "control": control}
+            {"name": f"control_{control}", "sp": 0.3, "st": 0.15, "pt": 0.15, "control": control}
         )
     conditions.extend(
         (
-            {"name": "full_temp_0p05", "sp": 0.3, "it": 0.3, "control": "verified", "temp": 0.05},
-            {"name": "full_temp_0p10", "sp": 0.3, "it": 0.3, "control": "verified", "temp": 0.10},
-            {"name": "full_xavier", "sp": 0.3, "it": 0.3, "control": "verified", "init": "xavier"},
+            {"name": "full_temp_0p05", "sp": 0.3, "st": 0.15, "pt": 0.15, "control": "verified", "temp": 0.05},
+            {"name": "full_temp_0p10", "sp": 0.3, "st": 0.15, "pt": 0.15, "control": "verified", "temp": 0.10},
+            {"name": "full_xavier", "sp": 0.3, "st": 0.15, "pt": 0.15, "control": "verified", "init": "xavier"},
         )
     )
     return conditions
@@ -203,7 +217,8 @@ def main():
         [
             *base_command,
             "--lambda_afd_sp", "1",
-            "--lambda_afd_it", "1",
+            "--lambda_afd_sketch_text", "0.5",
+            "--lambda_afd_photo_text", "0.5",
             "--teacher_cache_only",
             "--exp_name", prefix + "_cache",
         ],
@@ -220,7 +235,8 @@ def main():
         command = [
             *base_command,
             "--lambda_afd_sp", str(condition["sp"]),
-            "--lambda_afd_it", str(condition["it"]),
+            "--lambda_afd_sketch_text", str(condition["st"]),
+            "--lambda_afd_photo_text", str(condition["pt"]),
             "--afd_temperature_sp", str(temperature),
             "--afd_temperature_it", str(temperature),
             "--afd_control", condition["control"],
@@ -240,9 +256,13 @@ def main():
             by_name["verified_sp_w1p0"]["selected_mAP"]
             - by_name["student_only_sp"]["selected_mAP"]
         ),
-        "verified_it_w1_minus_student_only_it_mAP_pp": 100 * (
-            by_name["verified_it_w1p0"]["selected_mAP"]
-            - by_name["student_only_it"]["selected_mAP"]
+        "verified_st_w1_minus_student_only_st_mAP_pp": 100 * (
+            by_name["verified_st_w1p0"]["selected_mAP"]
+            - by_name["student_only_st"]["selected_mAP"]
+        ),
+        "verified_pt_w1_minus_student_only_pt_mAP_pp": 100 * (
+            by_name["verified_pt_w1p0"]["selected_mAP"]
+            - by_name["student_only_pt"]["selected_mAP"]
         ),
     }
     verified_full = [row for row in rows if row["name"].startswith("verified_full")]
@@ -250,7 +270,7 @@ def main():
     comparisons["best_verified_full_minus_student_only_full_mAP_pp"] = 100 * (
         best["selected_mAP"] - by_name["student_only_full"]["selected_mAP"]
     )
-    matched_full = by_name["verified_full_sp0p3_it0p3"]
+    matched_full = by_name["verified_full_sp0p3_text0p3"]
     for control in (
         "student_only_full",
         "control_shuffled_image",
@@ -266,9 +286,13 @@ def main():
             by_name["verified_sp_w1p0"]["selected_mAP"]
             > by_name["student_only_sp"]["selected_mAP"]
         ),
-        "teacher_improves_it_axis": (
-            by_name["verified_it_w1p0"]["selected_mAP"]
-            > by_name["student_only_it"]["selected_mAP"]
+        "teacher_improves_sketch_text": (
+            by_name["verified_st_w1p0"]["selected_mAP"]
+            > by_name["student_only_st"]["selected_mAP"]
+        ),
+        "teacher_improves_photo_text": (
+            by_name["verified_pt_w1p0"]["selected_mAP"]
+            > by_name["student_only_pt"]["selected_mAP"]
         ),
         "matched_full_beats_student_only": (
             matched_full["selected_mAP"]
@@ -281,7 +305,11 @@ def main():
     }
     analysis = {
         "protocol": "one-seed AFD mechanism/hyperparameter study; no significance claim",
-        "student_objective": "lambda_afd_sp * AFD_SP + lambda_afd_it * AFD_IT",
+        "student_objective": (
+            "lambda_afd_sp * AFD_SP + "
+            "lambda_afd_sketch_text * AFD_ST + "
+            "lambda_afd_photo_text * AFD_PT"
+        ),
         "legacy_main_student_losses": {"lambda_domain": 0, "lambda_modality": 0},
         "dataset": args.dataset,
         "seed": args.seed,

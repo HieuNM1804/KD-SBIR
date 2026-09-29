@@ -19,14 +19,19 @@ The only student objective is
 
 ```text
 L = lambda_afd_sp * L_AFD(sketch, photo)
-  + lambda_afd_it * 0.5 * (L_AFD(sketch, sketch-text)
-                           + L_AFD(photo, photo-text)).
+  + lambda_afd_sketch_text * L_AFD(sketch, sketch-text)
+  + lambda_afd_photo_text * L_AFD(photo, photo-text).
 ```
 
 The sketch-photo term is bidirectional multi-positive InfoNCE. The image-text
 term is symmetric image-to-class-text and class-text-to-image contrast. Native
 student image features are used for validation and inference, so the teacher and
 fusion projections are absent at deployment.
+
+The three non-negative weights are independent. Defaults are `1.0`, `0.5`,
+and `0.5`, preserving the scale of the former objective whose single
+`lambda_afd_it=1.0` multiplied the mean of the two image-text losses. Setting
+one weight to zero disables only that loss.
 
 Controls make the mechanism testable:
 
@@ -36,8 +41,8 @@ Controls make the mechanism testable:
 - `shuffled_image`, `shuffled_text`, and `shuffled_both` preserve teacher
   marginals while breaking correspondence.
 
-Gradient norms for prompts and fusion projections, the cosine between the two
-axis gradients, branch weight norms, component losses, and native retrieval
+Gradient norms for prompts and fusion projections, pairwise cosine between the
+three objective gradients, branch weight norms, component losses, and native retrieval
 metrics are logged to TensorBoard.
 
 Run one configuration after the offline setup:
@@ -68,7 +73,8 @@ Run one configuration after the offline setup:
   --lambda_domain 0 \
   --lambda_modality 0 \
   --lambda_afd_sp 0.3 \
-  --lambda_afd_it 0.3 \
+  --lambda_afd_sketch_text 0.15 \
+  --lambda_afd_photo_text 0.15 \
   --afd_temperature_sp 0.07 \
   --afd_temperature_it 0.07 \
   --afd_fusion_lr 1e-3 \
@@ -82,7 +88,7 @@ Run one configuration after the offline setup:
   --progress
 ```
 
-Run the 25-condition one-seed mechanism and hyperparameter study with:
+Run the 29-condition one-seed mechanism and hyperparameter study with:
 
 ```bash
 !python -u test/kaggle_afd_sweep.py --dataset sketchy_1

@@ -76,7 +76,7 @@ class AugmentedFeatureDistillationTests(unittest.TestCase):
         self.assertGreater(images.grad.abs().sum().item(), 0)
         self.assertGreater(text.grad.abs().sum().item(), 0)
 
-    def test_loss_fn_is_exactly_the_two_afd_axes(self):
+    def test_loss_fn_is_exactly_the_three_weighted_afd_objectives(self):
         labels = torch.tensor([0, 1, 0, 1])
         photo = torch.randn(4, 5, requires_grad=True)
         sketch = torch.randn(4, 5, requires_grad=True)
@@ -84,7 +84,8 @@ class AugmentedFeatureDistillationTests(unittest.TestCase):
         photo_text = torch.randn(2, 5, requires_grad=True)
         args = SimpleNamespace(
             lambda_afd_sp=0.3,
-            lambda_afd_it=0.7,
+            lambda_afd_sketch_text=0.2,
+            lambda_afd_photo_text=0.5,
             afd_temperature_sp=0.11,
             afd_temperature_it=0.13,
             # Deliberately nonsensical legacy values: loss_fn must not read them.
@@ -101,16 +102,20 @@ class AugmentedFeatureDistillationTests(unittest.TestCase):
             photo_text,
             labels,
             sketch_photo_weight=0.3,
-            image_text_weight=0.7,
+            sketch_text_weight=0.2,
+            photo_text_weight=0.5,
             sketch_photo_temperature=0.11,
             image_text_temperature=0.13,
         )
         torch.testing.assert_close(actual, expected)
         torch.testing.assert_close(
-            actual, metrics["afd_sp_weighted"] + metrics["afd_it_weighted"]
+            actual,
+            metrics["afd_sp_weighted"]
+            + metrics["afd_sketch_text_weighted"]
+            + metrics["afd_photo_text_weighted"],
         )
 
-    def test_disabled_text_axis_accepts_missing_text_banks(self):
+    def test_disabled_text_objectives_accept_missing_text_banks(self):
         labels = torch.tensor([0, 1])
         sketch = torch.randn(2, 4)
         photo = torch.randn(2, 4)
@@ -121,12 +126,53 @@ class AugmentedFeatureDistillationTests(unittest.TestCase):
             None,
             labels,
             sketch_photo_weight=1.0,
-            image_text_weight=0.0,
+            sketch_text_weight=0.0,
+            photo_text_weight=0.0,
             sketch_photo_temperature=0.1,
             image_text_temperature=0.1,
         )
         self.assertTrue(torch.isfinite(loss))
-        self.assertEqual(metrics["afd_it"].item(), 0.0)
+        self.assertEqual(metrics["afd_sketch_text"].item(), 0.0)
+        self.assertEqual(metrics["afd_photo_text"].item(), 0.0)
+
+    def test_sketch_and_photo_text_weights_are_independent(self):
+        labels = torch.tensor([0, 1, 0, 1])
+        sketch = torch.randn(4, 5)
+        photo = torch.randn(4, 5)
+        sketch_text = torch.randn(2, 5)
+        photo_text = torch.randn(2, 5)
+        sketch_only, sketch_metrics = dual_axis_afd_loss(
+            sketch,
+            photo,
+            sketch_text,
+            None,
+            labels,
+            sketch_photo_weight=0.0,
+            sketch_text_weight=0.4,
+            photo_text_weight=0.0,
+            sketch_photo_temperature=0.1,
+            image_text_temperature=0.1,
+        )
+        photo_only, photo_metrics = dual_axis_afd_loss(
+            sketch,
+            photo,
+            None,
+            photo_text,
+            labels,
+            sketch_photo_weight=0.0,
+            sketch_text_weight=0.0,
+            photo_text_weight=0.6,
+            sketch_photo_temperature=0.1,
+            image_text_temperature=0.1,
+        )
+        torch.testing.assert_close(
+            sketch_only, sketch_metrics["afd_sketch_text_weighted"]
+        )
+        torch.testing.assert_close(
+            photo_only, photo_metrics["afd_photo_text_weighted"]
+        )
+        self.assertEqual(sketch_metrics["afd_photo_text"].item(), 0.0)
+        self.assertEqual(photo_metrics["afd_sketch_text"].item(), 0.0)
 
 
 if __name__ == "__main__":

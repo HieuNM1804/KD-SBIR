@@ -129,7 +129,8 @@ def loss_fn(args, features, labels):
         augmented_photo_text,
         labels,
         sketch_photo_weight=args.lambda_afd_sp,
-        image_text_weight=args.lambda_afd_it,
+        sketch_text_weight=args.lambda_afd_sketch_text,
+        photo_text_weight=args.lambda_afd_photo_text,
         sketch_photo_temperature=args.afd_temperature_sp,
         image_text_temperature=args.afd_temperature_it,
     )

@@ -320,10 +320,16 @@ if __name__ == "__main__":
         help="Weight of augmented sketch-photo contrastive distillation.",
     )
     parser.add_argument(
-        "--lambda_afd_it",
+        "--lambda_afd_sketch_text",
         type=float,
-        default=1.0,
-        help="Weight of augmented image-text contrastive distillation.",
+        default=0.5,
+        help="Weight of augmented sketch-to-sketch-text distillation.",
+    )
+    parser.add_argument(
+        "--lambda_afd_photo_text",
+        type=float,
+        default=0.5,
+        help="Weight of augmented photo-to-photo-text distillation.",
     )
     parser.add_argument(
         "--afd_temperature_sp",
@@ -431,9 +437,14 @@ if __name__ == "__main__":
         parser.error("--photo_text_kd_temperature must be greater than 0.")
     if args.sketch_text_kd_temperature <= 0:
         parser.error("--sketch_text_kd_temperature must be greater than 0.")
-    if args.lambda_afd_sp < 0 or args.lambda_afd_it < 0:
+    afd_weights = (
+        args.lambda_afd_sp,
+        args.lambda_afd_sketch_text,
+        args.lambda_afd_photo_text,
+    )
+    if any(weight < 0 for weight in afd_weights):
         parser.error("AFD loss weights must be non-negative.")
-    if args.lambda_afd_sp == 0 and args.lambda_afd_it == 0:
+    if not any(weight > 0 for weight in afd_weights):
         parser.error("At least one AFD loss weight must be positive.")
     if args.afd_temperature_sp <= 0 or args.afd_temperature_it <= 0:
         parser.error("AFD temperatures must be greater than 0.")

@@ -125,11 +125,12 @@ def dual_axis_afd_loss(
     labels,
     *,
     sketch_photo_weight,
-    image_text_weight,
+    sketch_text_weight,
+    photo_text_weight,
     sketch_photo_temperature,
     image_text_temperature,
 ):
-    """AFD-only objective; no main domain or modality KD is included."""
+    """Compute the three independently weighted AFD objectives."""
     zero = augmented_sketch.new_zeros(())
     sketch_photo = zero
     sketch_to_photo = zero
@@ -155,34 +156,37 @@ def dual_axis_afd_loss(
     photo_text = zero
     sketch_text_parts = {"image_to_text": zero, "text_to_image": zero}
     photo_text_parts = {"image_to_text": zero, "text_to_image": zero}
-    if image_text_weight > 0:
-        if augmented_sketch_text is None or augmented_photo_text is None:
-            raise ValueError("Image-text AFD requires both augmented text banks.")
+    if sketch_text_weight > 0:
+        if augmented_sketch_text is None:
+            raise ValueError("Sketch-text AFD requires an augmented sketch-text bank.")
         sketch_text, sketch_text_parts = image_class_text_contrastive_loss(
             augmented_sketch,
             augmented_sketch_text,
             labels,
             image_text_temperature,
         )
+    if photo_text_weight > 0:
+        if augmented_photo_text is None:
+            raise ValueError("Photo-text AFD requires an augmented photo-text bank.")
         photo_text, photo_text_parts = image_class_text_contrastive_loss(
             augmented_photo,
             augmented_photo_text,
             labels,
             image_text_temperature,
         )
-    image_text = 0.5 * (sketch_text + photo_text)
     weighted_sp = sketch_photo_weight * sketch_photo
-    weighted_it = image_text_weight * image_text
-    total = weighted_sp + weighted_it
+    weighted_sketch_text = sketch_text_weight * sketch_text
+    weighted_photo_text = photo_text_weight * photo_text
+    total = weighted_sp + weighted_sketch_text + weighted_photo_text
     return total, {
         "afd_sp": sketch_photo,
         "afd_sp_weighted": weighted_sp,
         "afd_sketch_to_photo": sketch_to_photo,
         "afd_photo_to_sketch": photo_to_sketch,
-        "afd_it": image_text,
-        "afd_it_weighted": weighted_it,
         "afd_sketch_text": sketch_text,
+        "afd_sketch_text_weighted": weighted_sketch_text,
         "afd_photo_text": photo_text,
+        "afd_photo_text_weighted": weighted_photo_text,
         "afd_sketch_image_to_text": sketch_text_parts["image_to_text"],
         "afd_sketch_text_to_image": sketch_text_parts["text_to_image"],
         "afd_photo_image_to_text": photo_text_parts["image_to_text"],
