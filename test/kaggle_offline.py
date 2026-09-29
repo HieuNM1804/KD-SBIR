@@ -12,7 +12,7 @@ import sys
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/clip-kd-interactive-contrastive"
-EXPECTED_COMMIT = "688244b215b1b17098ff03cc0ca04aee3311e686"
+EXPECTED_COMMIT = "196273fd81731deced6ee6ca439855205adbfbdf"
 EXPECTED_TASK = "clip_kd_interactive_contrastive"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"

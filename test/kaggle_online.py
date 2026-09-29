@@ -19,7 +19,7 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/clip-kd-interactive-contrastive"
 # Pin the source commit. The later bundle-script commit intentionally differs.
-COMMIT = "688244b215b1b17098ff03cc0ca04aee3311e686"
+COMMIT = "196273fd81731deced6ee6ca439855205adbfbdf"
 TASK = "clip_kd_interactive_contrastive"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
