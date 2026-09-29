@@ -12,7 +12,7 @@ import sys
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/clip-kd-feature-distillation-dual-projector"
-EXPECTED_COMMIT = "4aab88d533d31a01d169e557ff0bdae66c3ad099"
+EXPECTED_COMMIT = "c6f0efa856064eea9a1a369f691e332e609fbe88"
 EXPECTED_TASK = "clip_kd_feature_distillation_dual_projector"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"

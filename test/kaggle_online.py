@@ -19,7 +19,7 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/clip-kd-feature-distillation-dual-projector"
 # Pin the source commit. The later bundle-script commit intentionally differs.
-COMMIT = "4aab88d533d31a01d169e557ff0bdae66c3ad099"
+COMMIT = "c6f0efa856064eea9a1a369f691e332e609fbe88"
 TASK = "clip_kd_feature_distillation_dual_projector"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
