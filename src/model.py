@@ -152,7 +152,7 @@ def default_teacher_cache_path(args, train_dataset):
 
 
 def _feature_kd_active(args):
-    return args.lambda_fd > 0
+    return args.lambda_fd_photo > 0 or args.lambda_fd_sketch > 0
 
 
 def _persistent_teacher_cache_available(args):
@@ -346,7 +346,9 @@ class CustomCLIP(nn.Module):
         print(
             "[Feature KD] separate photo/sketch projectors "
             f"{student_output_dim}->{DFN5B_OUTPUT_DIM}; "
-            f"loss={cfg.feature_loss}, lambda={cfg.lambda_fd}, "
+            f"loss={cfg.feature_loss}, "
+            f"photo_weight={cfg.lambda_fd_photo}, "
+            f"sketch_weight={cfg.lambda_fd_sketch}, "
             f"projector_params={projector_params:,}"
         )
 
@@ -872,7 +874,8 @@ class ZS_SBIR(pl.LightningModule):
         self.save_hyperparameters(
             {
                 "feature_loss": args.feature_loss,
-                "lambda_fd": args.lambda_fd,
+                "lambda_fd_photo": args.lambda_fd_photo,
+                "lambda_fd_sketch": args.lambda_fd_sketch,
                 "projector_layout": "separate",
                 "projector_input_dim": STUDENT_OUTPUT_DIM,
                 "projector_output_dim": DFN5B_OUTPUT_DIM,
@@ -963,6 +966,8 @@ class ZS_SBIR(pl.LightningModule):
         bar_names = {
             "fd_photo": "FD_PHOTO",
             "fd_sketch": "FD_SKETCH",
+            "fd_photo_weighted": "FD_PH_W",
+            "fd_sketch_weighted": "FD_SK_W",
             "fd": "FD",
         }
         for key, bar_name in bar_names.items():

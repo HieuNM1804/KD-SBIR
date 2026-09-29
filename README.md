@@ -24,16 +24,19 @@ L2-normalized by the selected feature loss:
 student_photo_1024 = photo_projector(student_photo_512)
 student_sketch_1024 = sketch_projector(student_sketch_512)
 
-loss = lambda_fd * 0.5 * (
-    feature_loss(student_photo_1024, teacher_photo_1024)
-  + feature_loss(student_sketch_1024, teacher_sketch_1024)
-)
+photo_loss = feature_loss(student_photo_1024, teacher_photo_1024)
+sketch_loss = feature_loss(student_sketch_1024, teacher_sketch_1024)
+
+loss = lambda_fd_photo * photo_loss
+     + lambda_fd_sketch * sketch_loss
 ```
 
 `feature_loss` is either MSE or cosine, with exactly one active per run. No
 Domain KD, Modality KD, text KD, relational KD, PCA, or patch-to-text prompt is
-used. The teacher cache remains compatible with `main` and the shared-projector
-branch.
+used. Photo and sketch have independent non-negative weights; setting one to
+zero disables that modality's distillation loss. Defaults are `0.5` and `0.5`,
+which preserve the scale of the former equally weighted mean. The teacher cache
+remains compatible with `main` and the shared-projector branch.
 
 ## What this ablation measures
 
@@ -71,7 +74,8 @@ python -m src.train \
     --lambda_teacher_retrieval 1.5 \
     --teacher_triplet_margin 0.2 \
     --feature_loss mse \
-    --lambda_fd 1.0 \
+    --lambda_fd_photo 0.5 \
+    --lambda_fd_sketch 0.5 \
     --lr 1e-5 \
     --momentum 0.95 \
     --weight_decay 5e-4 \
@@ -86,9 +90,11 @@ Use the same command and change only:
 
 ```bash
     --feature_loss cosine \
-    --lambda_fd 1.0 \
+    --lambda_fd_photo 0.5 \
+    --lambda_fd_sketch 0.5 \
     --exp_name clip_kd_fd_dual_projector_cosine_l1_sketchy2
 ```
 
-Training logs remain `FD_PHOTO`, `FD_SKETCH`, `FD`, and `train_loss`.
-Retrieval evaluation remains `mAP@200` and `P@200` for `sketchy_2`.
+Training logs are `FD_PHOTO`, `FD_SKETCH`, `FD_PH_W`, `FD_SK_W`, `FD`, and
+`train_loss`. Retrieval evaluation remains `mAP@200` and `P@200` for
+`sketchy_2`.

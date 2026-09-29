@@ -39,7 +39,7 @@ def feature_distillation_loss(
 
 
 def loss_fn(args, features):
-    """Compute exactly one feature-distillation objective for both modalities."""
+    """Compute independently weighted photo and sketch feature objectives."""
     (
         projected_photo,
         projected_sketch,
@@ -47,22 +47,33 @@ def loss_fn(args, features):
         teacher_sketch,
     ) = features
 
-    photo_loss = feature_distillation_loss(
-        projected_photo,
-        teacher_photo,
-        args.feature_loss,
-    )
-    sketch_loss = feature_distillation_loss(
-        projected_sketch,
-        teacher_sketch,
-        args.feature_loss,
-    )
-    feature_loss = 0.5 * (photo_loss + sketch_loss)
-    total_loss = args.lambda_fd * feature_loss
+    zero = projected_photo.new_zeros(())
+    if args.lambda_fd_photo > 0:
+        photo_loss = feature_distillation_loss(
+            projected_photo,
+            teacher_photo,
+            args.feature_loss,
+        )
+    else:
+        photo_loss = zero
+    if args.lambda_fd_sketch > 0:
+        sketch_loss = feature_distillation_loss(
+            projected_sketch,
+            teacher_sketch,
+            args.feature_loss,
+        )
+    else:
+        sketch_loss = zero
+
+    weighted_photo = args.lambda_fd_photo * photo_loss
+    weighted_sketch = args.lambda_fd_sketch * sketch_loss
+    total_loss = weighted_photo + weighted_sketch
     return total_loss, {
         "fd_photo": photo_loss,
         "fd_sketch": sketch_loss,
-        "fd": feature_loss,
+        "fd_photo_weighted": weighted_photo,
+        "fd_sketch_weighted": weighted_sketch,
+        "fd": total_loss,
     }
 
 

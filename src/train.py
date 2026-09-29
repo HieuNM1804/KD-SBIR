@@ -52,10 +52,16 @@ def add_feature_distillation_args(parser):
         help="Feature matching objective; each run uses exactly one choice.",
     )
     parser.add_argument(
-        "--lambda_fd",
+        "--lambda_fd_photo",
         type=float,
-        default=1.0,
-        help="Weight for the photo/sketch feature-distillation loss.",
+        default=0.5,
+        help="Independent weight for photo feature distillation.",
+    )
+    parser.add_argument(
+        "--lambda_fd_sketch",
+        type=float,
+        default=0.5,
+        help="Independent weight for sketch feature distillation.",
     )
     return parser
 
@@ -336,8 +342,13 @@ if __name__ == "__main__":
         parser.error("--teacher_scheduler_step_size must be at least 1.")
     if args.teacher_scheduler_gamma <= 0:
         parser.error("--teacher_scheduler_gamma must be greater than 0.")
-    if args.lambda_fd <= 0:
-        parser.error("--lambda_fd must be greater than 0.")
+    if args.lambda_fd_photo < 0 or args.lambda_fd_sketch < 0:
+        parser.error("Feature-distillation weights must be non-negative.")
+    if args.lambda_fd_photo == 0 and args.lambda_fd_sketch == 0:
+        parser.error(
+            "At least one of --lambda_fd_photo and --lambda_fd_sketch "
+            "must be positive."
+        )
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
 
     checkpoint_callback = ModelCheckpoint(

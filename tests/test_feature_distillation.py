@@ -40,7 +40,8 @@ def make_args(**overrides):
         "rebuild_teacher_cache": False,
         "teacher_pretrain_epochs": 0,
         "feature_loss": "mse",
-        "lambda_fd": 1.0,
+        "lambda_fd_photo": 0.5,
+        "lambda_fd_sketch": 0.5,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -86,7 +87,7 @@ def test_photo_and_sketch_projectors_are_separate():
     )
 
 
-def test_loss_selects_one_method_and_averages_modalities(monkeypatch):
+def test_loss_selects_one_method_and_weights_modalities_separately(monkeypatch):
     calls = []
 
     def fake_loss(student, teacher, loss_type):
@@ -95,19 +96,56 @@ def test_loss_selects_one_method_and_averages_modalities(monkeypatch):
 
     monkeypatch.setattr("src.losses.feature_distillation_loss", fake_loss)
     features = tuple(torch.randn(2, 1024) for _ in range(4))
-    total, values = loss_fn(make_args(feature_loss="cosine"), features)
+    total, values = loss_fn(
+        make_args(
+            feature_loss="cosine",
+            lambda_fd_photo=0.25,
+            lambda_fd_sketch=0.75,
+        ),
+        features,
+    )
     assert calls == ["cosine", "cosine"]
     assert values["fd_photo"].item() == 2.0
     assert values["fd_sketch"].item() == 4.0
-    assert values["fd"].item() == 3.0
-    assert total.item() == 3.0
+    assert values["fd_photo_weighted"].item() == 0.5
+    assert values["fd_sketch_weighted"].item() == 3.0
+    assert values["fd"].item() == 3.5
+    assert total.item() == 3.5
+
+
+def test_zero_weight_disables_only_its_modality(monkeypatch):
+    calls = []
+
+    def fake_loss(student, _teacher, _loss_type):
+        calls.append(student)
+        return student.new_tensor(3.0)
+
+    monkeypatch.setattr("src.losses.feature_distillation_loss", fake_loss)
+    projected_photo = torch.randn(2, 1024)
+    projected_sketch = torch.randn(2, 1024)
+    features = (
+        projected_photo,
+        projected_sketch,
+        torch.randn(2, 1024),
+        torch.randn(2, 1024),
+    )
+    total, values = loss_fn(
+        make_args(lambda_fd_photo=0.0, lambda_fd_sketch=2.0),
+        features,
+    )
+    assert len(calls) == 1
+    assert calls[0] is projected_sketch
+    assert values["fd_photo"].item() == 0.0
+    assert values["fd_sketch"].item() == 3.0
+    assert total.item() == 6.0
 
 
 def test_cli_defaults_and_choices():
     parser = add_feature_distillation_args(ArgumentParser())
     defaults = parser.parse_args([])
     assert defaults.feature_loss == "mse"
-    assert defaults.lambda_fd == 1.0
+    assert defaults.lambda_fd_photo == 0.5
+    assert defaults.lambda_fd_sketch == 0.5
     with pytest.raises(SystemExit):
         parser.parse_args(["--feature_loss", "both"])
 
@@ -174,11 +212,17 @@ def test_inference_bypasses_both_projectors(monkeypatch):
 def test_lightning_checkpoint_state_and_hyperparameters(monkeypatch):
     monkeypatch.setattr("src.model._load_clip_model", lambda _name: FakeCLIP())
     monkeypatch.setattr("src.model._load_teacher", lambda _args: object())
-    args = make_args(feature_loss="cosine", lambda_fd=1.0, backbone="ViT-B/32")
+    args = make_args(
+        feature_loss="cosine",
+        lambda_fd_photo=0.25,
+        lambda_fd_sketch=0.75,
+        backbone="ViT-B/32",
+    )
     model = ZS_SBIR(args, classnames=("cat",))
 
     assert model.hparams["feature_loss"] == "cosine"
-    assert model.hparams["lambda_fd"] == 1.0
+    assert model.hparams["lambda_fd_photo"] == 0.25
+    assert model.hparams["lambda_fd_sketch"] == 0.75
     assert model.hparams["projector_layout"] == "separate"
     assert model.hparams["projector_input_dim"] == 512
     assert model.hparams["projector_output_dim"] == 1024
