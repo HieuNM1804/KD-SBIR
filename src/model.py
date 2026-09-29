@@ -153,7 +153,15 @@ def default_teacher_cache_path(args, train_dataset):
 
 
 def _icl_active(args):
-    return args.lambda_icl > 0
+    return any(
+        weight > 0
+        for weight in (
+            args.lambda_icl_sketch_to_photo,
+            args.lambda_icl_photo_to_sketch,
+            args.lambda_icl_sketch_to_text,
+            args.lambda_icl_photo_to_text,
+        )
+    )
 
 
 def _persistent_teacher_cache_available(args):
@@ -351,9 +359,10 @@ class CustomCLIP(nn.Module):
             "student photo->teacher sketch/photo-text; separate projectors "
             f"{student_output_dim}->{DFN5B_OUTPUT_DIM}; "
             f"temperature_init={cfg.icl_temperature}, "
-            f"lambda={cfg.lambda_icl}, "
-            f"visual_weight={cfg.lambda_icl_visual}, "
-            f"text_weight={cfg.lambda_icl_text}, "
+            f"weights=({cfg.lambda_icl_sketch_to_photo}, "
+            f"{cfg.lambda_icl_photo_to_sketch}, "
+            f"{cfg.lambda_icl_sketch_to_text}, "
+            f"{cfg.lambda_icl_photo_to_text}), "
             f"projector_params={projector_params:,}"
         )
 
@@ -896,9 +905,18 @@ class ZS_SBIR(pl.LightningModule):
         self.args = args
         self.save_hyperparameters(
             {
-                "lambda_icl": args.lambda_icl,
-                "lambda_icl_visual": args.lambda_icl_visual,
-                "lambda_icl_text": args.lambda_icl_text,
+                "lambda_icl_sketch_to_photo": (
+                    args.lambda_icl_sketch_to_photo
+                ),
+                "lambda_icl_photo_to_sketch": (
+                    args.lambda_icl_photo_to_sketch
+                ),
+                "lambda_icl_sketch_to_text": (
+                    args.lambda_icl_sketch_to_text
+                ),
+                "lambda_icl_photo_to_text": (
+                    args.lambda_icl_photo_to_text
+                ),
                 "icl_temperature": args.icl_temperature,
                 "icl_directions": (
                     "student_sketch_to_teacher_photo",
@@ -999,8 +1017,6 @@ class ZS_SBIR(pl.LightningModule):
             "icl_photo_to_sketch": "ICL_PH2SK",
             "icl_sketch_to_text": "ICL_SK2TX",
             "icl_photo_to_text": "ICL_PH2TX",
-            "icl_visual": "ICL_VIS",
-            "icl_text": "ICL_TXT",
             "icl": "ICL",
         }
         for key, bar_name in bar_names.items():

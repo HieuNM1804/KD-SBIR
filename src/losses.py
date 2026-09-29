@@ -71,18 +71,25 @@ def interactive_contrastive_loss(
     labels,
     class_labels,
     logit_scale,
-    visual_weight=1.0,
-    text_weight=1.0,
+    sketch_to_photo_weight=0.25,
+    photo_to_sketch_weight=0.25,
+    sketch_to_text_weight=0.25,
+    photo_to_text_weight=0.25,
 ):
     """Match student images to cross-domain images and teacher text targets."""
-    if visual_weight < 0 or text_weight < 0:
-        raise ValueError("ICL visual and text weights must be non-negative.")
-    weight_sum = visual_weight + text_weight
-    if weight_sum <= 0:
+    weights = (
+        sketch_to_photo_weight,
+        photo_to_sketch_weight,
+        sketch_to_text_weight,
+        photo_to_text_weight,
+    )
+    if any(weight < 0 for weight in weights):
+        raise ValueError("ICL component weights must be non-negative.")
+    if sum(weights) <= 0:
         raise ValueError("At least one ICL component weight must be positive.")
 
     zero = projected_photo.new_zeros(())
-    if visual_weight > 0:
+    if sketch_to_photo_weight > 0:
         sketch_to_photo = multi_positive_contrastive_loss(
             projected_sketch,
             teacher_photo,
@@ -90,6 +97,10 @@ def interactive_contrastive_loss(
             labels,
             logit_scale,
         )
+    else:
+        sketch_to_photo = zero
+
+    if photo_to_sketch_weight > 0:
         photo_to_sketch = multi_positive_contrastive_loss(
             projected_photo,
             teacher_sketch,
@@ -97,13 +108,10 @@ def interactive_contrastive_loss(
             labels,
             logit_scale,
         )
-        visual = 0.5 * (sketch_to_photo + photo_to_sketch)
     else:
-        sketch_to_photo = zero
         photo_to_sketch = zero
-        visual = zero
 
-    if text_weight > 0:
+    if sketch_to_text_weight > 0:
         sketch_to_text = multi_positive_contrastive_loss(
             projected_sketch,
             teacher_sketch_text,
@@ -111,6 +119,10 @@ def interactive_contrastive_loss(
             class_labels,
             logit_scale,
         )
+    else:
+        sketch_to_text = zero
+
+    if photo_to_text_weight > 0:
         photo_to_text = multi_positive_contrastive_loss(
             projected_photo,
             teacher_photo_text,
@@ -118,21 +130,20 @@ def interactive_contrastive_loss(
             class_labels,
             logit_scale,
         )
-        text = 0.5 * (sketch_to_text + photo_to_text)
     else:
-        sketch_to_text = zero
         photo_to_text = zero
-        text = zero
-    combined = (
-        visual_weight * visual + text_weight * text
-    ) / weight_sum
-    return combined, {
+
+    total = (
+        sketch_to_photo_weight * sketch_to_photo
+        + photo_to_sketch_weight * photo_to_sketch
+        + sketch_to_text_weight * sketch_to_text
+        + photo_to_text_weight * photo_to_text
+    )
+    return total, {
         "icl_sketch_to_photo": sketch_to_photo,
         "icl_photo_to_sketch": photo_to_sketch,
         "icl_sketch_to_text": sketch_to_text,
         "icl_photo_to_text": photo_to_text,
-        "icl_visual": visual,
-        "icl_text": text,
     }
 
 
@@ -160,11 +171,13 @@ def loss_fn(args, features):
         labels,
         class_labels,
         logit_scale,
-        visual_weight=args.lambda_icl_visual,
-        text_weight=args.lambda_icl_text,
+        sketch_to_photo_weight=args.lambda_icl_sketch_to_photo,
+        photo_to_sketch_weight=args.lambda_icl_photo_to_sketch,
+        sketch_to_text_weight=args.lambda_icl_sketch_to_text,
+        photo_to_text_weight=args.lambda_icl_photo_to_text,
     )
     values["icl"] = icl_loss
-    return args.lambda_icl * icl_loss, values
+    return icl_loss, values
 
 
 def batch_hard_teacher_triplet_loss(

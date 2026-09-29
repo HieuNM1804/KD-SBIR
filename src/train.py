@@ -50,22 +50,28 @@ def add_interactive_contrastive_args(parser):
         help="Initial temperature for the trainable cross-model logit scale.",
     )
     parser.add_argument(
-        "--lambda_icl",
+        "--lambda_icl_sketch_to_photo",
         type=float,
-        default=1.0,
-        help="Overall weight for the combined ICL objective.",
+        default=0.25,
+        help="Weight for student-sketch to teacher-photo ICL.",
     )
     parser.add_argument(
-        "--lambda_icl_visual",
+        "--lambda_icl_photo_to_sketch",
         type=float,
-        default=1.0,
-        help="Relative weight for cross-domain visual ICL.",
+        default=0.25,
+        help="Weight for student-photo to teacher-sketch ICL.",
     )
     parser.add_argument(
-        "--lambda_icl_text",
+        "--lambda_icl_sketch_to_text",
         type=float,
-        default=1.0,
-        help="Relative weight for student-image to teacher-text ICL.",
+        default=0.25,
+        help="Weight for student-sketch to teacher sketch-text ICL.",
+    )
+    parser.add_argument(
+        "--lambda_icl_photo_to_text",
+        type=float,
+        default=0.25,
+        help="Weight for student-photo to teacher photo-text ICL.",
     )
     return parser
 
@@ -348,16 +354,17 @@ if __name__ == "__main__":
         parser.error("--teacher_scheduler_gamma must be greater than 0.")
     if args.icl_temperature <= 0:
         parser.error("--icl_temperature must be greater than 0.")
-    if args.lambda_icl <= 0:
-        parser.error("--lambda_icl must be greater than 0.")
-    if args.lambda_icl_visual < 0:
-        parser.error("--lambda_icl_visual must be non-negative.")
-    if args.lambda_icl_text < 0:
-        parser.error("--lambda_icl_text must be non-negative.")
-    if args.lambda_icl_visual == 0 and args.lambda_icl_text == 0:
+    icl_weights = (
+        args.lambda_icl_sketch_to_photo,
+        args.lambda_icl_photo_to_sketch,
+        args.lambda_icl_sketch_to_text,
+        args.lambda_icl_photo_to_text,
+    )
+    if any(weight < 0 for weight in icl_weights):
+        parser.error("ICL component weights must be non-negative.")
+    if sum(icl_weights) <= 0:
         parser.error(
-            "At least one of --lambda_icl_visual and --lambda_icl_text "
-            "must be positive."
+            "At least one ICL component weight must be positive."
         )
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
 

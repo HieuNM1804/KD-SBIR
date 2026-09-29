@@ -30,12 +30,10 @@ L_sketch_to_photo = -mean_i log(
 
 L_photo_to_sketch is defined in the reverse cross-domain direction.
 
-L_visual = 0.5 * (L_sketch_to_photo + L_photo_to_sketch)
-L_text   = 0.5 * (L_sketch_to_sketch_text + L_photo_to_photo_text)
-
-L_ICL = lambda_icl * (
-    lambda_icl_visual * L_visual + lambda_icl_text * L_text
-) / (lambda_icl_visual + lambda_icl_text)
+L_ICL = lambda_icl_sketch_to_photo * L_sketch_to_photo
+      + lambda_icl_photo_to_sketch * L_photo_to_sketch
+      + lambda_icl_sketch_to_text * L_sketch_to_sketch_text
+      + lambda_icl_photo_to_text * L_photo_to_photo_text
 ```
 
 Using all same-class positives is important for Sketchy: diagonal-only CLIP
@@ -50,8 +48,9 @@ The text templates are modality specific: `a sketch of a <class>.` and
 `a photo of a <class>.`. Teacher image and text targets are detached. The same
 separate sketch/photo projectors are used for both the visual and text axes,
 which places student images in the teacher's 1024-dimensional space without
-adding another trainable head. Set `--lambda_icl_text 0` for the former
-visual-only experiment or `--lambda_icl_visual 0` for a text-only ablation.
+adding another trainable head. Each direction has an independent non-negative
+weight. Setting a weight to zero skips that loss entirely. The four defaults
+are `0.25`, preserving the scale of the previous equally weighted mean.
 
 The branch intentionally excludes feature MSE/cosine loss and the main branch's
 KL distribution losses, so the ICL contribution is measured in isolation.
@@ -86,9 +85,10 @@ python -m src.train \
     --lambda_teacher_retrieval 1.5 \
     --teacher_triplet_margin 0.2 \
     --icl_temperature 0.07 \
-    --lambda_icl 1.0 \
-    --lambda_icl_visual 1.0 \
-    --lambda_icl_text 1.0 \
+    --lambda_icl_sketch_to_photo 0.25 \
+    --lambda_icl_photo_to_sketch 0.25 \
+    --lambda_icl_sketch_to_text 0.25 \
+    --lambda_icl_photo_to_text 0.25 \
     --lr 1e-2 \
     --momentum 0.95 \
     --weight_decay 5e-4 \
@@ -97,6 +97,6 @@ python -m src.train \
     --progress
 ```
 
-Training logs are `ICL_SK2PH`, `ICL_PH2SK`, `ICL_SK2TX`, `ICL_PH2TX`,
-`ICL_VIS`, `ICL_TXT`, `ICL`, and `train_loss`. Retrieval evaluation remains
-`mAP@200` and `P@200` for `sketchy_2`.
+Training logs are `ICL_SK2PH`, `ICL_PH2SK`, `ICL_SK2TX`, `ICL_PH2TX`, `ICL`,
+and `train_loss`. Retrieval evaluation remains `mAP@200` and `P@200` for
+`sketchy_2`.

@@ -45,9 +45,10 @@ def make_args(**overrides):
         "rebuild_teacher_cache": False,
         "teacher_pretrain_epochs": 0,
         "icl_temperature": 0.07,
-        "lambda_icl": 1.0,
-        "lambda_icl_visual": 1.0,
-        "lambda_icl_text": 1.0,
+        "lambda_icl_sketch_to_photo": 0.25,
+        "lambda_icl_photo_to_sketch": 0.25,
+        "lambda_icl_sketch_to_text": 0.25,
+        "lambda_icl_photo_to_text": 0.25,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -143,12 +144,10 @@ def test_interactive_loss_uses_cross_domain_images_and_matched_text(monkeypatch)
     assert values["icl_photo_to_sketch"].item() == 4.0
     assert values["icl_sketch_to_text"].item() == 6.0
     assert values["icl_photo_to_text"].item() == 8.0
-    assert values["icl_visual"].item() == 3.0
-    assert values["icl_text"].item() == 7.0
     assert total.item() == 5.0
 
 
-def test_interactive_loss_supports_weighted_visual_or_text_ablations(monkeypatch):
+def test_interactive_loss_supports_four_independent_weights(monkeypatch):
     calls = []
 
     def fake_loss(anchors, _candidates, *_args):
@@ -161,7 +160,7 @@ def test_interactive_loss_supports_weighted_visual_or_text_ablations(monkeypatch
     teacher = torch.randn(2, 4)
     labels = torch.tensor([0, 1])
 
-    visual, values = interactive_contrastive_loss(
+    weighted, values = interactive_contrastive_loss(
         photo,
         sketch,
         teacher,
@@ -171,15 +170,20 @@ def test_interactive_loss_supports_weighted_visual_or_text_ablations(monkeypatch
         labels,
         labels,
         logit_scale=1.0,
-        visual_weight=1.0,
-        text_weight=0.0,
+        sketch_to_photo_weight=0.1,
+        photo_to_sketch_weight=0.2,
+        sketch_to_text_weight=0.3,
+        photo_to_text_weight=0.4,
     )
-    assert len(calls) == 2
-    assert visual.item() == pytest.approx(1.5)
-    assert values["icl_text"].item() == 0.0
+    assert len(calls) == 4
+    assert weighted.item() == pytest.approx(3.0)
+    assert values["icl_sketch_to_photo"].item() == 1.0
+    assert values["icl_photo_to_sketch"].item() == 2.0
+    assert values["icl_sketch_to_text"].item() == 3.0
+    assert values["icl_photo_to_text"].item() == 4.0
 
     calls.clear()
-    text, values = interactive_contrastive_loss(
+    photo_to_text, values = interactive_contrastive_loss(
         photo,
         sketch,
         teacher,
@@ -189,15 +193,44 @@ def test_interactive_loss_supports_weighted_visual_or_text_ablations(monkeypatch
         labels,
         labels,
         logit_scale=1.0,
-        visual_weight=0.0,
-        text_weight=1.0,
+        sketch_to_photo_weight=0.0,
+        photo_to_sketch_weight=0.0,
+        sketch_to_text_weight=0.0,
+        photo_to_text_weight=3.0,
     )
-    assert len(calls) == 2
-    assert text.item() == pytest.approx(1.5)
-    assert values["icl_visual"].item() == 0.0
+    assert len(calls) == 1
+    assert photo_to_text.item() == pytest.approx(3.0)
+    assert values["icl_photo_to_text"].item() == 1.0
 
 
-def test_loss_fn_applies_icl_weight():
+def test_interactive_loss_rejects_invalid_component_weights():
+    features = (
+        torch.randn(2, 4),
+        torch.randn(2, 4),
+        torch.randn(2, 4),
+        torch.randn(2, 4),
+        torch.randn(2, 4),
+        torch.randn(2, 4),
+        torch.tensor([0, 1]),
+        torch.tensor([0, 1]),
+        torch.tensor(1.0),
+    )
+    with pytest.raises(ValueError, match="non-negative"):
+        interactive_contrastive_loss(
+            *features,
+            sketch_to_photo_weight=-1.0,
+        )
+    with pytest.raises(ValueError, match="At least one"):
+        interactive_contrastive_loss(
+            *features,
+            sketch_to_photo_weight=0.0,
+            photo_to_sketch_weight=0.0,
+            sketch_to_text_weight=0.0,
+            photo_to_text_weight=0.0,
+        )
+
+
+def test_loss_fn_applies_four_component_weights():
     labels = torch.tensor([0, 1, 0, 1])
     features = (
         torch.randn(4, 8),
@@ -211,8 +244,8 @@ def test_loss_fn_applies_icl_weight():
         torch.tensor(2.0),
     )
     raw, _ = interactive_contrastive_loss(*features)
-    total, logged = loss_fn(make_args(lambda_icl=2.5), features)
-    assert total.item() == pytest.approx(2.5 * raw.item())
+    total, logged = loss_fn(make_args(), features)
+    assert total.item() == pytest.approx(raw.item())
     assert logged["icl"].item() == pytest.approx(raw.item())
 
 
@@ -244,9 +277,10 @@ def test_cli_defaults():
     parser = add_interactive_contrastive_args(ArgumentParser())
     defaults = parser.parse_args([])
     assert defaults.icl_temperature == 0.07
-    assert defaults.lambda_icl == 1.0
-    assert defaults.lambda_icl_visual == 1.0
-    assert defaults.lambda_icl_text == 1.0
+    assert defaults.lambda_icl_sketch_to_photo == 0.25
+    assert defaults.lambda_icl_photo_to_sketch == 0.25
+    assert defaults.lambda_icl_sketch_to_text == 0.25
+    assert defaults.lambda_icl_photo_to_text == 0.25
 
 
 def test_gradients_reach_both_projectors_prompts_and_logit_scale_not_teacher():
@@ -321,14 +355,18 @@ def test_lightning_checkpoint_state_and_hyperparameters(monkeypatch):
     monkeypatch.setattr("src.model._load_teacher", lambda _args: object())
     args = make_args(
         icl_temperature=0.1,
-        lambda_icl=2.0,
+        lambda_icl_sketch_to_photo=0.1,
+        lambda_icl_photo_to_sketch=0.2,
+        lambda_icl_sketch_to_text=0.3,
+        lambda_icl_photo_to_text=0.4,
         backbone="ViT-B/32",
     )
     model = ZS_SBIR(args, classnames=("cat",))
 
-    assert model.hparams["lambda_icl"] == 2.0
-    assert model.hparams["lambda_icl_visual"] == 1.0
-    assert model.hparams["lambda_icl_text"] == 1.0
+    assert model.hparams["lambda_icl_sketch_to_photo"] == 0.1
+    assert model.hparams["lambda_icl_photo_to_sketch"] == 0.2
+    assert model.hparams["lambda_icl_sketch_to_text"] == 0.3
+    assert model.hparams["lambda_icl_photo_to_text"] == 0.4
     assert model.hparams["icl_temperature"] == 0.1
     assert model.hparams["projector_layout"] == "separate"
     assert model.hparams["positive_policy"] == "same_class_multi_positive"
