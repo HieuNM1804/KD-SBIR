@@ -1,4 +1,4 @@
-"""Restore cross-domain visual ICL on offline Kaggle."""
+"""Restore visual-and-text ICL on offline Kaggle."""
 
 from pathlib import Path
 import glob
@@ -12,7 +12,7 @@ import sys
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/clip-kd-interactive-contrastive"
-EXPECTED_COMMIT = "d056369f0b64f863678b707d5964391d9e9f7a20"
+EXPECTED_COMMIT = "688244b215b1b17098ff03cc0ca04aee3311e686"
 EXPECTED_TASK = "clip_kd_interactive_contrastive"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
@@ -78,7 +78,7 @@ for manifest_path in manifest_paths:
 
 if not matching_bundles:
     raise FileNotFoundError(
-        "Cannot find the required CLIP visual-ICL bundle.\n\n"
+        "Cannot find the required CLIP visual-and-text ICL bundle.\n\n"
         f"Expected branch: {EXPECTED_BRANCH}\n"
         f"Expected commit: {EXPECTED_COMMIT}\n"
         f"Expected task: {EXPECTED_TASK}\n"
@@ -254,7 +254,7 @@ subprocess.run(
             "torch.randn(2, 1024), torch.randn(2, 1024), "
             "torch.tensor([0, 1]), torch.tensor([0, 1]), 1.0); "
             "assert loss.ndim == 0; "
-            "print('Cross-domain visual ICL imports: OK')"
+            "print('Visual-and-text ICL imports: OK')"
         ),
     ],
     cwd=WORKING_PROJECT,
@@ -281,4 +281,4 @@ print("Entry point:", manifest["entrypoint"])
 print("Student checkpoint:", student_target)
 print("Teacher checkpoint:", dfn_target)
 print()
-print("Run the cross-domain visual ICL src.train cell next.")
+print("Run the visual-and-text ICL src.train cell next.")

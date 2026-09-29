@@ -1,4 +1,4 @@
-"""Build the Kaggle bundle for cross-domain visual ICL."""
+"""Build the Kaggle bundle for visual-and-text ICL."""
 
 from pathlib import Path
 import hashlib
@@ -19,7 +19,7 @@ DFN_DIR = BUNDLE / "dfn5b_openclip"
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/clip-kd-interactive-contrastive"
 # Pin the source commit. The later bundle-script commit intentionally differs.
-COMMIT = "d056369f0b64f863678b707d5964391d9e9f7a20"
+COMMIT = "688244b215b1b17098ff03cc0ca04aee3311e686"
 TASK = "clip_kd_interactive_contrastive"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
