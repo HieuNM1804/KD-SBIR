@@ -13,7 +13,7 @@ from pathlib import Path
 
 REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/clip-kd-dual-axis-afd"
-EXPECTED_COMMIT = "015e9f6113031ad02c0f7799ec1b25196742ba9a"
+EXPECTED_COMMIT = "24a3bfea465129846749769e8a459c032f9dea6b"
 BASE_COMMIT = "b2d50842f7831c9eb14f06ddb6cbe5bbd22255b6"
 TASK = "clip_kd_dual_axis_afd"
 WORKING_ROOT = Path("/kaggle/working")
@@ -230,6 +230,19 @@ subprocess.run(
     env=os.environ.copy(),
     check=True,
 )
+help_output = subprocess.check_output(
+    [sys.executable, "-m", "src.train", "--help"],
+    cwd=WORKING_PROJECT,
+    env=os.environ.copy(),
+    text=True,
+)
+for flag in (
+    "--lambda_afd_sp",
+    "--lambda_afd_sketch_text",
+    "--lambda_afd_photo_text",
+):
+    if flag not in help_output:
+        raise RuntimeError(f"Restored AFD CLI is missing {flag}.")
 print("=" * 72)
 print("OFFLINE ISOLATED AFD SETUP COMPLETE")
 print("Source commit:", actual_commit)
