@@ -1,11 +1,14 @@
-# CLIP-KD Cross-Domain Visual ICL
+# CLIP-KD Visual-and-Text ICL for SBIR
 
 This branch adapts Interactive Contrastive Learning (ICL) to zero-shot
-sketch-based image retrieval. The first implementation covers the two visual
-modalities only:
+sketch-based image retrieval. It replaces the main branch's domain and
+image-text distribution matching with four direct student-to-teacher
+contrastive directions:
 
 - student sketch anchors contrast against teacher photo candidates;
 - student photo anchors contrast against teacher sketch candidates.
+- student sketch anchors contrast against teacher sketch-text prototypes;
+- student photo anchors contrast against teacher photo-text prototypes.
 
 Teacher DFN5B features are detached 1024-dimensional targets. The frozen
 OpenAI CLIP ViT-B/32 student produces 512-dimensional features using independent
@@ -27,19 +30,31 @@ L_sketch_to_photo = -mean_i log(
 
 L_photo_to_sketch is defined in the reverse cross-domain direction.
 
-L_ICL = lambda_icl * 0.5 * (L_sketch_to_photo + L_photo_to_sketch)
+L_visual = 0.5 * (L_sketch_to_photo + L_photo_to_sketch)
+L_text   = 0.5 * (L_sketch_to_sketch_text + L_photo_to_photo_text)
+
+L_ICL = lambda_icl * (
+    lambda_icl_visual * L_visual + lambda_icl_text * L_text
+) / (lambda_icl_visual + lambda_icl_text)
 ```
 
 Using all same-class positives is important for Sketchy: diagonal-only CLIP
 cross-entropy would incorrectly treat repeated examples of a category as
-negatives. Negatives in this implementation come from the current batch. The
-cross-model logit scale is trainable and is initialized as
+negatives. Visual negatives come from the current batch. Text candidates are
+all seen-class teacher prototypes, so each image has its class prototype as the
+positive and every other seen class as a negative. The cross-model logit scale
+is shared by all four directions, is trainable, and is initialized as
 `log(1 / icl_temperature)`.
 
-This is a cross-domain visual adaptation of CLIP-KD ICL, not its original
-image-to-text/text-to-image formulation. It intentionally excludes feature
-MSE/cosine loss and text ICL so that the visual ICL contribution can be measured
-in isolation.
+The text templates are modality specific: `a sketch of a <class>.` and
+`a photo of a <class>.`. Teacher image and text targets are detached. The same
+separate sketch/photo projectors are used for both the visual and text axes,
+which places student images in the teacher's 1024-dimensional space without
+adding another trainable head. Set `--lambda_icl_text 0` for the former
+visual-only experiment or `--lambda_icl_visual 0` for a text-only ablation.
+
+The branch intentionally excludes feature MSE/cosine loss and the main branch's
+KL distribution losses, so the ICL contribution is measured in isolation.
 
 ## Inference
 
@@ -72,13 +87,16 @@ python -m src.train \
     --teacher_triplet_margin 0.2 \
     --icl_temperature 0.07 \
     --lambda_icl 1.0 \
+    --lambda_icl_visual 1.0 \
+    --lambda_icl_text 1.0 \
     --lr 1e-2 \
     --momentum 0.95 \
     --weight_decay 5e-4 \
     --seed 42 \
-    --exp_name clip_kd_visual_icl_sketchy2 \
+    --exp_name clip_kd_visual_text_icl_sketchy2 \
     --progress
 ```
 
-Training logs are `ICL_SK2PH`, `ICL_PH2SK`, `ICL`, and `train_loss`.
-Retrieval evaluation remains `mAP@200` and `P@200` for `sketchy_2`.
+Training logs are `ICL_SK2PH`, `ICL_PH2SK`, `ICL_SK2TX`, `ICL_PH2TX`,
+`ICL_VIS`, `ICL_TXT`, `ICL`, and `train_loss`. Retrieval evaluation remains
+`mAP@200` and `P@200` for `sketchy_2`.

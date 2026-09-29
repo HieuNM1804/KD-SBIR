@@ -214,8 +214,7 @@ def _load_teacher(args):
         device=device,
     )
     teacher.eval().requires_grad_(False)
-    if args.teacher_pretrain_epochs > 0:
-        teacher.text_tokenizer = open_clip.get_tokenizer(DFN5B_MODEL)
+    teacher.text_tokenizer = open_clip.get_tokenizer(DFN5B_MODEL)
     teacher.output_dim = DFN5B_OUTPUT_DIM
     return teacher
 
@@ -348,11 +347,13 @@ class CustomCLIP(nn.Module):
             for parameter in projector.parameters()
         )
         print(
-            "[Visual ICL] student sketch->teacher photo and student "
-            "photo->teacher sketch; separate projectors "
+            "[Visual+Text ICL] student sketch->teacher photo/sketch-text and "
+            "student photo->teacher sketch/photo-text; separate projectors "
             f"{student_output_dim}->{DFN5B_OUTPUT_DIM}; "
             f"temperature_init={cfg.icl_temperature}, "
             f"lambda={cfg.lambda_icl}, "
+            f"visual_weight={cfg.lambda_icl_visual}, "
+            f"text_weight={cfg.lambda_icl_text}, "
             f"projector_params={projector_params:,}"
         )
 
@@ -749,10 +750,10 @@ class CustomCLIP(nn.Module):
                 show_progress,
             )
 
-        # Preserve the main-branch cache format so the same teacher cache can
-        # be reused safely by this experiment and by the original pipeline.
-        if self.cfg.teacher_pretrain_epochs > 0:
-            self.get_teacher_text_features()
+        # Preserve the main-branch cache format and materialize the text
+        # prototypes before releasing DFN5B. Text ICL needs these targets even
+        # when the teacher visual prompts are not pretrained.
+        self.get_teacher_text_features()
 
         sketch_features = self._materialize_teacher_features(
             train_dataset.all_sketches_path,
@@ -860,13 +861,28 @@ class CustomCLIP(nn.Module):
                 "teacher or a "
                 "compatible persistent teacher cache."
             )
+        if (
+            self._teacher_photo_text is None
+            or self._teacher_sketch_text is None
+        ):
+            raise RuntimeError(
+                "Teacher text features must be cached before student training."
+            )
+
+        class_labels = torch.arange(
+            len(self.classnames),
+            device=labels.device,
+        )
 
         return (
             self.photo_icl_projector(photo_features),
             self.sketch_icl_projector(sketch_features),
             teacher_photo_base,
             teacher_sketch_base,
+            self._teacher_photo_text,
+            self._teacher_sketch_text,
             labels,
+            class_labels,
             self.icl_logit_scale.exp().clamp(max=100.0),
         )
 
@@ -881,10 +897,14 @@ class ZS_SBIR(pl.LightningModule):
         self.save_hyperparameters(
             {
                 "lambda_icl": args.lambda_icl,
+                "lambda_icl_visual": args.lambda_icl_visual,
+                "lambda_icl_text": args.lambda_icl_text,
                 "icl_temperature": args.icl_temperature,
                 "icl_directions": (
                     "student_sketch_to_teacher_photo",
                     "student_photo_to_teacher_sketch",
+                    "student_sketch_to_teacher_sketch_text",
+                    "student_photo_to_teacher_photo_text",
                 ),
                 "positive_policy": "same_class_multi_positive",
                 "projector_layout": "separate",
@@ -977,6 +997,10 @@ class ZS_SBIR(pl.LightningModule):
         bar_names = {
             "icl_sketch_to_photo": "ICL_SK2PH",
             "icl_photo_to_sketch": "ICL_PH2SK",
+            "icl_sketch_to_text": "ICL_SK2TX",
+            "icl_photo_to_text": "ICL_PH2TX",
+            "icl_visual": "ICL_VIS",
+            "icl_text": "ICL_TXT",
             "icl": "ICL",
         }
         for key, bar_name in bar_names.items():

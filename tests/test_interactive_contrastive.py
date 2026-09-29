@@ -46,6 +46,8 @@ def make_args(**overrides):
         "teacher_pretrain_epochs": 0,
         "icl_temperature": 0.07,
         "lambda_icl": 1.0,
+        "lambda_icl_visual": 1.0,
+        "lambda_icl_text": 1.0,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -105,33 +107,94 @@ def test_multi_positive_loss_rejects_anchor_without_positive():
         )
 
 
-def test_interactive_loss_uses_cross_domain_teacher_features(monkeypatch):
+def test_interactive_loss_uses_cross_domain_images_and_matched_text(monkeypatch):
     calls = []
 
     def fake_loss(anchors, candidates, *_args):
         calls.append((anchors, candidates))
-        return anchors.new_tensor(2.0 if len(calls) == 1 else 4.0)
+        return anchors.new_tensor(2.0 * len(calls))
 
     monkeypatch.setattr("src.losses.multi_positive_contrastive_loss", fake_loss)
     photo = torch.randn(2, 4)
     sketch = torch.randn(2, 4)
     teacher_photo = torch.randn(2, 4)
     teacher_sketch = torch.randn(2, 4)
+    teacher_photo_text = torch.randn(2, 4)
+    teacher_sketch_text = torch.randn(2, 4)
     labels = torch.tensor([0, 1])
+    class_labels = torch.tensor([0, 1])
     total, values = interactive_contrastive_loss(
         photo,
         sketch,
         teacher_photo,
         teacher_sketch,
+        teacher_photo_text,
+        teacher_sketch_text,
         labels,
+        class_labels,
         logit_scale=1.0,
     )
 
     assert calls[0] == (sketch, teacher_photo)
     assert calls[1] == (photo, teacher_sketch)
+    assert calls[2] == (sketch, teacher_sketch_text)
+    assert calls[3] == (photo, teacher_photo_text)
     assert values["icl_sketch_to_photo"].item() == 2.0
     assert values["icl_photo_to_sketch"].item() == 4.0
-    assert total.item() == 3.0
+    assert values["icl_sketch_to_text"].item() == 6.0
+    assert values["icl_photo_to_text"].item() == 8.0
+    assert values["icl_visual"].item() == 3.0
+    assert values["icl_text"].item() == 7.0
+    assert total.item() == 5.0
+
+
+def test_interactive_loss_supports_weighted_visual_or_text_ablations(monkeypatch):
+    calls = []
+
+    def fake_loss(anchors, _candidates, *_args):
+        calls.append(anchors)
+        return anchors.new_tensor(float(len(calls)))
+
+    monkeypatch.setattr("src.losses.multi_positive_contrastive_loss", fake_loss)
+    photo = torch.randn(2, 4)
+    sketch = torch.randn(2, 4)
+    teacher = torch.randn(2, 4)
+    labels = torch.tensor([0, 1])
+
+    visual, values = interactive_contrastive_loss(
+        photo,
+        sketch,
+        teacher,
+        teacher,
+        teacher,
+        teacher,
+        labels,
+        labels,
+        logit_scale=1.0,
+        visual_weight=1.0,
+        text_weight=0.0,
+    )
+    assert len(calls) == 2
+    assert visual.item() == pytest.approx(1.5)
+    assert values["icl_text"].item() == 0.0
+
+    calls.clear()
+    text, values = interactive_contrastive_loss(
+        photo,
+        sketch,
+        teacher,
+        teacher,
+        teacher,
+        teacher,
+        labels,
+        labels,
+        logit_scale=1.0,
+        visual_weight=0.0,
+        text_weight=1.0,
+    )
+    assert len(calls) == 2
+    assert text.item() == pytest.approx(1.5)
+    assert values["icl_visual"].item() == 0.0
 
 
 def test_loss_fn_applies_icl_weight():
@@ -141,7 +204,10 @@ def test_loss_fn_applies_icl_weight():
         torch.randn(4, 8),
         torch.randn(4, 8),
         torch.randn(4, 8),
+        torch.randn(2, 8),
+        torch.randn(2, 8),
         labels,
+        torch.tensor([0, 1]),
         torch.tensor(2.0),
     )
     raw, _ = interactive_contrastive_loss(*features)
@@ -179,6 +245,8 @@ def test_cli_defaults():
     defaults = parser.parse_args([])
     assert defaults.icl_temperature == 0.07
     assert defaults.lambda_icl == 1.0
+    assert defaults.lambda_icl_visual == 1.0
+    assert defaults.lambda_icl_text == 1.0
 
 
 def test_gradients_reach_both_projectors_prompts_and_logit_scale_not_teacher():
@@ -190,6 +258,10 @@ def test_gradients_reach_both_projectors_prompts_and_logit_scale_not_teacher():
     )
     teacher_photo = torch.randn(4, 1024, requires_grad=True)
     teacher_sketch = torch.randn(4, 1024, requires_grad=True)
+    teacher_photo_text = torch.randn(2, 1024, requires_grad=True)
+    teacher_sketch_text = torch.randn(2, 1024, requires_grad=True)
+    model._teacher_photo_text = teacher_photo_text
+    model._teacher_sketch_text = teacher_sketch_text
     batch = (
         torch.randn(4, 512),
         torch.randn(4, 512),
@@ -209,6 +281,8 @@ def test_gradients_reach_both_projectors_prompts_and_logit_scale_not_teacher():
     assert model.sketch_visual_prompt.ctx.grad is not None
     assert teacher_photo.grad is None
     assert teacher_sketch.grad is None
+    assert teacher_photo_text.grad is None
+    assert teacher_sketch_text.grad is None
     assert not any(
         parameter.requires_grad
         for parameter in model.clip_model.parameters()
@@ -253,11 +327,19 @@ def test_lightning_checkpoint_state_and_hyperparameters(monkeypatch):
     model = ZS_SBIR(args, classnames=("cat",))
 
     assert model.hparams["lambda_icl"] == 2.0
+    assert model.hparams["lambda_icl_visual"] == 1.0
+    assert model.hparams["lambda_icl_text"] == 1.0
     assert model.hparams["icl_temperature"] == 0.1
     assert model.hparams["projector_layout"] == "separate"
     assert model.hparams["positive_policy"] == "same_class_multi_positive"
     assert model.hparams["projector_input_dim"] == 512
     assert model.hparams["projector_output_dim"] == 1024
+    assert model.hparams["icl_directions"] == (
+        "student_sketch_to_teacher_photo",
+        "student_photo_to_teacher_sketch",
+        "student_sketch_to_teacher_sketch_text",
+        "student_photo_to_teacher_photo_text",
+    )
     assert "model.photo_icl_projector.projection.weight" in model.state_dict()
     assert "model.sketch_icl_projector.projection.weight" in model.state_dict()
     assert "model.icl_logit_scale" in model.state_dict()

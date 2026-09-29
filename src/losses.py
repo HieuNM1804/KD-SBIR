@@ -1,4 +1,4 @@
-"""Losses used by the visual interactive-contrastive KD experiment."""
+"""Losses used by the visual-and-text interactive-contrastive experiment."""
 
 import torch
 from torch.nn import functional as F
@@ -66,38 +66,87 @@ def interactive_contrastive_loss(
     projected_sketch,
     teacher_photo,
     teacher_sketch,
+    teacher_photo_text,
+    teacher_sketch_text,
     labels,
+    class_labels,
     logit_scale,
+    visual_weight=1.0,
+    text_weight=1.0,
 ):
-    """Cross-domain visual ICL in both student-to-teacher directions."""
-    sketch_to_photo = multi_positive_contrastive_loss(
-        projected_sketch,
-        teacher_photo,
-        labels,
-        labels,
-        logit_scale,
-    )
-    photo_to_sketch = multi_positive_contrastive_loss(
-        projected_photo,
-        teacher_sketch,
-        labels,
-        labels,
-        logit_scale,
-    )
-    return 0.5 * (sketch_to_photo + photo_to_sketch), {
+    """Match student images to cross-domain images and teacher text targets."""
+    if visual_weight < 0 or text_weight < 0:
+        raise ValueError("ICL visual and text weights must be non-negative.")
+    weight_sum = visual_weight + text_weight
+    if weight_sum <= 0:
+        raise ValueError("At least one ICL component weight must be positive.")
+
+    zero = projected_photo.new_zeros(())
+    if visual_weight > 0:
+        sketch_to_photo = multi_positive_contrastive_loss(
+            projected_sketch,
+            teacher_photo,
+            labels,
+            labels,
+            logit_scale,
+        )
+        photo_to_sketch = multi_positive_contrastive_loss(
+            projected_photo,
+            teacher_sketch,
+            labels,
+            labels,
+            logit_scale,
+        )
+        visual = 0.5 * (sketch_to_photo + photo_to_sketch)
+    else:
+        sketch_to_photo = zero
+        photo_to_sketch = zero
+        visual = zero
+
+    if text_weight > 0:
+        sketch_to_text = multi_positive_contrastive_loss(
+            projected_sketch,
+            teacher_sketch_text,
+            labels,
+            class_labels,
+            logit_scale,
+        )
+        photo_to_text = multi_positive_contrastive_loss(
+            projected_photo,
+            teacher_photo_text,
+            labels,
+            class_labels,
+            logit_scale,
+        )
+        text = 0.5 * (sketch_to_text + photo_to_text)
+    else:
+        sketch_to_text = zero
+        photo_to_text = zero
+        text = zero
+    combined = (
+        visual_weight * visual + text_weight * text
+    ) / weight_sum
+    return combined, {
         "icl_sketch_to_photo": sketch_to_photo,
         "icl_photo_to_sketch": photo_to_sketch,
+        "icl_sketch_to_text": sketch_to_text,
+        "icl_photo_to_text": photo_to_text,
+        "icl_visual": visual,
+        "icl_text": text,
     }
 
 
 def loss_fn(args, features):
-    """Compute visual ICL between student and cross-domain teacher features."""
+    """Compute the isolated visual-and-text student-to-teacher ICL objective."""
     (
         projected_photo,
         projected_sketch,
         teacher_photo,
         teacher_sketch,
+        teacher_photo_text,
+        teacher_sketch_text,
         labels,
+        class_labels,
         logit_scale,
     ) = features
 
@@ -106,8 +155,13 @@ def loss_fn(args, features):
         projected_sketch,
         teacher_photo,
         teacher_sketch,
+        teacher_photo_text,
+        teacher_sketch_text,
         labels,
+        class_labels,
         logit_scale,
+        visual_weight=args.lambda_icl_visual,
+        text_weight=args.lambda_icl_text,
     )
     values["icl"] = icl_loss
     return args.lambda_icl * icl_loss, values

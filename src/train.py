@@ -42,7 +42,7 @@ def seed_worker(_worker_id):
 
 
 def add_interactive_contrastive_args(parser):
-    """Register visual interactive-contrastive distillation settings."""
+    """Register visual-and-text interactive-contrastive settings."""
     parser.add_argument(
         "--icl_temperature",
         type=float,
@@ -53,7 +53,19 @@ def add_interactive_contrastive_args(parser):
         "--lambda_icl",
         type=float,
         default=1.0,
-        help="Weight for bidirectional cross-domain visual ICL.",
+        help="Overall weight for the combined ICL objective.",
+    )
+    parser.add_argument(
+        "--lambda_icl_visual",
+        type=float,
+        default=1.0,
+        help="Relative weight for cross-domain visual ICL.",
+    )
+    parser.add_argument(
+        "--lambda_icl_text",
+        type=float,
+        default=1.0,
+        help="Relative weight for student-image to teacher-text ICL.",
     )
     return parser
 
@@ -338,6 +350,15 @@ if __name__ == "__main__":
         parser.error("--icl_temperature must be greater than 0.")
     if args.lambda_icl <= 0:
         parser.error("--lambda_icl must be greater than 0.")
+    if args.lambda_icl_visual < 0:
+        parser.error("--lambda_icl_visual must be non-negative.")
+    if args.lambda_icl_text < 0:
+        parser.error("--lambda_icl_text must be non-negative.")
+    if args.lambda_icl_visual == 0 and args.lambda_icl_text == 0:
+        parser.error(
+            "At least one of --lambda_icl_visual and --lambda_icl_text "
+            "must be positive."
+        )
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
 
     checkpoint_callback = ModelCheckpoint(
