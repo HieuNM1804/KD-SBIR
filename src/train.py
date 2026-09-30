@@ -17,6 +17,8 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from src.dataset import TrainDataset, ValidDataset, WorkerInvariantSampler
 from src.data_config import UNSEEN_CLASSES
 from src.model import ZS_SBIR, default_teacher_cache_path
+from src.text_prompts import TEXT_PROMPT_PAIRS, prompt_pair_config
+from src.experiment_results import best_validation_epoch, write_json
 
 
 def seed_everything(seed):
@@ -317,6 +319,17 @@ if __name__ == "__main__":
         help="Sketch-text KD temperature; defaults to the shared temperature.",
     )
     parser.add_argument(
+        "--text_prompt_pair",
+        choices=list(TEXT_PROMPT_PAIRS),
+        default="baseline",
+        help="Fixed text template pair used by both teacher and student.",
+    )
+    parser.add_argument(
+        "--results_path",
+        default="",
+        help="Optional JSON output with epoch metrics and the best checkpoint.",
+    )
+    parser.add_argument(
         "--exp_name",
         type=str,
         default="teacher_visual_student_visual_only",
@@ -436,3 +449,23 @@ if __name__ == "__main__":
     )
 
     trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])
+    if args.results_path:
+        selected = best_validation_epoch(model.validation_history)
+        score = checkpoint_callback.best_model_score
+        if score is None or not checkpoint_callback.best_model_path:
+            raise RuntimeError("Training finished without a best checkpoint.")
+        if abs(float(score) - selected["precision"]) > 1e-6:
+            raise RuntimeError("Best checkpoint score differs from the selected epoch.")
+        write_json(args.results_path, {
+            "status": "completed",
+            "dataset": args.dataset,
+            "text_prompt_pair": prompt_pair_config(args.text_prompt_pair),
+            "config": vars(args),
+            "selection_metric": f"P@{selected['p_k']}",
+            "best_epoch": selected,
+            "last_epoch": model.validation_history[-1],
+            "best_checkpoint": os.path.abspath(checkpoint_callback.best_model_path),
+            "last_checkpoint": os.path.abspath(checkpoint_callback.last_model_path),
+            "history": model.validation_history,
+        })
+        print(f"[Results] saved {args.results_path}")

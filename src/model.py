@@ -27,6 +27,8 @@ from src.losses import (
     loss_fn,
 )
 from src.teacher_prompts import build_teacher_prompt_controller
+from src.text_prompts import class_texts, prompt_pair_config
+from src.experiment_results import write_json
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -90,6 +92,9 @@ def _teacher_training_config(args):
         "teacher_pretrained": DFN5B_PRETRAINED,
         "teacher_output_dim": DFN5B_OUTPUT_DIM,
         "teacher_precision": "fp16",
+        "text_prompt_pair": prompt_pair_config(
+            getattr(args, "text_prompt_pair", "baseline")
+        ),
         "teacher_n_ctx_visual": args.teacher_n_ctx_visual,
         "teacher_prompt_depth": args.teacher_prompt_depth,
         "teacher_prompt_std": args.teacher_prompt_std,
@@ -296,14 +301,10 @@ class CustomCLIP(nn.Module):
             cfg.seed + 202,
             prompt_depth,
         )
-        photo_texts = [
-            f"a photo of a {name.replace('_', ' ')}."
-            for name in self.classnames
-        ]
-        sketch_texts = [
-            f"a sketch of a {name.replace('_', ' ')}."
-            for name in self.classnames
-        ]
+        self.text_prompt_pair = getattr(cfg, "text_prompt_pair", "baseline")
+        photo_texts = class_texts(self.classnames, "photo", self.text_prompt_pair)
+        sketch_texts = class_texts(self.classnames, "sketch", self.text_prompt_pair)
+        print(f"[Text Prompts] {prompt_pair_config(self.text_prompt_pair)}")
         self.register_buffer(
             "_student_photo_tokens",
             clip.tokenize(photo_texts),
@@ -801,14 +802,8 @@ class CustomCLIP(nn.Module):
         if self._teacher_sketch_text is not None:
             return self._teacher_sketch_text, self._teacher_photo_text
 
-        sketch_texts = [
-            f"a sketch of a {name.replace('_', ' ')}."
-            for name in self.classnames
-        ]
-        photo_texts = [
-            f"a photo of a {name.replace('_', ' ')}."
-            for name in self.classnames
-        ]
+        sketch_texts = class_texts(self.classnames, "sketch", self.text_prompt_pair)
+        photo_texts = class_texts(self.classnames, "photo", self.text_prompt_pair)
         teacher_device = next(self._teacher.parameters()).device
         tokens = self._teacher.text_tokenizer(
             sketch_texts + photo_texts
@@ -908,6 +903,7 @@ class ZS_SBIR(pl.LightningModule):
 
         self.distance_fn = lambda x, y: F.cosine_similarity(x, y)
         self.best_precision = 0.0
+        self.validation_history = []
 
         teacher = _load_teacher(args)
         self.model = CustomCLIP(
@@ -1032,11 +1028,28 @@ class ZS_SBIR(pl.LightningModule):
         )
         self.log("mAP", mAP, on_step=False, on_epoch=True)
         self.log("precision", precision, on_step=False, on_epoch=True)
-        if self.global_step > 0:
+        if not self.trainer.sanity_checking and self.global_step > 0:
             self.best_precision = max(
                 self.best_precision,
                 precision.item(),
             )
+            row = {
+                "epoch": int(self.current_epoch) + 1,
+                "global_step": int(self.global_step),
+                "precision": precision.item(),
+                "mAP": mAP.item(),
+                "p_k": p_k,
+                "map_k": map_k,
+            }
+            self.validation_history.append(row)
+            results_path = getattr(self.args, "results_path", "")
+            if results_path:
+                write_json(results_path, {
+                    "status": "running",
+                    "dataset": self.args.dataset,
+                    "text_prompt_pair": prompt_pair_config(self.model.text_prompt_pair),
+                    "history": self.validation_history,
+                })
 
         if map_k:
             print(
