@@ -35,6 +35,23 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
+def git_environment(*directories):
+    """Trust only these repository paths for this cell's child processes.
+
+    Kaggle input/output mounts can have a different owner. Command-scope Git
+    configuration also reaches Git calls inside the unittest subprocess without
+    changing the user's global configuration or trusting every repository.
+    """
+    environment = os.environ.copy()
+    count = int(environment.get("GIT_CONFIG_COUNT", "0"))
+    for directory in directories:
+        environment[f"GIT_CONFIG_KEY_{count}"] = "safe.directory"
+        environment[f"GIT_CONFIG_VALUE_{count}"] = Path(directory).resolve().as_posix()
+        count += 1
+    environment["GIT_CONFIG_COUNT"] = str(count)
+    return environment
+
+
 WORKING.mkdir(parents=True, exist_ok=True)
 os.chdir(WORKING)
 paths = set()
@@ -70,11 +87,12 @@ required = [source / ".git", bundle / "requirements.txt", bundle / "wheels",
 for path in required:
     if not path.exists():
         raise FileNotFoundError(f"Incomplete bundle: {path}")
-if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip() != EXPECTED_COMMIT:
+source_git_env = git_environment(source)
+if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True, env=source_git_env).strip() != EXPECTED_COMMIT:
     raise RuntimeError("Source commit mismatch")
-if subprocess.check_output(["git", "merge-base", EXPECTED_COMMIT, EXPECTED_BASE_COMMIT], cwd=source, text=True).strip() != EXPECTED_BASE_COMMIT:
+if subprocess.check_output(["git", "merge-base", EXPECTED_COMMIT, EXPECTED_BASE_COMMIT], cwd=source, text=True, env=source_git_env).strip() != EXPECTED_BASE_COMMIT:
     raise RuntimeError("Source does not match expected main base")
-if subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"], cwd=source, text=True).strip():
+if subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"], cwd=source, text=True, env=source_git_env).strip():
     raise RuntimeError("Bundle source has tracked modifications")
 tree = ast.parse((source / "src" / "teacher_ensemble.py").read_text(encoding="utf-8"))
 catalogue = ast.literal_eval(next(node.value for node in tree.body if isinstance(node, ast.Assign)
@@ -146,11 +164,12 @@ check_code = (
     "    import open_clip\n"
     "    assert open_clip.get_pretrained_cfg(s['model'], s['pretrained'])['hf_hub'].rstrip('/') == s['repo'], k\n"
 ) + check_code
-subprocess.run([sys.executable, "-c", check_code], cwd=PROJECT, check=True, env=os.environ.copy())
+verification_env = git_environment(source, PROJECT)
+subprocess.run([sys.executable, "-c", check_code], cwd=PROJECT, check=True, env=verification_env)
 subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_teacher_ensemble.py", "-v"],
-               cwd=PROJECT, check=True, env=os.environ.copy())
+               cwd=PROJECT, check=True, env=verification_env)
 subprocess.run([sys.executable, "-m", EXPECTED_ENTRYPOINT, "--help"], cwd=PROJECT,
-               check=True, env=os.environ.copy(), stdout=subprocess.DEVNULL)
+               check=True, env=verification_env, stdout=subprocess.DEVNULL)
 print("OFFLINE ENSEMBLE4 SETUP COMPLETE")
 print("Project:", PROJECT, "Source:", EXPECTED_COMMIT)
 print("Run %cd /kaggle/working/KD-SBIR, then the src.train cell from README.md.")

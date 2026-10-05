@@ -92,6 +92,10 @@ weights. Existing feature caches avoid repeated teacher training.
    caches and verifies that OpenCLIP's tags resolve to the intended repositories.
    Use the two scripts from THIS branch; older one-teacher bundles are insufficient.
    Keep builder/restorer Python environments compatible for binary wheels.
+   If Git reports `detected dubious ownership` for the mounted input source,
+   rerun the updated offline cell: it supplies exact `safe.directory` paths to
+   its Git checks and test subprocesses. No global Git configuration is changed,
+   and the existing source bundle remains compatible.
 3. Run `%cd /kaggle/working/KD-SBIR`, then the command below. It retains your old
    main settings and defaults to an equal-weight four-teacher ensemble.
 
