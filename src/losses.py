@@ -2,6 +2,54 @@
 
 import torch
 from torch.nn import functional as F
+from src.teacher_ensemble import TEACHERS, teacher_keys, is_ensemble, normalized_weights
+
+
+def ensemble_teacher_log_probs(images, candidates, args, temperature):
+    """Mix teacher probabilities, never cosine features or raw logits.
+
+    Packed cache columns are split into each teacher's own embedding space.
+    logsumexp retains very small probabilities for the symmetric KL objective.
+    """
+    keys = teacher_keys(args)
+    dims = [TEACHERS[key]["output_dim"] for key in keys]
+    weights = normalized_weights(getattr(args, "teacher_ensemble_weights", None), len(keys))
+    if images.ndim != 2 or candidates.ndim != 2 or images.shape[-1] != sum(dims) or candidates.shape[-1] != sum(dims):
+        raise ValueError("Packed teacher features have incorrect ensemble dimensions.")
+    with torch.no_grad():
+        image_parts = images.detach().float().split(dims, dim=-1)
+        candidate_parts = candidates.detach().to(images.device, dtype=torch.float32).split(dims, dim=-1)
+        terms = []
+        for weight, image, candidate in zip(weights, image_parts, candidate_parts):
+            if weight > 0:
+                logits = F.normalize(image, dim=-1) @ F.normalize(candidate, dim=-1).t()
+                log_probs = F.log_softmax(logits / temperature, dim=-1)
+                terms.append(log_probs + log_probs.new_tensor(weight).log())
+        return torch.logsumexp(torch.stack(terms), dim=0)
+
+
+def ensemble_relational_kd_loss(student_sketch, student_photo, teacher_sketch,
+                                teacher_photo, temperature, args):
+    student_sketch = F.normalize(student_sketch.float(), dim=-1)
+    student_photo = F.normalize(student_photo.float(), dim=-1)
+    student_log_probs = F.log_softmax(student_sketch @ student_photo.t() / temperature, dim=-1)
+    teacher_log_probs = ensemble_teacher_log_probs(
+        teacher_sketch.to(student_sketch.device), teacher_photo, args, temperature,
+    )
+    return F.kl_div(student_log_probs, teacher_log_probs.exp(), reduction="batchmean")
+
+
+def ensemble_image_text_kd_loss(student_image, student_text, teacher_image,
+                               teacher_text, temperature, args):
+    student_image = F.normalize(student_image.float(), dim=-1)
+    student_text = F.normalize(student_text.float(), dim=-1)
+    student_log_probs = F.log_softmax(student_image @ student_text.t() / temperature, dim=-1)
+    teacher_log_probs = ensemble_teacher_log_probs(
+        teacher_image.to(student_image.device), teacher_text, args, temperature,
+    )
+    forward = F.kl_div(student_log_probs, teacher_log_probs.exp(), reduction="batchmean")
+    reverse = (student_log_probs.exp() * (student_log_probs - teacher_log_probs)).sum(-1).mean()
+    return 0.5 * (forward + reverse)
 
 
 def relational_kd_loss(
@@ -124,30 +172,33 @@ def loss_fn(args, features):
 
     domain_loss = zero
     if teacher_active and args.lambda_domain > 0:
-        domain_loss = relational_kd_loss(
+        domain_loss = (ensemble_relational_kd_loss if is_ensemble(args) else relational_kd_loss)(
             sketch_features,
             photo_features,
             teacher_sketch_features,
             teacher_photo_features,
             args.kd_temperature,
+            **({"args": args} if is_ensemble(args) else {}),
         )
 
     photo_text_kd = zero
     sketch_text_kd = zero
     if teacher_active and args.lambda_modality > 0:
-        photo_text_kd = image_text_kd_loss(
+        photo_text_kd = (ensemble_image_text_kd_loss if is_ensemble(args) else image_text_kd_loss)(
             photo_features,
             student_photo_text,
             teacher_photo_features,
             teacher_photo_text,
             args.photo_text_kd_temperature,
+            **({"args": args} if is_ensemble(args) else {}),
         )
-        sketch_text_kd = image_text_kd_loss(
+        sketch_text_kd = (ensemble_image_text_kd_loss if is_ensemble(args) else image_text_kd_loss)(
             sketch_features,
             student_sketch_text,
             teacher_sketch_features,
             teacher_sketch_text,
             args.sketch_text_kd_temperature,
+            **({"args": args} if is_ensemble(args) else {}),
         )
     modality_loss = photo_text_kd + sketch_text_kd
 
@@ -158,4 +209,6 @@ def loss_fn(args, features):
     return total_loss, {
         "domain_kd": domain_loss,
         "modality_kd": modality_loss,
+        "photo_text_kd": photo_text_kd,
+        "sketch_text_kd": sketch_text_kd,
     }

@@ -17,6 +17,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from src.dataset import TrainDataset, ValidDataset, WorkerInvariantSampler
 from src.data_config import UNSEEN_CLASSES
 from src.model import ZS_SBIR, default_teacher_cache_path
+from src.teacher_ensemble import DEFAULT_TEACHERS, TEACHERS, is_ensemble, normalized_weights
 
 
 def seed_everything(seed):
@@ -105,6 +106,15 @@ if __name__ == "__main__":
         help="Zero-shot split.",
     )
     parser.add_argument("--backbone", type=str, default="ViT-B/32")
+    parser.add_argument(
+        "--teacher_models", nargs="+", choices=list(TEACHERS), default=list(DEFAULT_TEACHERS),
+        help="Teacher keys in ensemble order; default: dfn5b openai_l14 dfn2b_l14 laion_h14. "
+             "Use one key for a single-teacher ablation.",
+    )
+    parser.add_argument(
+        "--teacher_ensemble_weights", nargs="+", type=float, default=None,
+        help="Non-negative teacher weights in --teacher_models order (default equal); normalized to sum 1.",
+    )
     parser.add_argument("--max_size", type=int, default=224)
     parser.add_argument(
         "--n_ctx_visual",
@@ -323,6 +333,19 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    if len(set(args.teacher_models)) != len(args.teacher_models):
+        parser.error("--teacher_models must not contain duplicates.")
+    try:
+        weights = normalized_weights(args.teacher_ensemble_weights, len(args.teacher_models))
+    except ValueError as error:
+        parser.error(str(error))
+    # A zero-weight teacher contributes no knowledge and needs no GPU/cache work.
+    active = [(key, weight) for key, weight in zip(args.teacher_models, weights) if weight > 0]
+    args.teacher_models = [key for key, _ in active]
+    args.teacher_ensemble_weights = [weight for _, weight in active]
+    if is_ensemble(args) and args.teacher_cache_path:
+        parser.error("Ensemble uses a cache per teacher; use --teacher_cache_dir instead of --teacher_cache_path.")
+    print(f"[Teacher Ensemble] models={args.teacher_models}, weights={args.teacher_ensemble_weights}")
     if args.teacher_prompt_seed is None:
         args.teacher_prompt_seed = args.seed
     if args.photo_text_kd_temperature is None:
@@ -363,6 +386,8 @@ if __name__ == "__main__":
         parser.error("--lambda_domain must be non-negative.")
     if args.lambda_modality < 0:
         parser.error("--lambda_modality must be non-negative.")
+    if args.lambda_domain == 0 and args.lambda_modality == 0:
+        parser.error("At least one student KD loss weight must be positive.")
     if args.image_text_kd_temperature <= 0:
         parser.error("--image_text_kd_temperature must be greater than 0.")
     if args.photo_text_kd_temperature <= 0:
@@ -381,7 +406,7 @@ if __name__ == "__main__":
     )
 
     train_loader, val_sketch_loader, val_photo_loader = get_loaders(args)
-    if not args.teacher_cache_path and args.teacher_pretrain_epochs > 0:
+    if not is_ensemble(args) and not args.teacher_cache_path and args.teacher_pretrain_epochs > 0:
         args.teacher_cache_path = default_teacher_cache_path(
             args,
             train_loader.dataset,
@@ -400,7 +425,7 @@ if __name__ == "__main__":
             "Creating a persistent teacher cache requires "
             "--teacher_pretrain_epochs greater than 0."
         )
-    if args.rebuild_teacher_cache and not args.teacher_cache_path:
+    if args.rebuild_teacher_cache and not args.teacher_cache_path and not is_ensemble(args):
         parser.error(
             "--rebuild_teacher_cache requires --teacher_cache_path or "
             "--teacher_pretrain_epochs greater than 0."

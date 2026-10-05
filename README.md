@@ -1,62 +1,160 @@
-# KD-SBIR: Teacher Visual Prompts, Student Visual-Only Prompts
+# CLIP-KD: four-teacher ensemble distillation
 
-This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from
-`experiment/teacher-visual-prompt-tuning`. The teacher has separate photo and
-sketch deep visual prompts, learns only from retrieval triplet loss, and is
-validated on the unseen retrieval split after each pretraining epoch.
+Branch: `experiment/clip-kd-teacher-ensemble4`, based on main commit
+`b2d50842f7831c9eb14f06ddb6cbe5bbd22255b6`.
 
-The student CLIP backbone is fully frozen. Its only trainable parameters are
-independent photo and sketch deep visual prompts. The student text encoder has
-no learnable prompt tokens and remains fully frozen. Image-text distillation
-uses fixed CLIP features from these modality-specific templates:
+The student is the same frozen OpenAI CLIP ViT-B/32 with independent photo and
+sketch deep visual prompts. The four teachers are:
 
-- `a photo of a {class}.`
-- `a sketch of a {class}.`
+| Key | Model / pretrained tag | Feature dimension |
+|---|---|---|
+| `dfn5b` | ViT-H-14-quickgelu / dfn5b (main's teacher) | 1024 |
+| `openai_l14` | ViT-L-14 / openai | 768 |
+| `dfn2b_l14` | ViT-L-14 / dfn2b_s39b | 768 |
+| `laion_h14` | ViT-H-14 / laion2b_s32b_b79k | 1024 |
 
-The student objectives are sketch-photo relational KD, photo-text KD, and
-sketch-text KD. Setting an objective weight to zero disables that objective.
+Loader definitions and pinned pretrained checkpoint revisions come from the
+existing teacher branches. In particular OpenAI means ViT-L/14 at 224 resolution.
+There is no augmentation, no projector, and no ensemble at student inference.
+
+## How targets are ensembled
+
+For each of main's three relations, each teacher normalizes its own image/text
+features and produces its own cosine matrix. The same relation temperature is
+used by each teacher and the student, as on main. Ensemble probabilities are:
+
+```text
+P_teacher = sum_m w_m * softmax(R_teacher_m / temperature)
+sum_m w_m = 1
+```
+
+The four models have equal default weights (0.25 each). `--teacher_ensemble_weights`
+accepts non-negative coefficients in `--teacher_models` order and normalizes them.
+A coefficient of 0 excludes that teacher from cache creation/loading.
+
+Student loss remains:
+
+```text
+L = lambda_domain * KL(P_teacher_sketch_photo || P_student_sketch_photo)
+  + lambda_modality * (SymKL(P_teacher_photo_text, P_student_photo_text)
+                      + SymKL(P_teacher_sketch_text, P_student_sketch_text))
+```
+
+We average probabilities after each teacher's softmax, not raw logits, raw
+features, or four independent KL losses. Sketch-photo is row KL (sketch -> photo),
+as on main. SymKL is the mean of both KL directions. All four text towers use
+`a photo of a {class}.` and `a sketch of a {class}.` with the same ordered seen
+class list. Student temperatures and lambda values retain their main meanings.
+
+Feature tensors are concatenated ONLY for compact DataLoader storage (3584 columns
+for all four). Loss code splits them into 1024/768/768/1024 blocks before cosine
+and softmax; there is no shared teacher feature coordinate system or averaged
+embedding. The student retrieval embedding remains 512-dimensional.
+
+## Teacher preparation and caching
+
+Teachers are loaded one at a time. Each teacher independently trains its own
+photo/sketch prompts with main's symmetric batch-hard retrieval triplet loss,
+using the shared `teacher_*` CLI configuration. For example pretrain_epochs=2
+means two epochs PER teacher (four training runs). Then it restores its best
+prompt state, caches image/text features, and releases its backbone before the
+next teacher. Set `--teacher_pretrain_epochs 0` to ensemble original frozen
+pretrained teachers instead; those targets are also cached independently.
+
+All teachers/student use the original main preprocessing. Photo-sketch sampling
+remains category-level, with the same image paths/order represented in every
+teacher cache. Teacher sampling/RNG is reset independently for each teacher and
+restored before student training; changing teacher order does not shift another
+teacher's RNG stream. Only student visual prompts enter its optimizer/checkpoint.
+
+Use `--teacher_cache_dir` for multi-teacher runs. An explicit `--teacher_cache_path`
+is rejected when several teachers are active. Automatic paths include each
+model/pretrained tag and the original full teacher training config. Existing
+compatible caches from main and the three teacher branches can be reused by
+placing them in this cache directory. Original image/text tensor shapes and
+metadata are checked. Changing ensemble weights alone reuses these caches.
+Use `--rebuild_teacher_cache` to recreate each active teacher cache intentionally.
+
+Compute/storage: one teacher backbone at a time on GPU, but four teacher training
+and feature-extraction passes. The packed CPU image targets use 3584 dimensions
+instead of main's 1024 (3.5x feature storage). Packing temporarily needs additional
+CPU RAM. The online bundle contains roughly 11 GiB of pretrained weights plus
+wheels/source; allow working/output disk space for both the bundle and restored
+weights. Existing feature caches avoid repeated teacher training.
+
+## Kaggle setup
+
+1. Internet-enabled notebook: copy and run all of `test/kaggle_online.py` in one
+   cell. It downloads all four teachers at fixed HF revisions with SHA256 checks,
+   and the original ViT-B/32 student. Save Version -> Save & Run All -> Always save output.
+2. GPU notebook: attach Sketchy and that saved notebook output, then copy/run
+   `test/kaggle_offline.py`. Internet can be OFF. It restores four HF snapshot
+   caches and verifies that OpenCLIP's tags resolve to the intended repositories.
+   Use the two scripts from THIS branch; older one-teacher bundles are insufficient.
+   Keep builder/restorer Python environments compatible for binary wheels.
+3. Run `%cd /kaggle/working/KD-SBIR`, then the command below. It retains your old
+   main settings and defaults to an equal-weight four-teacher ensemble.
 
 ```bash
 !python -m src.train \
     --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
-    --dataset sketchy_1 \
-    --epochs 7 \
+    --dataset sketchy_2 \
+    --epochs 5 \
     --workers 8 \
     --batch_size 64 \
     --test_batch_size 1024 \
     --n_ctx_visual 3 \
     --prompt_depth 12 \
-    --lambda_domain 1.0 \
+    --teacher_models dfn5b openai_l14 dfn2b_l14 laion_h14 \
+    --teacher_ensemble_weights 1 1 1 1 \
+    --lambda_domain 3.0 \
     --lambda_modality 1.0 \
-    --photo_text_kd_temperature 0.2 \
+    --kd_temperature 0.07 \
+    --photo_text_kd_temperature 0.15 \
     --sketch_text_kd_temperature 0.02 \
-    --lr 1e-3 \
-    --momentum 0.94 \
-    --weight_decay 1e-3 \
-    --teacher_pretrain_epochs 4 \
+    --lr 1e-2 \
+    --momentum 0.9 \
+    --weight_decay 1e-5 \
+    --teacher_pretrain_epochs 2 \
     --teacher_pretrain_batch_size 64 \
-    --teacher_n_ctx_visual 3 \
+    --teacher_n_ctx_visual 10 \
     --teacher_prompt_depth 12 \
     --teacher_prompt_std 0.02 \
-    --teacher_prompt_lr 3e-5 \
+    --teacher_prompt_lr 3e-2 \
     --teacher_prompt_seed 42 \
+    --teacher_prompt_gradient_checkpointing \
     --teacher_momentum 0.9 \
     --teacher_weight_decay 1e-3 \
     --lambda_teacher_retrieval 1.5 \
     --teacher_triplet_margin 0.2 \
     --seed 42 \
-    --exp_name teacher_visual_student_visual_only \
+    --exp_name ensemble4_sketchy2 \
     --progress
 ```
 
-Teacher caches are named from the dataset and complete teacher configuration.
-Changing only student prompts, losses, or optimizer settings reuses a compatible
-teacher cache. Use `--rebuild_teacher_cache` only when intentionally replacing
-that cache.
+Single-teacher ablation: replace the two teacher lines with
+`--teacher_models dfn5b --teacher_ensemble_weights 1`. Its loss and gradients match
+main exactly. Use one of the other keys to run that teacher by itself. You can
+also specify any nonempty subset for pair/triple ensembles. Start with equal
+weights; the code does not claim these are the best weights for retrieval.
 
-Teacher prompt pretraining keeps the epoch with the highest unseen P@K, restores
-that prompt state, and materializes the distillation cache from it. Student
-checkpoints are also ranked by unseen P@K instead of mAP. Ties keep the earlier
-teacher epoch. Neither state cloning nor checkpoint serialization consumes RNG.
-Because unseen labels determine both selections, this setting has test-set
-model-selection leakage and is not a strict inductive ZS-SBIR protocol.
+## Validation
+
+```bash
+python -m unittest discover -s tests -p test_teacher_ensemble.py -v
+python -m src.train --help
+```
+
+Tests verify normalized teacher weights, independent reference probability mixing
+and gradients for all three losses, exact single-DFN5B equivalence to main,
+loader/cache settings for the four pretrained models, sequential prompt training
+on real tiny OpenCLIP towers, complete cache reuse without downloads/retraining,
+cache-model rejection and exact dataset alignment, and actual Lightning steps
+where only student prompts update. Full pretrained 4-model Kaggle training and
+retrieval accuracy have not been run locally.
+
+Teacher/student checkpoint selection is inherited from main: highest unseen P@K.
+Each teacher selects independently; this is not validation of the ensemble's own
+retrieval ranking. Because unseen labels participate in model selection, this
+baseline protocol is not strict inductive ZS-SBIR. Test-time student retrieval
+uses its own cosine similarity and a single 512-dimensional embedding.

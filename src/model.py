@@ -27,6 +27,7 @@ from src.losses import (
     loss_fn,
 )
 from src.teacher_prompts import build_teacher_prompt_controller
+from src.teacher_ensemble import teacher_spec, teacher_keys, is_ensemble, cache_ensemble
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -85,10 +86,11 @@ def _retrieval_metrics(
 
 def _teacher_training_config(args):
     """Parameters that can change the prompt-tuned teacher targets."""
+    spec = teacher_spec(args)
     return {
-        "teacher_model": DFN5B_MODEL,
-        "teacher_pretrained": DFN5B_PRETRAINED,
-        "teacher_output_dim": DFN5B_OUTPUT_DIM,
+        "teacher_model": spec["model"],
+        "teacher_pretrained": spec["pretrained"],
+        "teacher_output_dim": spec["output_dim"],
         "teacher_precision": "fp16",
         "teacher_n_ctx_visual": args.teacher_n_ctx_visual,
         "teacher_prompt_depth": args.teacher_prompt_depth,
@@ -127,7 +129,7 @@ def default_teacher_cache_path(args, train_dataset):
         dataset_digest.update(b"\0")
 
     cache_key = {
-        "format_version": TEACHER_CACHE_FORMAT_VERSION,
+        "format_version": teacher_spec(args)["cache_version"],
         "dataset": args.dataset,
         "dataset_fingerprint": dataset_digest.hexdigest(),
         "teacher": _teacher_training_config(args),
@@ -194,10 +196,13 @@ def _build_teacher_prompts(args, teacher):
 
 
 def _load_teacher(args):
+    if is_ensemble(args):
+        # Loaded sequentially when cache_teacher_features receives the dataset.
+        return None
     if _persistent_teacher_cache_available(args):
         print(
             "[Teacher Cache] persistent cache found; "
-            "skipping DFN5B loading."
+            f"skipping {teacher_keys(args)[0]} loading."
         )
         return None
 
@@ -208,17 +213,18 @@ def _load_teacher(args):
     ):
         return None
 
-    print(f"[Teacher] Loading {DFN5B_MODEL} in FP16...")
+    spec = teacher_spec(args)
+    print(f"[Teacher] Loading {teacher_keys(args)[0]} ({spec['model']}, {spec['pretrained']}) in FP16...")
     teacher = open_clip.create_model(
-        DFN5B_MODEL,
-        pretrained=DFN5B_PRETRAINED,
+        spec["model"],
+        pretrained=spec["pretrained"],
         precision="fp16",
         device=device,
     )
     teacher.eval().requires_grad_(False)
-    if args.teacher_pretrain_epochs > 0 or _image_text_kd_active(args):
-        teacher.text_tokenizer = open_clip.get_tokenizer(DFN5B_MODEL)
-    teacher.output_dim = DFN5B_OUTPUT_DIM
+    if args.teacher_pretrain_epochs > 0 or _image_text_kd_active(args) or args.teacher_cache_path:
+        teacher.text_tokenizer = open_clip.get_tokenizer(spec["model"])
+    teacher.output_dim = spec["output_dim"]
     return teacher
 
 
@@ -365,7 +371,7 @@ class CustomCLIP(nn.Module):
     def _teacher_cache_metadata(self, train_dataset):
         cfg = self.cfg
         return {
-            "format_version": TEACHER_CACHE_FORMAT_VERSION,
+            "format_version": teacher_spec(cfg)["cache_version"],
             "dataset": cfg.dataset,
             "max_size": train_dataset.max_size,
             "classnames": list(self.classnames),
@@ -417,6 +423,14 @@ class CustomCLIP(nn.Module):
                 "--rebuild_teacher_cache."
             )
 
+        for name, rows in (("teacher_sketch_features", len(train_dataset.all_sketches_path)),
+                           ("teacher_photo_features", len(train_dataset.all_photo_paths)),
+                           ("teacher_sketch_text", len(self.classnames)),
+                           ("teacher_photo_text", len(self.classnames))):
+            value = payload[name]
+            if not isinstance(value, torch.Tensor) or value.shape != (rows, teacher_spec(self.cfg)["output_dim"]):
+                raise RuntimeError(f"Teacher cache {cache_path}: invalid tensor {name}.")
+
         train_dataset.set_teacher_features(
             payload["teacher_sketch_features"],
             payload["teacher_photo_features"],
@@ -429,7 +443,7 @@ class CustomCLIP(nn.Module):
         cache_size_mb = cache_path.stat().st_size / 1024**2
         print(
             f"[Teacher Cache] loaded {cache_path} ({cache_size_mb:.1f} MB); "
-            "skipped DFN5B encoding and teacher pretraining."
+            "skipped teacher encoding and prompt pretraining."
         )
 
     def _encode_teacher_image(self, images, modality):
@@ -658,7 +672,7 @@ class CustomCLIP(nn.Module):
         )
         output = torch.empty(
             len(paths),
-            DFN5B_OUTPUT_DIM,
+            teacher_spec(self.cfg)["output_dim"],
             dtype=torch.float16,
         )
         offset = 0
@@ -720,6 +734,10 @@ class CustomCLIP(nn.Module):
         workers,
         show_progress,
     ):
+        if is_ensemble(self.cfg):
+            cache_ensemble(self, train_dataset, val_sketch_loader, val_photo_loader,
+                           batch_size, workers, show_progress)
+            return
         if self.persistent_teacher_cache:
             self._load_persistent_teacher_cache(train_dataset)
             return
@@ -732,7 +750,7 @@ class CustomCLIP(nn.Module):
         )
         cache_size_mb = (
             image_count
-            * DFN5B_OUTPUT_DIM
+            * teacher_spec(self.cfg)["output_dim"]
             * torch.tensor([], dtype=torch.float16).element_size()
             / 1024**2
         )
@@ -746,7 +764,7 @@ class CustomCLIP(nn.Module):
                 show_progress,
             )
 
-        if self.image_text_kd_active or self.cfg.teacher_pretrain_epochs > 0:
+        if self.image_text_kd_active or self.cfg.teacher_pretrain_epochs > 0 or self.cfg.teacher_cache_path:
             self.get_teacher_text_features()
 
         sketch_features = self._materialize_teacher_features(
@@ -765,11 +783,11 @@ class CustomCLIP(nn.Module):
         )
         train_dataset.set_teacher_features(sketch_features, photo_features)
 
-        if self.cfg.teacher_pretrain_epochs > 0:
+        if self.cfg.teacher_cache_path:
             prompt_state = {
                 key: value.detach().cpu()
                 for key, value in self.teacher_prompts.state_dict().items()
-            }
+            } if self.teacher_prompts is not None else {}
             self._save_persistent_teacher_cache(
                 train_dataset,
                 sketch_features,
@@ -787,7 +805,7 @@ class CustomCLIP(nn.Module):
         print(
             "[Teacher Cache] materialized tuned seen-image features; "
             f"images={image_count:,}, memory={cache_size_mb:.1f} MB. "
-            "DFN5B released."
+            f"{teacher_keys(self.cfg)[0]} released."
         )
 
     def train(self, mode=True):
