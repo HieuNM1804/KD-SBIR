@@ -142,10 +142,50 @@ main exactly. Use one of the other keys to run that teacher by itself. You can
 also specify any nonempty subset for pair/triple ensembles. Start with equal
 weights; the code does not claim these are the best weights for retrieval.
 
+## Visualize teacher and student distillation matrices in one Kaggle cell
+
+After training, paste the entire contents of
+[`test/kaggle_distillation_matrices.py`](test/kaggle_distillation_matrices.py)
+into one notebook cell. It works with the existing source bundle pinned to
+`d218b11`; rebuilding the online bundle is unnecessary.
+
+Set `CHECKPOINT_PATH` to your trained student checkpoint. The default uses
+`saved_models/ensemble4_sketchy2/last.ckpt`; select an `epoch=...ckpt` file to
+inspect a different checkpoint. Match `ROOT`, `DATASET`, `TEACHER_MODELS`,
+`TEACHER_WEIGHTS`, `SEED`, temperatures and `TEACHER_TRAINING` to your run.
+The defaults match the command above. Prompt count and depth are inferred from
+the checkpoint. `CACHE_DIR` defaults to `/kaggle/working/teacher_cache`;
+`CACHE_PATHS` optionally supplies an exact file path for each teacher. Cache
+metadata, feature dimensions and ordered dataset path fingerprints are checked.
+Student checkpoints do not record the teacher cache configuration or ensemble
+weights, so these settings must be supplied accurately.
+
+`RELATION="sketch_photo"` displays two B-by-B matrices: the four-teacher
+probability mixture and the student's row-softmax cosine similarities.
+`sketch_text` and `photo_text` instead show B-by-C matrices against **all seen
+class text anchors**, using their respective temperatures. Both panels use the
+same color scale. The printed KD value matches the corresponding training loss
+before its lambda multiplier (one-way KL for sketch-photo; symmetric KL for
+image-text). It is a batch diagnostic, not full-gallery retrieval performance.
+
+`BATCH_SIZE`, `EPOCH` and `BATCH_INDEX` reproduce the deterministic training
+sampler and same-class photo selection, with identical row/column ordering for
+teacher and student. Epoch and batch indices start at zero; sampler epoch is
+independent of the checkpoint's epoch. Multiple photos of the same class are
+valid positives; the diagonal is not the only correct match. These caches cover
+the **seen training split**, not unseen evaluation images.
+
+The cell reconstructs the frozen student backbone and prompts from its saved
+weights, reads existing teacher caches, and performs no teacher training or
+downloads. It saves a PNG, the two raw probability matrices in NPZ, and JSON
+metadata including paths, labels, temperatures, weights and cache selection
+under `/kaggle/working/distillation_visualization`.
+
 ## Validation
 
 ```bash
 python -m unittest discover -s tests -p test_teacher_ensemble.py -v
+python -m unittest discover -s tests -p test_distillation_visualization.py -v
 python -m src.train --help
 ```
 
