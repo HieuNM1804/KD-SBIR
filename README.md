@@ -1,5 +1,29 @@
 # KD-SBIR: Teacher Visual Prompts, Student Visual-Only Prompts
 
+## Teacher sketch-to-photo triplet experiment
+
+Branch: `experiment/teacher-triplet-sketch-photo`, based on main commit
+`b2d50842f7831c9eb14f06ddb6cbe5bbd22255b6`.
+
+Teacher pretraining uses one-direction batch-hard triplet loss: each sketch is
+an anchor, its hardest positive is the farthest same-class photo in the batch,
+and its hardest negative is the nearest different-class photo. The loss is
+`mean(relu(d_positive - d_negative + teacher_triplet_margin))`, with normalized
+cosine distance `d = 1 - cosine`. Photo features receive gradients through these
+triplets. There is no photo-anchor term or factor of one half.
+
+The teacher cache configuration records
+`teacher_triplet_direction="sketch_to_photo"`, producing a different cache key
+and rejecting caches from main's symmetric teacher objective. Student objectives
+and all optimizer settings follow main. Use the same training command below
+after checking out this branch; no additional argument is needed.
+
+Run the focused CPU checks with:
+
+```bash
+python -m unittest discover -s tests -p test_teacher_triplet.py -v
+```
+
 This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from
 `experiment/teacher-visual-prompt-tuning`. The teacher has separate photo and
 sketch deep visual prompts, learns only from retrieval triplet loss, and is
