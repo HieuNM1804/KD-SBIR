@@ -28,6 +28,60 @@ Run the focused CPU checks with:
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
+## Kaggle setup
+
+Online: paste all of `test/kaggle_online.py` into one cell, run with Internet on,
+and save the notebook output. The builder clones this published branch and pins
+source commit `64e331c6f2358781b5121f9b9a8bdd580d54518c`; it includes dependencies and both model checkpoints.
+The later setup-script commit intentionally differs from the source pin.
+
+Offline: attach the saved online output and Sketchy dataset, then use exactly two cells:
+
+1. Paste all of `test/kaggle_offline.py` to restore the attached bundle and install offline dependencies.
+2. Paste `test/kaggle_train.ipy` (the `%cd` and `!python` command below).
+
+Teacher cache path is shared with the one-way triplet experiment; student outputs
+use a separate experiment name. This starts a fresh student run, without resuming
+another experiment's checkpoint.
+
+```ipython
+%cd /kaggle/working/KD-SBIR
+
+!python -m src.train \
+    --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
+    --dataset sketchy_1 \
+    --epochs 5 \
+    --workers 8 \
+    --batch_size 64 \
+    --test_batch_size 1024 \
+    --n_ctx_visual 3 \
+    --prompt_depth 12 \
+    --teacher_pretrain_epochs 1 \
+    --teacher_pretrain_batch_size 64 \
+    --teacher_n_ctx_visual 10 \
+    --teacher_prompt_depth 12 \
+    --teacher_prompt_std 0.02 \
+    --teacher_prompt_lr 0.03 \
+    --teacher_prompt_seed 42 \
+    --teacher_prompt_gradient_checkpointing \
+    --teacher_momentum 0.9 \
+    --teacher_weight_decay 0.001 \
+    --lambda_teacher_retrieval 1.5 \
+    --teacher_triplet_margin 0.2 \
+    --lambda_domain 3 \
+    --lambda_modality 1 \
+    --kd_temperature 0.07 \
+    --photo_text_kd_temperature 0.15 \
+    --sketch_text_kd_temperature 0.02 \
+    --lr 0.01 \
+    --momentum 0.9 \
+    --weight_decay 1e-5 \
+    --seed 42 \
+    --teacher_cache_dir /kaggle/working/teacher_cache_sketch_photo \
+    --exp_name teacher_triplet_sketch_photo_symmetric_kd_sketchy1 \
+    --progress
+```
+
 This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from
 `experiment/teacher-visual-prompt-tuning`. The teacher has separate photo and
 sketch deep visual prompts, learns only from retrieval triplet loss, and is
@@ -43,39 +97,6 @@ uses fixed CLIP features from these modality-specific templates:
 
 The student objectives are sketch-photo relational KD, photo-text KD, and
 sketch-text KD. Setting an objective weight to zero disables that objective.
-
-```bash
-!python -m src.train \
-    --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
-    --dataset sketchy_1 \
-    --epochs 7 \
-    --workers 8 \
-    --batch_size 64 \
-    --test_batch_size 1024 \
-    --n_ctx_visual 3 \
-    --prompt_depth 12 \
-    --lambda_domain 1.0 \
-    --lambda_modality 1.0 \
-    --photo_text_kd_temperature 0.2 \
-    --sketch_text_kd_temperature 0.02 \
-    --lr 1e-3 \
-    --momentum 0.94 \
-    --weight_decay 1e-3 \
-    --teacher_pretrain_epochs 4 \
-    --teacher_pretrain_batch_size 64 \
-    --teacher_n_ctx_visual 3 \
-    --teacher_prompt_depth 12 \
-    --teacher_prompt_std 0.02 \
-    --teacher_prompt_lr 3e-5 \
-    --teacher_prompt_seed 42 \
-    --teacher_momentum 0.9 \
-    --teacher_weight_decay 1e-3 \
-    --lambda_teacher_retrieval 1.5 \
-    --teacher_triplet_margin 0.2 \
-    --seed 42 \
-    --exp_name teacher_visual_student_visual_only \
-    --progress
-```
 
 Teacher caches are named from the dataset and complete teacher configuration.
 Changing only student prompts, losses, or optimizer settings reuses a compatible
