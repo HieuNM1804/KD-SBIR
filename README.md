@@ -1,9 +1,19 @@
 # KD-SBIR: Teacher Visual Prompts, Student Visual-Only Prompts
 
-## Teacher sketch-to-photo triplet experiment
+## Sketch-to-photo teacher triplet and forward image-text KL
 
-Branch: `experiment/teacher-triplet-sketch-photo`, based on main commit
-`b2d50842f7831c9eb14f06ddb6cbe5bbd22255b6`.
+Branch: `experiment/teacher-triplet-sketch-photo-forward-kl`, based directly on
+`040515e0bba195f7301d1bc8552c33a3eb6cc495` (the sketch-to-photo teacher
+triplet experiment, itself based on main
+`b2d50842f7831c9eb14f06ddb6cbe5bbd22255b6`).
+
+Photo-text and sketch-text distillation each use only `KL(teacher || student)`,
+with `batchmean` reduction, matching the direction and reduction of domain KD.
+The student uses log-softmax, the frozen teacher uses softmax over the same
+class text candidates, and each modality retains its existing temperature.
+The former `0.5 * (forward_KL + reverse_KL)` becomes `forward_KL`, without a
+factor of one half or temperature-squared scaling. The student objective is
+`lambda_domain * domain_KL + lambda_modality * (photo_text_KL + sketch_text_KL)`.
 
 Teacher pretraining uses one-direction batch-hard triplet loss: each sketch is
 an anchor, its hardest positive is the farthest same-class photo in the batch,
@@ -14,14 +24,16 @@ triplets. There is no photo-anchor term or factor of one half.
 
 The teacher cache configuration records
 `teacher_triplet_direction="sketch_to_photo"`, producing a different cache key
-and rejecting caches from main's symmetric teacher objective. Student objectives
-and all optimizer settings follow main. Use the same training command below
+and rejecting caches from main's symmetric teacher objective. Teacher caches
+from commit `040515e` remain compatible: changing student image-text KL does
+not change teacher training or targets. All optimizer settings follow the base.
+Use the same training command below
 after checking out this branch; no additional argument is needed.
 
 Run the focused CPU checks with:
 
 ```bash
-python -m unittest discover -s tests -p test_teacher_triplet.py -v
+python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
 This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from
