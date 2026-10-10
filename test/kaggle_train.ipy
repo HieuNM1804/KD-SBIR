@@ -1,0 +1,35 @@
+%cd /kaggle/working/KD-SBIR
+
+!python -m src.train \
+    --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
+    --dataset sketchy_1 \
+    --epochs 5 \
+    --workers 8 \
+    --batch_size 64 \
+    --test_batch_size 1024 \
+    --n_ctx_visual 3 \
+    --prompt_depth 12 \
+    --teacher_pretrain_epochs 1 \
+    --teacher_pretrain_batch_size 64 \
+    --teacher_n_ctx_visual 10 \
+    --teacher_prompt_depth 12 \
+    --teacher_prompt_std 0.02 \
+    --teacher_prompt_lr 0.03 \
+    --teacher_prompt_seed 42 \
+    --teacher_prompt_gradient_checkpointing \
+    --teacher_momentum 0.9 \
+    --teacher_weight_decay 0.001 \
+    --lambda_teacher_retrieval 1.5 \
+    --teacher_triplet_margin 0.2 \
+    --lambda_domain 3 \
+    --lambda_modality 1 \
+    --kd_temperature 0.07 \
+    --photo_text_kd_temperature 0.15 \
+    --sketch_text_kd_temperature 0.02 \
+    --lr 0.01 \
+    --momentum 0.9 \
+    --weight_decay 1e-5 \
+    --seed 42 \
+    --teacher_cache_dir /kaggle/working/teacher_cache_sketch_photo \
+    --exp_name teacher_triplet_sketch_photo_forward_kl_sketchy1 \
+    --progress
