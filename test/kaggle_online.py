@@ -1,4 +1,4 @@
-"""One online Kaggle cell: build the one-way teacher triplet and symmetric student KD bundle."""
+"""One online Kaggle cell: build the AdamW one-way teacher triplet and symmetric student KD bundle."""
 
 from pathlib import Path
 import hashlib
@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 
 WORKING = Path("/kaggle/working")
 BUNDLE = WORKING / (
-    "teacher_triplet_sketch_photo_symmetric_kd_bundle_" + datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
+    "teacher_triplet_sketch_photo_adamw_bundle_" + datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
 ) / "offline_bundle"
 WHEELS = BUNDLE / "wheels"
 SOURCE = BUNDLE / "source"
@@ -20,11 +20,11 @@ CLIP_CACHE = BUNDLE / "clip_cache"
 DFN_DIR = BUNDLE / "dfn5b_openclip"
 
 REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
-BRANCH = "experiment/teacher-triplet-sketch-photo-symmetric-kd"
-BASE_COMMIT = "040515e0bba195f7301d1bc8552c33a3eb6cc495"
+BRANCH = "experiment/teacher-triplet-sketch-photo-adamw"
+BASE_COMMIT = "a8d22f4f95b6f853ff164a744ca9c4b111f54aa1"
 # Pin the source commit. The later bundle-script commit intentionally differs.
-COMMIT = "64e331c6f2358781b5121f9b9a8bdd580d54518c"
-TASK = "teacher_triplet_sketch_photo_symmetric_kd"
+COMMIT = "7dddbf6441b5800f1eeccae0480d859c9a0959c3"
+TASK = "teacher_triplet_sketch_photo_adamw"
 ENTRYPOINT = "src.train"
 DATASET = "b20dccn616nguynhutun/sketchy"
 
@@ -58,7 +58,7 @@ WORKING.mkdir(parents=True, exist_ok=True)
 os.chdir(WORKING)
 for directory in (WHEELS, SOURCE, CLIP_CACHE, DFN_DIR):
     directory.mkdir(parents=True, exist_ok=True)
-print("[1/6] New sketch-to-photo-based one-way teacher triplet and symmetric student KD bundle:", BUNDLE)
+print("[1/6] New symmetric-KD-based AdamW one-way teacher triplet and symmetric student KD bundle:", BUNDLE)
 
 # Resolve using Kaggle's installed PyTorch stack, then download only the
 # non-CUDA dependency closure at exact versions for this Python environment.
@@ -119,7 +119,7 @@ if actual_commit != COMMIT:
 if subprocess.check_output(
     ["git", "merge-base", "HEAD", BASE_COMMIT], cwd=project, text=True
 ).strip() != BASE_COMMIT:
-    raise RuntimeError("Source is not based on the expected sketch-to-photo base commit.")
+    raise RuntimeError("Source is not based on the expected symmetric-KD base commit.")
 print("[3/6] Source commit:", actual_commit)
 run([sys.executable, "-m", "unittest", "discover", "-s", "tests",
      "-p", "test_*.py", "-v"], project)
@@ -178,11 +178,13 @@ required_paths = (
     project / "clip" / "model.py",
     project / "src" / "dataset.py",
     project / "src" / "losses.py",
+    project / "src" / "optimizers.py",
     project / "src" / "model.py",
     project / "src" / "teacher_prompts.py",
     project / "src" / "train.py",
     project / "tests" / "test_teacher_triplet.py",
     project / "tests" / "test_symmetric_kd.py",
+    project / "tests" / "test_adamw.py",
     dfn_target,
     student_target,
 )
@@ -227,7 +229,7 @@ bundle_size = sum(
 )
 print("[6/6] Bundle validated")
 print("=" * 70)
-print("ONLINE ONE-WAY TEACHER TRIPLET + SYMMETRIC STUDENT KD BUNDLE COMPLETE")
+print("ONLINE ADAMW ONE-WAY TEACHER TRIPLET + SYMMETRIC STUDENT KD BUNDLE COMPLETE")
 print("=" * 70)
 print("Bundle:", BUNDLE)
 print("Branch:", BRANCH)

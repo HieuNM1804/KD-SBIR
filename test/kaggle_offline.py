@@ -1,4 +1,4 @@
-"""Offline cell 1: restore the attached one-way teacher triplet and symmetric student KD bundle."""
+"""Offline cell 1: restore the attached AdamW one-way teacher triplet and symmetric student KD bundle."""
 
 from pathlib import Path
 import glob
@@ -11,10 +11,10 @@ import sys
 
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
-EXPECTED_BRANCH = "experiment/teacher-triplet-sketch-photo-symmetric-kd"
-EXPECTED_BASE_COMMIT = "040515e0bba195f7301d1bc8552c33a3eb6cc495"
-EXPECTED_COMMIT = "64e331c6f2358781b5121f9b9a8bdd580d54518c"
-EXPECTED_TASK = "teacher_triplet_sketch_photo_symmetric_kd"
+EXPECTED_BRANCH = "experiment/teacher-triplet-sketch-photo-adamw"
+EXPECTED_BASE_COMMIT = "a8d22f4f95b6f853ff164a744ca9c4b111f54aa1"
+EXPECTED_COMMIT = "7dddbf6441b5800f1eeccae0480d859c9a0959c3"
+EXPECTED_TASK = "teacher_triplet_sketch_photo_adamw"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "b20dccn616nguynhutun/sketchy"
 
@@ -88,7 +88,7 @@ for manifest_path in manifest_paths:
 
 if not matching_bundles:
     raise FileNotFoundError(
-        "Cannot find the required sketch-to-photo-based one-way teacher triplet and symmetric student KD bundle.\n\n"
+        "Cannot find the required symmetric-KD-based AdamW one-way teacher triplet and symmetric student KD bundle.\n\n"
         f"Expected branch: {EXPECTED_BRANCH}\n"
         f"Expected commit: {EXPECTED_COMMIT}\n"
         f"Expected task: {EXPECTED_TASK}\n"
@@ -117,11 +117,13 @@ required_bundle_paths = (
     source_project / "clip" / "model.py",
     source_project / "src" / "dataset.py",
     source_project / "src" / "losses.py",
+    source_project / "src" / "optimizers.py",
     source_project / "src" / "model.py",
     source_project / "src" / "teacher_prompts.py",
     source_project / "src" / "train.py",
     source_project / "tests" / "test_teacher_triplet.py",
     source_project / "tests" / "test_symmetric_kd.py",
+    source_project / "tests" / "test_adamw.py",
     dfn_source,
     student_source,
 )
@@ -215,10 +217,10 @@ subprocess.run(
 
 os.chdir(WORKING_ROOT)
 if WORKING_PROJECT.exists():
-    backup = WORKING_ROOT / ("KD-SBIR_previous_teacher_triplet_sketch_photo_symmetric_kd")
+    backup = WORKING_ROOT / ("KD-SBIR_previous_teacher_triplet_sketch_photo_adamw")
     counter = 1
     while backup.exists():
-        backup = WORKING_ROOT / f"KD-SBIR_previous_teacher_triplet_sketch_photo_symmetric_kd_{counter}"
+        backup = WORKING_ROOT / f"KD-SBIR_previous_teacher_triplet_sketch_photo_adamw_{counter}"
         counter += 1
     WORKING_PROJECT.rename(backup)
     print("Previous project preserved:", backup)
@@ -238,13 +240,13 @@ if subprocess.check_output(
     ["git", "merge-base", "HEAD", EXPECTED_BASE_COMMIT],
     cwd=WORKING_PROJECT, text=True,
 ).strip() != EXPECTED_BASE_COMMIT:
-    raise RuntimeError("Offline source is not based on the expected sketch-to-photo base commit.")
+    raise RuntimeError("Offline source is not based on the expected symmetric-KD base commit.")
 
 for directory in (SKETCHY_ROOT / "sketch", SKETCHY_ROOT / "photo"):
     if not directory.is_dir():
         raise FileNotFoundError(f"Missing dataset directory: {directory}")
 
-# Verify one-way teacher triplets and symmetric KD values/gradients without DFN5B.
+# Verify AdamW updates, teacher cache identity, one-way triplets and symmetric KD without DFN5B.
 subprocess.run(
     [sys.executable, "-m", "unittest", "discover", "-s", "tests",
      "-p", "test_*.py", "-v"],
@@ -257,7 +259,7 @@ subprocess.run(
 
 print()
 print("=" * 70)
-print("OFFLINE ONE-WAY TEACHER TRIPLET + SYMMETRIC STUDENT KD SETUP COMPLETE")
+print("OFFLINE ADAMW ONE-WAY TEACHER TRIPLET + SYMMETRIC STUDENT KD SETUP COMPLETE")
 print("=" * 70)
 print("Project:", WORKING_PROJECT)
 print("Dataset:", SKETCHY_ROOT)
@@ -267,4 +269,4 @@ print("Entry point:", manifest["entrypoint"])
 print("Student checkpoint:", student_target)
 print("Teacher checkpoint:", dfn_target)
 print()
-print("Teacher triplet: sketch -> photo. Domain/photo-text/sketch-text KD: 0.5 * (KL(T||S) + KL(S||T)). Run test/kaggle_train.ipy next.")
+print("Teacher/student optimizer: AdamW. Teacher triplet: sketch -> photo. Domain/photo-text/sketch-text KD: 0.5 * (KL(T||S) + KL(S||T)). Run test/kaggle_train.ipy next.")
