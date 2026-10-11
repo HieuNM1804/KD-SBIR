@@ -11,13 +11,18 @@ def relational_kd_loss(
     teacher_photo,
     temperature=0.07,
 ):
-    """Match the student and teacher sketch-to-photo similarity distributions."""
+    """Average both KL directions on sketch-to-photo distributions.
+
+    Both KL terms update the student; teacher targets remain fixed. This does
+    not introduce photo-to-sketch candidate distributions.
+    """
     student_device = student_sketch.device
     student_sketch = F.normalize(student_sketch.float(), dim=-1)
     student_photo = F.normalize(student_photo.float(), dim=-1)
 
     student_logits = student_sketch @ student_photo.t() / temperature
     student_log_probs = F.log_softmax(student_logits, dim=-1)
+    student_probs = student_log_probs.exp()
 
     with torch.no_grad():
         teacher_sketch = F.normalize(
@@ -29,9 +34,16 @@ def relational_kd_loss(
             dim=-1,
         )
         teacher_logits = teacher_sketch @ teacher_photo.t() / temperature
-        teacher_probs = F.softmax(teacher_logits, dim=-1)
+        teacher_log_probs = F.log_softmax(teacher_logits, dim=-1)
+        teacher_probs = teacher_log_probs.exp()
 
-    return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
+    teacher_to_student = F.kl_div(
+        student_log_probs, teacher_probs, reduction="batchmean"
+    )
+    student_to_teacher = (
+        student_probs * (student_log_probs - teacher_log_probs)
+    ).sum(dim=-1).mean()
+    return 0.5 * (teacher_to_student + student_to_teacher)
 
 
 def image_text_kd_loss(
@@ -41,13 +53,14 @@ def image_text_kd_loss(
     teacher_text,
     temperature=0.1,
 ):
-    """Match class distributions with KL(teacher || student), as in domain KD."""
+    """Symmetrically match teacher and student class distributions."""
     student_image = F.normalize(student_image.float(), dim=-1)
     student_text = F.normalize(student_text.float(), dim=-1)
     student_log_probs = F.log_softmax(
         student_image @ student_text.t() / temperature,
         dim=-1,
     )
+    student_probs = student_log_probs.exp()
 
     with torch.no_grad():
         teacher_image = F.normalize(
@@ -58,16 +71,21 @@ def image_text_kd_loss(
             teacher_text.to(student_image.device, dtype=torch.float32),
             dim=-1,
         )
-        teacher_probs = F.softmax(
+        teacher_log_probs = F.log_softmax(
             teacher_image @ teacher_text.t() / temperature,
             dim=-1,
         )
+        teacher_probs = teacher_log_probs.exp()
 
-    return F.kl_div(
+    teacher_to_student = F.kl_div(
         student_log_probs,
         teacher_probs,
         reduction="batchmean",
     )
+    student_to_teacher = (
+        student_probs * (student_log_probs - teacher_log_probs)
+    ).sum(dim=-1).mean()
+    return 0.5 * (teacher_to_student + student_to_teacher)
 
 
 def batch_hard_teacher_triplet_loss(

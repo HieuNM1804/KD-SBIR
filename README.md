@@ -1,30 +1,31 @@
 # KD-SBIR: Teacher Visual Prompts, Student Visual-Only Prompts
 
-## Training loss directions on main
+## One-way teacher triplet with symmetric student KD
 
-Teacher pretraining uses batch-hard triplets with sketch anchors and positive or
-negative photo candidates only: `L_triplet(sketch -> photo)`. Photo features still
-receive gradients through the triplets. There is no reverse photo-anchor term or
-factor of one half.
+Branch: `experiment/teacher-triplet-sketch-photo-symmetric-kd`, based directly on
+`040515e0bba195f7301d1bc8552c33a3eb6cc495` (one-way teacher triplet).
 
-Domain KD, photo-text KD, and sketch-text KD each use `KL(teacher || student)`
-with frozen teacher targets and `batchmean` reduction. There is no reverse KL or
-factor of one half. Domain candidates remain photos; text KD candidates are classes.
-The total student objective is
+Teacher pretraining keeps sketch anchors with batch-hard same-class positive
+photos and different-class negative photos. Its triplet loss has no photo-anchor
+term and no factor of one half.
+
+Each student KD term (domain, photo-text, sketch-text) uses
+`0.5 * (KL(teacher || student) + KL(student || teacher))`.
+Both KL terms update only the student. Domain distributions remain sketch queries
+over photo candidates; the reverse KL does not transpose the retrieval matrix.
+The text losses retain main's symmetric formulation over class candidates.
+Temperatures and outer objective weights remain unchanged:
 `lambda_domain * domain + lambda_modality * (photo_text + sketch_text)`.
-Setting `lambda_modality=0` disables both text losses, so their temperatures have
-no effect on training. SGD optimizers, temperatures, and outer weights are unchanged.
 
-Teacher cache metadata records `teacher_triplet_direction="sketch_to_photo"`.
-Old main caches trained with bidirectional triplets are incompatible; automatic
-cache names change. Caches from the SGD sketch-to-photo experiment with matching
-teacher settings can be reused. AdamW teacher caches remain incompatible.
+Teacher architecture, pretraining, cache metadata, and optimizer settings match
+the base. Existing caches from `experiment/teacher-triplet-sketch-photo` (including
+the forward-KL student branch) can be reused. Main's two-way teacher caches remain
+incompatible because `teacher_triplet_direction` differs.
 
-Run focused CPU checks with:
+Run the focused CPU checks with:
 
 ```bash
-python -m unittest discover -s tests -p test_teacher_triplet.py -v
-python -m unittest discover -s tests -p test_image_text_forward_kl.py -v
+python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
 This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from
