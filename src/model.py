@@ -27,6 +27,7 @@ from src.losses import (
     loss_fn,
 )
 from src.teacher_prompts import build_teacher_prompt_controller
+from src.optimizers import build_prompt_optimizer
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -98,7 +99,9 @@ def _teacher_training_config(args):
             args.teacher_prompt_gradient_checkpointing
         ),
         "teacher_prompt_lr": args.teacher_prompt_lr,
-        "teacher_momentum": args.teacher_momentum,
+        "teacher_optimizer": "AdamW",
+        "teacher_betas": list(args.teacher_betas),
+        "teacher_eps": args.teacher_eps,
         "teacher_weight_decay": args.teacher_weight_decay,
         "pretrain_epochs": args.teacher_pretrain_epochs,
         "pretrain_batch_size": args.teacher_pretrain_batch_size,
@@ -478,11 +481,17 @@ class CustomCLIP(nn.Module):
             prefetch_factor=4 if workers > 0 else None,
             generator=torch.Generator().manual_seed(cfg.seed),
         )
-        optimizer = torch.optim.SGD(
+        optimizer = build_prompt_optimizer(
             self.teacher_prompts.parameters(),
             lr=cfg.teacher_prompt_lr,
-            momentum=cfg.teacher_momentum,
             weight_decay=cfg.teacher_weight_decay,
+            betas=cfg.teacher_betas,
+            eps=cfg.teacher_eps,
+        )
+        print(
+            f"[Teacher Optimizer] AdamW lr={cfg.teacher_prompt_lr}, "
+            f"betas={tuple(cfg.teacher_betas)}, eps={cfg.teacher_eps}, "
+            f"weight_decay={cfg.teacher_weight_decay}"
         )
         scheduler = torch.optim.lr_scheduler.StepLR(
             optimizer,
@@ -945,19 +954,12 @@ class ZS_SBIR(pl.LightningModule):
             for parameter in self.model.parameters()
             if parameter.requires_grad
         ]
-        param_groups = [
-            {
-                "params": student_params,
-                "lr": self.args.lr,
-                "momentum": self.args.momentum,
-                "weight_decay": self.args.weight_decay,
-            }
-        ]
-        optimizer = torch.optim.SGD(
-            params=param_groups,
+        optimizer = build_prompt_optimizer(
+            student_params,
             lr=self.args.lr,
             weight_decay=self.args.weight_decay,
-            momentum=self.args.momentum,
+            betas=self.args.student_betas,
+            eps=self.args.student_eps,
         )
         trainable = sum(
             parameter.numel()
@@ -966,8 +968,9 @@ class ZS_SBIR(pl.LightningModule):
             if parameter.requires_grad
         )
         print(
-            "[Optimizer] SGD "
-            f"lr={self.args.lr}, momentum={self.args.momentum}, "
+            "[Optimizer] AdamW "
+            f"lr={self.args.lr}, betas={tuple(self.args.student_betas)}, "
+            f"eps={self.args.student_eps}, "
             f"weight_decay={self.args.weight_decay}, "
             f"trainable_params={trainable:,}"
         )

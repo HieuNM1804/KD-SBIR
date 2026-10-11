@@ -5,6 +5,7 @@ import os
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 import argparse
+import math
 import random
 
 import numpy as np
@@ -129,18 +130,18 @@ if __name__ == "__main__":
         default=42,
         help="Random seed for Python, NumPy, PyTorch, and DataLoader workers.",
     )
-    parser.add_argument("--lr", type=float, default=4e-5)
-    parser.add_argument(
-        "--momentum",
-        type=float,
-        default=0.9,
-        help="SGD momentum for student optimization.",
-    )
+    parser.add_argument("--lr", type=float, default=3e-4,
+                        help="AdamW learning rate for student visual prompts.")
+    parser.add_argument("--student_betas", type=float, nargs=2,
+                        default=(0.9, 0.999), metavar=("BETA1", "BETA2"),
+                        help="AdamW moment coefficients for student prompts.")
+    parser.add_argument("--student_eps", type=float, default=1e-8,
+                        help="AdamW epsilon for FP32 student prompt parameters.")
     parser.add_argument(
         "--weight_decay",
         type=float,
-        default=1e-3,
-        help="SGD weight decay for student optimization.",
+        default=0.0,
+        help="Decoupled AdamW weight decay for student prompts.",
     )
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--test_batch_size", type=int, default=1024)
@@ -184,8 +185,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--teacher_prompt_lr",
         type=float,
-        default=2e-5,
-        help="SGD learning rate for teacher prompt pretraining.",
+        default=3e-4,
+        help="AdamW learning rate for teacher prompt pretraining.",
     )
     parser.add_argument(
         "--teacher_prompt_seed",
@@ -205,19 +206,18 @@ if __name__ == "__main__":
         dest="teacher_prompt_gradient_checkpointing",
         help="Disable teacher prompt gradient checkpointing.",
     )
-    parser.add_argument(
-        "--teacher_momentum",
-        type=float,
-        default=0.9,
-        help="SGD momentum for teacher prompt pretraining.",
-    )
+    parser.add_argument("--teacher_betas", type=float, nargs=2,
+                        default=(0.9, 0.999), metavar=("BETA1", "BETA2"),
+                        help="AdamW moment coefficients for teacher prompts.")
+    parser.add_argument("--teacher_eps", type=float, default=1e-8,
+                        help="AdamW epsilon for FP32 teacher prompt parameters.")
     parser.add_argument(
         "--teacher_weight_decay",
         "--weight_decay_teacher",
         dest="teacher_weight_decay",
         type=float,
         default=1e-3,
-        help="SGD weight decay for teacher prompt pretraining.",
+        help="Decoupled AdamW weight decay for teacher prompts.",
     )
     parser.add_argument(
         "--teacher_pretrain_epochs",
@@ -333,10 +333,18 @@ if __name__ == "__main__":
         parser.error("--n_ctx_visual must be greater than or equal to 0.")
     if args.prompt_depth < 1:
         parser.error("--prompt_depth must be greater than or equal to 1.")
-    if args.momentum < 0:
-        parser.error("--momentum must be non-negative.")
     if args.weight_decay < 0:
         parser.error("--weight_decay must be non-negative.")
+    for prefix in ("student", "teacher"):
+        betas = getattr(args, prefix + "_betas")
+        if any(not math.isfinite(beta) or not 0 <= beta < 1 for beta in betas):
+            parser.error(f"--{prefix}_betas must contain two finite values in [0, 1).")
+        eps = getattr(args, prefix + "_eps")
+        if not math.isfinite(eps) or eps <= 0:
+            parser.error(f"--{prefix}_eps must be finite and greater than 0.")
+    for name in ("lr", "teacher_prompt_lr", "weight_decay", "teacher_weight_decay"):
+        if not math.isfinite(getattr(args, name)):
+            parser.error(f"--{name} must be finite.")
     if args.teacher_n_ctx_visual < 1 and args.teacher_pretrain_epochs > 0:
         parser.error(
             "--teacher_n_ctx_visual must be at least 1 when teacher prompts train."
@@ -347,8 +355,6 @@ if __name__ == "__main__":
         parser.error("--teacher_prompt_std must be greater than 0.")
     if args.teacher_prompt_lr <= 0:
         parser.error("--teacher_prompt_lr must be greater than 0.")
-    if args.teacher_momentum < 0:
-        parser.error("--teacher_momentum must be non-negative.")
     if args.teacher_weight_decay < 0:
         parser.error("--teacher_weight_decay must be non-negative.")
     if args.teacher_pretrain_epochs < 0:

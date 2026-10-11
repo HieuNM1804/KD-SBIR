@@ -78,6 +78,7 @@ class TeacherTripletTests(unittest.TestCase):
         dataset = SimpleNamespace(max_size=224, all_categories=["cat"],
                                   all_sketches_path=["dataset/sketch/cat/a.png"],
                                   all_photo_paths=["dataset/photo/cat/a.jpg"])
+        args.teacher_betas = (0.9, 0.999)
         config = namespace["_teacher_training_config"](args)
         self.assertEqual(config["teacher_triplet_direction"], "sketch_to_photo")
         path = namespace["default_teacher_cache_path"](args, dataset)

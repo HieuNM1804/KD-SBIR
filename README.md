@@ -1,9 +1,9 @@
 # KD-SBIR: Teacher Visual Prompts, Student Visual-Only Prompts
 
-## One-way teacher triplet with symmetric student KD
+## One-way teacher triplet and symmetric KD with AdamW
 
-Branch: `experiment/teacher-triplet-sketch-photo-symmetric-kd`, based directly on
-`040515e0bba195f7301d1bc8552c33a3eb6cc495` (one-way teacher triplet).
+Branch: `experiment/teacher-triplet-sketch-photo-adamw`, based directly on
+`a8d22f4f95b6f853ff164a744ca9c4b111f54aa1` (one-way teacher triplet with symmetric student KD).
 
 Teacher pretraining keeps sketch anchors with batch-hard same-class positive
 photos and different-class negative photos. Its triplet loss has no photo-anchor
@@ -17,10 +17,23 @@ The text losses retain main's symmetric formulation over class candidates.
 Temperatures and outer objective weights remain unchanged:
 `lambda_domain * domain + lambda_modality * (photo_text + sketch_text)`.
 
-Teacher architecture, pretraining, cache metadata, and optimizer settings match
-the base. Existing caches from `experiment/teacher-triplet-sketch-photo` (including
-the forward-KL student branch) can be reused. Main's two-way teacher caches remain
-incompatible because `teacher_triplet_direction` differs.
+Teacher and student visual prompts both train with AdamW. The frozen backbones
+and text encoders are excluded from optimization. Teacher prompts freeze again
+before student distillation. Losses, sampling, and StepLR schedules match the base.
+
+Separate AdamW controls are exposed as `--teacher_betas`, `--teacher_eps`,
+`--student_betas`, and `--student_eps`. Use `--teacher_prompt_lr` for the teacher,
+`--lr` for the student, and their existing weight decay arguments. SGD momentum
+arguments are removed from this branch. Both prompt modules retain FP32 parameters
+and AdamW states; mixed-precision backbone execution is unchanged.
+
+The Kaggle cell starts both learning rates at `3e-4`, with betas `(0.9, 0.999)`
+and epsilon `1e-8`. Teacher weight decay is `0.001`; student weight decay is `0`.
+These are experimental starting values, not verified optimal SBIR settings.
+
+Teacher cache metadata includes optimizer `AdamW`, its betas and epsilon, learning
+rate, and weight decay. SGD teacher caches are incompatible and must be rebuilt.
+Changing student optimizer settings alone does not invalidate the teacher cache.
 
 Run the focused CPU checks with:
 
@@ -40,8 +53,7 @@ Offline: attach the saved online output and Sketchy dataset, then use exactly tw
 1. Paste all of `test/kaggle_offline.py` to restore the attached bundle and install offline dependencies.
 2. Paste `test/kaggle_train.ipy` (the `%cd` and `!python` command below).
 
-Teacher cache path is shared with the one-way triplet experiment; student outputs
-use a separate experiment name. This starts a fresh student run, without resuming
+Teacher cache and student outputs use separate AdamW experiment paths. This starts a fresh student run, without resuming
 another experiment's checkpoint.
 
 ```ipython
@@ -61,10 +73,11 @@ another experiment's checkpoint.
     --teacher_n_ctx_visual 10 \
     --teacher_prompt_depth 12 \
     --teacher_prompt_std 0.02 \
-    --teacher_prompt_lr 0.03 \
+    --teacher_prompt_lr 3e-4 \
     --teacher_prompt_seed 42 \
     --teacher_prompt_gradient_checkpointing \
-    --teacher_momentum 0.9 \
+    --teacher_betas 0.9 0.999 \
+    --teacher_eps 1e-8 \
     --teacher_weight_decay 0.001 \
     --lambda_teacher_retrieval 1.5 \
     --teacher_triplet_margin 0.2 \
@@ -73,12 +86,13 @@ another experiment's checkpoint.
     --kd_temperature 0.07 \
     --photo_text_kd_temperature 0.15 \
     --sketch_text_kd_temperature 0.02 \
-    --lr 0.01 \
-    --momentum 0.9 \
-    --weight_decay 1e-5 \
+    --lr 3e-4 \
+    --student_betas 0.9 0.999 \
+    --student_eps 1e-8 \
+    --weight_decay 0 \
     --seed 42 \
-    --teacher_cache_dir /kaggle/working/teacher_cache_sketch_photo \
-    --exp_name teacher_triplet_sketch_photo_symmetric_kd_sketchy1 \
+    --teacher_cache_dir /kaggle/working/teacher_cache_sketch_photo_adamw \
+    --exp_name teacher_triplet_sketch_photo_adamw_sketchy1 \
     --progress
 ```
 
