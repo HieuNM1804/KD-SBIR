@@ -1,5 +1,32 @@
 # KD-SBIR: Teacher Visual Prompts, Student Visual-Only Prompts
 
+## Training loss directions on main
+
+Teacher pretraining uses batch-hard triplets with sketch anchors and positive or
+negative photo candidates only: `L_triplet(sketch -> photo)`. Photo features still
+receive gradients through the triplets. There is no reverse photo-anchor term or
+factor of one half.
+
+Domain KD, photo-text KD, and sketch-text KD each use `KL(teacher || student)`
+with frozen teacher targets and `batchmean` reduction. There is no reverse KL or
+factor of one half. Domain candidates remain photos; text KD candidates are classes.
+The total student objective is
+`lambda_domain * domain + lambda_modality * (photo_text + sketch_text)`.
+Setting `lambda_modality=0` disables both text losses, so their temperatures have
+no effect on training. SGD optimizers, temperatures, and outer weights are unchanged.
+
+Teacher cache metadata records `teacher_triplet_direction="sketch_to_photo"`.
+Old main caches trained with bidirectional triplets are incompatible; automatic
+cache names change. Caches from the SGD sketch-to-photo experiment with matching
+teacher settings can be reused. AdamW teacher caches remain incompatible.
+
+Run focused CPU checks with:
+
+```bash
+python -m unittest discover -s tests -p test_teacher_triplet.py -v
+python -m unittest discover -s tests -p test_image_text_forward_kl.py -v
+```
+
 This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from
 `experiment/teacher-visual-prompt-tuning`. The teacher has separate photo and
 sketch deep visual prompts, learns only from retrieval triplet loss, and is
