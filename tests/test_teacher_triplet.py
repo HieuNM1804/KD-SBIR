@@ -33,26 +33,36 @@ class TeacherTripletTests(unittest.TestCase):
         self.photo = torch.randn(6, 5, generator=generator)
         self.labels = torch.tensor([0, 0, 1, 1, 2, 2])
 
-    def test_only_sketch_anchors_with_same_class_hard_mining(self):
+    def test_average_both_anchor_directions_with_same_class_hard_mining(self):
         expected = reference_loss(self.sketch, self.photo, self.labels, 0.2)
         reverse = reference_loss(self.photo, self.sketch, self.labels, 0.2)
         self.assertGreater(abs(float(expected - reverse)), 1e-3)
         actual = batch_hard_teacher_triplet_loss(
             self.sketch, self.photo, self.labels, 0.2)
-        torch.testing.assert_close(actual, expected)
-        self.assertGreater(abs(float(actual - 0.5 * (expected + reverse))), 1e-3)
+        torch.testing.assert_close(actual, 0.5 * (expected + reverse))
+        self.assertGreater(abs(float(actual - expected)), 1e-3)
+        self.assertGreater(abs(float(actual - (expected + reverse))), 1e-3)
 
-    def test_both_encoders_receive_only_forward_triplet_gradients(self):
+    def test_both_encoders_receive_averaged_bidirectional_gradients(self):
         sketch = self.sketch.clone().requires_grad_()
         photo = self.photo.clone().requires_grad_()
         actual = batch_hard_teacher_triplet_loss(sketch, photo, self.labels)
         gradients = torch.autograd.grad(actual, (sketch, photo))
         expected = torch.autograd.grad(
-            reference_loss(sketch, photo, self.labels, 0.2), (sketch, photo))
+            0.5 * (reference_loss(sketch, photo, self.labels, 0.2)
+                   + reference_loss(photo, sketch, self.labels, 0.2)),
+            (sketch, photo))
         for gradient, target in zip(gradients, expected):
             torch.testing.assert_close(gradient, target)
             self.assertTrue(torch.isfinite(gradient).all())
             self.assertGreater(float(gradient.norm()), 0)
+
+    def test_swapping_modalities_preserves_symmetric_loss(self):
+        forward = batch_hard_teacher_triplet_loss(
+            self.sketch, self.photo, self.labels)
+        reverse = batch_hard_teacher_triplet_loss(
+            self.photo, self.sketch, self.labels)
+        torch.testing.assert_close(forward, reverse)
 
     def test_single_class_batch_returns_finite_zero(self):
         actual = batch_hard_teacher_triplet_loss(
@@ -79,8 +89,12 @@ class TeacherTripletTests(unittest.TestCase):
                                   all_sketches_path=["dataset/sketch/cat/a.png"],
                                   all_photo_paths=["dataset/photo/cat/a.jpg"])
         config = namespace["_teacher_training_config"](args)
-        self.assertEqual(config["teacher_triplet_direction"], "sketch_to_photo")
+        self.assertEqual(config["teacher_triplet_direction"], "bidirectional")
         path = namespace["default_teacher_cache_path"](args, dataset)
+        one_way = dict(config, teacher_triplet_direction="sketch_to_photo")
+        namespace["_teacher_training_config"] = lambda unused: one_way
+        one_way_path = namespace["default_teacher_cache_path"](args, dataset)
+        self.assertNotEqual(path, one_way_path)
         legacy = dict(config)
         del legacy["teacher_triplet_direction"]
         namespace["_teacher_training_config"] = lambda unused: legacy

@@ -1,13 +1,15 @@
 # KD-SBIR: Teacher Visual Prompts, Student Visual-Only Prompts
 
-## One-way teacher triplet with symmetric student KD
+## Bidirectional teacher triplet with symmetric student KD
 
-Branch: `experiment/teacher-triplet-sketch-photo-symmetric-kd`, based directly on
-`040515e0bba195f7301d1bc8552c33a3eb6cc495` (one-way teacher triplet).
+Branch: `experiment/teacher-triplet-bidirectional-symmetric-kd`, based directly on
+`a8d22f4f95b6f853ff164a744ca9c4b111f54aa1` (one-way teacher triplet with symmetric KD).
 
-Teacher pretraining keeps sketch anchors with batch-hard same-class positive
-photos and different-class negative photos. Its triplet loss has no photo-anchor
-term and no factor of one half.
+Teacher pretraining uses batch-hard same-class positives and different-class
+negatives for both sketch anchors and photo anchors:
+`0.5 * (triplet(sketch -> photo) + triplet(photo -> sketch))`.
+This restores main's teacher triplet objective. With `lambda_teacher_retrieval=1.5`,
+each directional term has coefficient 0.75.
 
 Each student KD term (domain, photo-text, sketch-text) uses
 `0.5 * (KL(teacher || student) + KL(student || teacher))`.
@@ -17,10 +19,10 @@ The text losses retain main's symmetric formulation over class candidates.
 Temperatures and outer objective weights remain unchanged:
 `lambda_domain * domain + lambda_modality * (photo_text + sketch_text)`.
 
-Teacher architecture, pretraining, cache metadata, and optimizer settings match
-the base. Existing caches from `experiment/teacher-triplet-sketch-photo` (including
-the forward-KL student branch) can be reused. Main's two-way teacher caches remain
-incompatible because `teacher_triplet_direction` differs.
+Teacher architecture and optimizer settings stay unchanged. Cache metadata now
+records `teacher_triplet_direction="bidirectional"`, so one-way teacher caches
+are rejected and automatic cache names differ. Legacy main caches without this
+explicit direction marker are also rejected; create a new cache for this branch.
 
 Run the focused CPU checks with:
 
@@ -40,8 +42,7 @@ Offline: attach the saved online output and Sketchy dataset, then use exactly tw
 1. Paste all of `test/kaggle_offline.py` to restore the attached bundle and install offline dependencies.
 2. Paste `test/kaggle_train.ipy` (the `%cd` and `!python` command below).
 
-Teacher cache path is shared with the one-way triplet experiment; student outputs
-use a separate experiment name. This starts a fresh student run, without resuming
+Teacher caches and student outputs use separate experiment paths. This starts a fresh student run, without resuming
 another experiment's checkpoint.
 
 ```ipython
@@ -77,8 +78,8 @@ another experiment's checkpoint.
     --momentum 0.9 \
     --weight_decay 1e-5 \
     --seed 42 \
-    --teacher_cache_dir /kaggle/working/teacher_cache_sketch_photo \
-    --exp_name teacher_triplet_sketch_photo_symmetric_kd_sketchy1 \
+    --teacher_cache_dir /kaggle/working/teacher_cache_bidirectional \
+    --exp_name teacher_triplet_bidirectional_symmetric_kd_sketchy1 \
     --progress
 ```
 

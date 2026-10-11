@@ -94,7 +94,7 @@ def batch_hard_teacher_triplet_loss(
     labels,
     margin=0.2,
 ):
-    """Batch-hard sketch-to-photo triplet loss for teacher visual prompts."""
+    """Average sketch-to-photo and photo-to-sketch batch-hard teacher triplets."""
     sketch_features = F.normalize(sketch_features.float(), dim=-1)
     photo_features = F.normalize(photo_features.float(), dim=-1)
     labels = labels.to(sketch_features.device)
@@ -116,7 +116,7 @@ def batch_hard_teacher_triplet_loss(
             return losses[valid_negative].mean()
         return dist.new_zeros(())
 
-    return one_direction(distance)
+    return 0.5 * (one_direction(distance) + one_direction(distance.t()))
 
 
 def loss_fn(args, features):
