@@ -30,6 +30,6 @@
     --momentum 0.9 \
     --weight_decay 1e-5 \
     --seed 42 \
-    --teacher_cache_dir /kaggle/working/teacher_cache_sketch_photo \
-    --exp_name teacher_triplet_sketch_photo_symmetric_kd_sketchy1 \
+    --teacher_cache_dir /kaggle/working/teacher_cache_bidirectional \
+    --exp_name teacher_triplet_bidirectional_symmetric_kd_sketchy1 \
     --progress

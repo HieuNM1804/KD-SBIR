@@ -34,7 +34,7 @@ python -m unittest discover -s tests -p "test_*.py" -v
 
 Online: paste all of `test/kaggle_online.py` into one cell, run with Internet on,
 and save the notebook output. The builder clones this published branch and pins
-source commit `64e331c6f2358781b5121f9b9a8bdd580d54518c`; it includes dependencies and both model checkpoints.
+source commit `908e482f7a99cb16f023dd3527fdfe24cfef8ca4`; it includes dependencies and both model checkpoints.
 The later setup-script commit intentionally differs from the source pin.
 
 Offline: attach the saved online output and Sketchy dataset, then use exactly two cells:
