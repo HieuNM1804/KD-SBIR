@@ -1,0 +1,16 @@
+%cd /kaggle/working/KD-SBIR-speed
+
+!python -m src.benchmark_inference_speed \
+    --datasets-json test/speed_datasets.json \
+    --models-root "$SPEED_MODELS_ROOT" \
+    --models clip_b32 22m 40m 45m 61m \
+    --batch-sizes 1 64 \
+    --n-ctx-visual 3 \
+    --prompt-depth 12 \
+    --precision fp16 \
+    --warmup 30 \
+    --iterations 100 \
+    --sample-images 64 \
+    --gallery real \
+    --top-k 200 \
+    --output-dir /kaggle/working/inference_speed
