@@ -1,3 +1,7 @@
+# Inference speed benchmark branch
+
+Use [INFERENCE_SPEED.md](INFERENCE_SPEED.md) for the five prompted CLIP/TinyCLIP students, three datasets and Kaggle cells. Training instructions below are inherited from main.
+
 # KD-SBIR: Teacher Visual Prompts, Student Visual-Only Prompts
 
 ## One-way teacher triplet with symmetric student KD
