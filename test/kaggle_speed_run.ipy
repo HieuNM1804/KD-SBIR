@@ -11,6 +11,8 @@
     --warmup 30 \
     --iterations 100 \
     --sample-images 64 \
+    --workers 8 \
+    --gallery-batch-size 1024 \
     --gallery real \
     --top-k 200 \
     --output-dir /kaggle/working/inference_speed

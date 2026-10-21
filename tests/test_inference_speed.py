@@ -61,7 +61,7 @@ class SpeedTests(unittest.TestCase):
                     result=bench.main(["--datasets-json",str(config),"--models-root",str(root),
                         "--models","clip_b32","--device","cpu","--precision","fp32",
                         "--batch-sizes","1","2","--warmup","1","--iterations","2",
-                        "--sample-images","1","--gallery",gallery,"--output-dir",str(root/"results")])
+                        "--sample-images","1","--workers","0","--gallery",gallery,"--output-dir",str(root/"results")])
                 self.assertTrue(result["complete"])
                 self.assertEqual(len(result["measurements"]),6)
                 self.assertEqual(result["measurements"][-1]["gallery_photos"],1)

@@ -120,11 +120,16 @@ def load_encoder(key, args, device):
 
 
 @torch.inference_mode()
-def encode_gallery(encoder, paths, device, dtype, batch_size):
+def encode_gallery(encoder, paths, device, dtype, batch_size, workers=0):
     dataset = TeacherFeatureDataset(paths, 224)
     from torch.utils.data import DataLoader
     from tqdm.auto import tqdm
-    loader = DataLoader(dataset, batch_size=batch_size, num_workers=0, shuffle=False)
+    options = dict(batch_size=batch_size, num_workers=workers, shuffle=False,
+                   pin_memory=device.type == "cuda")
+    if workers:
+        options["prefetch_factor"] = 1
+    loader = DataLoader(dataset, **options)
+    print(f"Gallery: {len(paths):,} photos, batch={batch_size}, workers={workers}", flush=True)
     chunks = []
     sync(device)
     started = time.perf_counter()
@@ -187,13 +192,16 @@ def main(argv=None):
     parser.add_argument("--n-ctx-visual", type=int, default=3)
     parser.add_argument("--prompt-depth", type=int, default=12)
     parser.add_argument("--gallery", choices=["synthetic", "real", "none"], default="synthetic")
-    parser.add_argument("--gallery-batch-size", type=int, default=256)
+    parser.add_argument("--gallery-batch-size", type=int, default=1024)
+    parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--top-k", type=int, default=200)
     parser.add_argument("--output-dir", type=Path, default=Path("/kaggle/working/inference_speed"))
     args = parser.parse_args(argv)
     if min(args.batch_sizes + [args.warmup, args.iterations, args.sample_images,
                                args.gallery_batch_size, args.top_k, args.n_ctx_visual, args.prompt_depth]) < 1:
         parser.error("Batch sizes, sample count, warmup, iterations and K must be positive")
+    if args.workers < 0:
+        parser.error("Workers must be nonnegative")
     if args.device == "cuda" and not torch.cuda.is_available():
         parser.error("CUDA requested but unavailable; no silent CPU fallback")
     if args.device == "cpu" and args.precision == "fp16":
@@ -258,7 +266,7 @@ def main(argv=None):
                         q = F.normalize(encoder(query_image, "sketch").float(), dim=-1)
                         n = len(datum["paths"]["photo"])
                         if args.gallery == "real":
-                            gallery, build_seconds = encode_gallery(encoder, datum["paths"]["photo"], device, dtype, args.gallery_batch_size)
+                            gallery, build_seconds = encode_gallery(encoder, datum["paths"]["photo"], device, dtype, args.gallery_batch_size, args.workers)
                         else:
                             generator = torch.Generator(device=device).manual_seed(args.seed)
                             gallery = F.normalize(torch.randn(n, q.shape[1], generator=generator, device=device), dim=-1)

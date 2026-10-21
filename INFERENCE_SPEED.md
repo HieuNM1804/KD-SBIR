@@ -96,3 +96,5 @@ it instead of the old output; offline remains two cells. If multiple old bundles
 attached to the online notebook, set REUSE_BUNDLE to the exact offline_bundle folder.
 
 Setup regression tests: `python -m unittest discover -s tests -p test_speed_kaggle_setup.py -v`.
+
+Gallery construction defaults to batch 1024 and 8 loader workers (prefetch 1, pinned CUDA input). These affect gallery build time, not the isolated batch-1/batch-64 encoder timings. Lower --workers to 0 if the notebook multiprocessing runtime fails.
