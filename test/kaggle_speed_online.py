@@ -11,7 +11,7 @@ import sys
 import urllib.request
 
 BRANCH = "experiment/inference-speed-clip-tinyclip"
-SOURCE_COMMIT = "905c446baba97bfff20f456a5fb03adab4086812"
+SOURCE_COMMIT = "521be74b26113ec26541a2fe4209546821e2a79c"
 REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 WORKING = Path("/kaggle/working")
 BUNDLE = WORKING / ("speed_bundle_" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")) / "offline_bundle"
