@@ -1,5 +1,6 @@
 """CELL 1: restore attached benchmark bundle; run kaggle_speed_run.ipy as CELL 2."""
 from pathlib import Path
+import glob
 import hashlib
 import json
 import os
@@ -9,7 +10,11 @@ import sys
 
 # Set exact manifest path if multiple online notebook outputs are attached.
 MANIFEST = None
-candidates = [Path(MANIFEST)] if MANIFEST else list(Path("/kaggle/input").rglob("bundle_manifest.json"))
+# Bounded glob patterns: do not recursively walk millions of dataset image paths.
+candidates = [Path(MANIFEST)] if MANIFEST else sorted({
+    Path(path) for depth in range(1, 6)
+    for path in glob.glob("/kaggle/input/" + "*/" * depth + "offline_bundle/bundle_manifest.json")
+})
 matches=[]
 for path in candidates:
     try:
@@ -21,8 +26,10 @@ for path in candidates:
 if len(matches)!=1:
     raise RuntimeError(f"Set MANIFEST to exactly one speed bundle manifest. Found: {[str(p) for p,_ in matches]}")
 manifest, metadata=matches[0]
-if metadata["python"]!=list(sys.version_info[:2]):
-    raise RuntimeError("Online/offline Python major.minor versions differ; rebuild the online bundle.")
+builder_python = ".".join(map(str, metadata.get("python", [])))
+print(f"Bundle Python: {builder_python}; offline Python: {sys.version_info.major}.{sys.version_info.minor}", flush=True)
+# Version alone does not determine compatibility: pure Python/abi3 wheels and
+# compatible runtime packages already installed by Kaggle can work across versions.
 bundle=manifest.parent
 for item in metadata["files"]:
     path=(bundle/item["path"]).resolve()
@@ -34,8 +41,9 @@ for item in metadata["files"]:
             h.update(chunk)
     if h.hexdigest()!=item["sha256"]:
         raise RuntimeError(f"Checksum mismatch: {path}")
-subprocess.run([sys.executable,"-m","pip","install","-q","--no-index","--find-links",str(bundle/"wheels"),
-                *metadata["runtime_requirements"]],check=True)
+install_command = [sys.executable, "-m", "pip", "install", "--no-index", "--find-links", str(bundle/"wheels"),
+                   *metadata["runtime_requirements"]]
+subprocess.run(install_command, check=True)
 project=Path("/kaggle/working/KD-SBIR-speed")
 if project.exists():
     actual=subprocess.check_output(["git","rev-parse","HEAD"],cwd=project,text=True).strip()

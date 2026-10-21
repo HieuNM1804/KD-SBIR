@@ -22,7 +22,8 @@ Adjust the three mounted roots in `test/speed_datasets.json` if Kaggle uses diff
 2. GPU notebook: attach that output and the three datasets. **Cell 1:** paste
    `test/kaggle_speed_offline.py`. **Cell 2:** paste `test/kaggle_speed_run.ipy`
    (`%cd` plus `!python`). Source is isolated at `/kaggle/working/KD-SBIR-speed`.
-   Online and offline notebooks must use the same Python major/minor version.
+   Online bundles include Linux wheels for Python 3.12 and 3.13. Offline setup installs directly with pip against the actual interpreter and installed Kaggle packages;
+   a builder/runtime Python difference alone is not an error.
 
 Send back `/kaggle/working/inference_speed/<timestamp>/summary.json` and
 `measurements.csv`. JSON includes every raw latency sample, sampled image paths,
@@ -82,3 +83,16 @@ No local smoke-test timing should be used as the actual Kaggle benchmark result.
 
 References: official TinyCLIP models https://github.com/microsoft/Cream/tree/main/TinyCLIP
 and PyTorch asynchronous CUDA timing https://docs.pytorch.org/docs/stable/notes/cuda.html
+
+## Existing bundle reports a Python version mismatch
+
+Copy the updated offline cell from this branch and rerun it first. It accepts the
+old manifest and installs packages directly. There is no Python-version gate
+or preliminary dry-run. Pip reports any actual missing dependency itself.
+If pip reports missing compatible wheels, run the updated online cell with the old
+bundle attached as input: it reuses its verified model files and builds fresh wheels
+for Python 3.12/3.13. No model redownload is necessary. Save the new output and attach
+it instead of the old output; offline remains two cells. If multiple old bundles are
+attached to the online notebook, set REUSE_BUNDLE to the exact offline_bundle folder.
+
+Setup regression tests: `python -m unittest discover -s tests -p test_speed_kaggle_setup.py -v`.
