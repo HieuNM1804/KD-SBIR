@@ -18,7 +18,7 @@ import sys
 
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/across-dataset-sbir"
-EXPECTED_COMMIT = "46c73707897ca386b5e09a750a6f9373f2cb26b4"
+EXPECTED_COMMIT = "670122186b6f0b3c559c6290637160f6b9ad6d3f"
 EXPECTED_BASE_COMMIT = "b2d50842f7831c9eb14f06ddb6cbe5bbd22255b6"
 EXPECTED_TASK = "across_dataset_zs_sbir"
 EXPECTED_ENTRYPOINT = "src.train"

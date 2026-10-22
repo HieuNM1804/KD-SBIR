@@ -92,3 +92,5 @@ model-selection leakage and is not a strict inductive ZS-SBIR protocol.
 Kaggle: run `test/kaggle_across_online.py` online and save output. Offline,
 attach the bundle and datasets, paste `test/kaggle_across_offline.py` as cell 1,
 and `test/kaggle_train.ipy` as cell 2. Rebuild old bundles to get updated losses.
+
+Kaggle setup pins source commit `670122186b6f0b3c559c6290637160f6b9ad6d3f`.
