@@ -23,7 +23,7 @@ REPO_URL = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/gzs-sbir"
 BASE_COMMIT = "b2d50842f7831c9eb14f06ddb6cbe5bbd22255b6"
 # Pin the source commit. The later bundle-script commit intentionally differs.
-COMMIT = "f941cc82c51e4915b78982c4a177a42ea80c2cf4"
+COMMIT = "284f5b1a6c43c20c958855a914c66cf3f3e8fc57"
 TASK = "gzs_sbir_main_training"
 ENTRYPOINT = "src.train"
 DATASET = "sketchy_2,tuberlin"

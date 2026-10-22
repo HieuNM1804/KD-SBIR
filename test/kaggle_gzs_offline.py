@@ -13,7 +13,7 @@ import sys
 EXPECTED_REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 EXPECTED_BRANCH = "experiment/gzs-sbir"
 EXPECTED_BASE_COMMIT = "b2d50842f7831c9eb14f06ddb6cbe5bbd22255b6"
-EXPECTED_COMMIT = "f941cc82c51e4915b78982c4a177a42ea80c2cf4"
+EXPECTED_COMMIT = "284f5b1a6c43c20c958855a914c66cf3f3e8fc57"
 EXPECTED_TASK = "gzs_sbir_main_training"
 EXPECTED_ENTRYPOINT = "src.train"
 EXPECTED_DATASET = "sketchy_2,tuberlin"

@@ -97,5 +97,5 @@ output. Attach the output bundle and dataset in the offline notebook, then use:
 For TU-Berlin, change root, dataset to `tuberlin`, and experiment name.
 The bundle includes non-CUDA wheels for Python 3.12/3.13, source, and model weights.
 Setup does not block differing Python versions; pip selects compatible wheels.
-Both scripts pin source commit `f941cc82c51e4915b78982c4a177a42ea80c2cf4`.
+Both scripts pin source commit `284f5b1a6c43c20c958855a914c66cf3f3e8fc57`.
 Rebuild the online bundle; old bundles still contain the old training losses.
