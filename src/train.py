@@ -203,7 +203,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--n_ctx_visual",
         type=int,
-        default=4,
+        default=3,
         help=(
             "Number of independent random deep visual-prompt tokens per "
             "modality; 0 disables visual prompts."
@@ -223,26 +223,26 @@ if __name__ == "__main__":
         default=42,
         help="Random seed for Python, NumPy, PyTorch, and DataLoader workers.",
     )
-    parser.add_argument("--lr", type=float, default=4e-5)
+    parser.add_argument("--lr", type=float, default=0.11)
     parser.add_argument(
         "--momentum",
         type=float,
-        default=0.9,
+        default=0.95,
         help="SGD momentum for student optimization.",
     )
     parser.add_argument(
         "--weight_decay",
         type=float,
-        default=1e-3,
+        default=1e-4,
         help="SGD weight decay for student optimization.",
     )
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--test_batch_size", type=int, default=1024)
-    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument(
         "--workers",
         type=int,
-        default=4,
+        default=8,
         help="Number of DataLoader workers; sample RNG is worker-count invariant.",
     )
     parser.add_argument(
@@ -260,7 +260,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--teacher_n_ctx_visual",
         type=int,
-        default=3,
+        default=9,
         help="Number of independent visual prompt tokens per teacher modality.",
     )
     parser.add_argument(
@@ -278,14 +278,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--teacher_prompt_lr",
         type=float,
-        default=2e-5,
+        default=0.03,
         help="SGD learning rate for teacher prompt pretraining.",
     )
     parser.add_argument(
         "--teacher_prompt_seed",
         type=int,
-        default=None,
-        help="Teacher-prompt initialization seed; defaults to --seed.",
+        default=42,
+        help="Teacher-prompt initialization seed (default: 42).",
     )
     parser.add_argument(
         "--teacher_prompt_gradient_checkpointing",
@@ -316,7 +316,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--teacher_pretrain_epochs",
         type=int,
-        default=0,
+        default=1,
         help=(
             "Pretrain teacher visual prompts for this many epochs, freeze them, "
             "materialize tuned features before student training. Set 0 to "
@@ -370,11 +370,11 @@ if __name__ == "__main__":
         default=1.5,
         help="Weight for the teacher prompt retrieval loss.",
     )
-    parser.add_argument("--teacher_triplet_margin", type=float, default=0.2)
+    parser.add_argument("--teacher_triplet_margin", type=float, default=0.3)
     parser.add_argument(
         "--lambda_domain",
         type=float,
-        default=3.0,
+        default=2.0,
         help="Weight for sketch-photo domain distillation.",
     )
     parser.add_argument(
@@ -386,7 +386,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--lambda_modality",
         type=float,
-        default=0.0,
+        default=2.0,
         help=(
             "Shared weight for the sum of photo-text and sketch-text "
             "modality distillation losses."
@@ -401,14 +401,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--photo_text_kd_temperature",
         type=float,
-        default=None,
-        help="Photo-text KD temperature; defaults to the shared temperature.",
+        default=0.15,
+        help="Photo-text KD temperature (default: 0.15).",
     )
     parser.add_argument(
         "--sketch_text_kd_temperature",
         type=float,
-        default=None,
-        help="Sketch-text KD temperature; defaults to the shared temperature.",
+        default=0.02,
+        help="Sketch-text KD temperature (default: 0.02).",
     )
     parser.add_argument(
         "--exp_name",

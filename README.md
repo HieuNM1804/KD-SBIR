@@ -28,36 +28,45 @@ uses fixed CLIP features from these modality-specific templates:
 The student objectives are sketch-photo relational KD, photo-text KD, and
 sketch-text KD. Setting an objective weight to zero disables that objective.
 
+Training losses, SGD, and hyperparameter defaults match main: teacher triplet
+uses only sketch anchors (sketch -> photo), without a half factor. Domain,
+photo-text, and sketch-text KD each use `0.5 * (KL(T || S) + KL(S || T))`;
+both terms update only the student. Old bidirectional-triplet teacher caches
+are incompatible; cache metadata now records the sketch-to-photo direction.
+The source/target split and checkpoint selection remain unchanged.
+
 ```bash
 !python -m src.train \
     --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
     --dataset sketchy_1 \
     --target_root /kaggle/input/datasets/b20dccn616nguynhutun/tuberlin \
     --target_dataset tuberlin \
-    --epochs 7 \
+    --epochs 1 \
     --workers 8 \
     --batch_size 64 \
     --test_batch_size 1024 \
     --n_ctx_visual 3 \
     --prompt_depth 12 \
-    --lambda_domain 1.0 \
-    --lambda_modality 1.0 \
-    --photo_text_kd_temperature 0.2 \
+    --lambda_domain 2 \
+    --lambda_modality 2 \
+    --kd_temperature 0.07 \
+    --photo_text_kd_temperature 0.15 \
     --sketch_text_kd_temperature 0.02 \
-    --lr 1e-3 \
-    --momentum 0.94 \
-    --weight_decay 1e-3 \
-    --teacher_pretrain_epochs 4 \
+    --lr 0.11 \
+    --momentum 0.95 \
+    --weight_decay 1e-4 \
+    --teacher_pretrain_epochs 1 \
     --teacher_pretrain_batch_size 64 \
-    --teacher_n_ctx_visual 3 \
+    --teacher_n_ctx_visual 9 \
     --teacher_prompt_depth 12 \
     --teacher_prompt_std 0.02 \
-    --teacher_prompt_lr 3e-5 \
+    --teacher_prompt_lr 0.03 \
     --teacher_prompt_seed 42 \
+    --teacher_prompt_gradient_checkpointing \
     --teacher_momentum 0.9 \
     --teacher_weight_decay 1e-3 \
     --lambda_teacher_retrieval 1.5 \
-    --teacher_triplet_margin 0.2 \
+    --teacher_triplet_margin 0.3 \
     --seed 42 \
     --exp_name sketchy1_to_tuberlin \
     --progress
@@ -79,3 +88,7 @@ checkpoints are also ranked by unseen P@K instead of mAP. Ties keep the earlier
 teacher epoch. Neither state cloning nor checkpoint serialization consumes RNG.
 Because unseen labels determine both selections, this setting has test-set
 model-selection leakage and is not a strict inductive ZS-SBIR protocol.
+
+Kaggle: run `test/kaggle_across_online.py` online and save output. Offline,
+attach the bundle and datasets, paste `test/kaggle_across_offline.py` as cell 1,
+and `test/kaggle_train.ipy` as cell 2. Rebuild old bundles to get updated losses.
