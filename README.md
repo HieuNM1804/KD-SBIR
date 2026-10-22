@@ -99,3 +99,8 @@ The bundle includes non-CUDA wheels for Python 3.12/3.13, source, and model weig
 Setup does not block differing Python versions; pip selects compatible wheels.
 Both scripts pin source commit `284f5b1a6c43c20c958855a914c66cf3f3e8fc57`.
 Rebuild the online bundle; old bundles still contain the old training losses.
+
+Online dependency versions are resolved separately for Python 3.12 and 3.13.
+`requirements-cp312.txt` and `requirements-cp313.txt` record each inventory;
+no installed Python 3.12 package pin is forced onto Python 3.13. Temporary
+torch metadata used during resolution is excluded from the offline bundle.
