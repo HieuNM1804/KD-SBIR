@@ -94,3 +94,8 @@ attach the bundle and datasets, paste `test/kaggle_across_offline.py` as cell 1,
 and `test/kaggle_train.ipy` as cell 2. Rebuild old bundles to get updated losses.
 
 Kaggle setup pins source commit `670122186b6f0b3c559c6290637160f6b9ad6d3f`.
+
+Online dependency versions are resolved separately for Python 3.12 and 3.13.
+`requirements-cp312.txt` and `requirements-cp313.txt` record each inventory;
+no installed Python 3.12 package pin is forced onto Python 3.13. Temporary
+torch metadata used during resolution is excluded from the offline bundle.

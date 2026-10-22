@@ -79,6 +79,75 @@ def validate(path, expected_size=None, expected_sha256=None):
     return actual_sha256
 
 
+def download_runtime_wheels(roots, python_versions, bundle, wheels, run):
+    """Resolve each Python separately while treating Kaggle's torch stack as provided.
+
+    Temporary metadata-only wheels describe the already installed torch stack to
+    pip's resolver. They are NEVER installed, downloaded into wheels/, or bundled.
+    Real runtime dependencies are resolved and downloaded for the target ABI.
+    """
+    from importlib.metadata import distribution
+    import tempfile
+    import zipfile
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+
+    def provided(name):
+        return (name in {"torch", "torchvision", "torchaudio", "triton"}
+                or name.startswith(("nvidia-", "cuda-")))
+
+    platforms = ("manylinux_2_28_x86_64", "manylinux_2_27_x86_64", "manylinux2014_x86_64")
+    inventories = {}
+    with tempfile.TemporaryDirectory(prefix="kaggle-provided-stack-") as temporary:
+        stack = []
+        for name in ("torch", "torchvision"):
+            installed = distribution(name)
+            version = installed.version
+            info = f"{name}-{version}.dist-info"
+            path = Path(temporary) / f"{name}-{version}-py3-none-any.whl"
+            metadata = f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+            for specification in installed.requires or []:
+                if not provided(canonicalize_name(Requirement(specification).name)):
+                    metadata += f"Requires-Dist: {specification}\n"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr(info + "/METADATA", metadata + "\n")
+                archive.writestr(info + "/WHEEL",
+                                 "Wheel-Version: 1.0\nGenerator: kaggle-bundle-resolver\n"
+                                 "Root-Is-Purelib: true\nTag: py3-none-any\n")
+                archive.writestr(info + "/RECORD", "")
+            stack.append(str(path))
+
+        for python_version in python_versions:
+            abi = "cp" + python_version.replace(".", "")
+            target = ["--python-version", python_version, "--implementation", "cp",
+                      "--abi", abi, "--abi", "abi3", "--abi", "none"]
+            for platform in platforms:
+                target.extend(["--platform", platform])
+            report = bundle / f"resolution-{abi}.json"
+            print(f"Resolving non-CUDA dependencies for Python {python_version}", flush=True)
+            run([sys.executable, "-m", "pip", "install", "--dry-run", "--ignore-installed",
+                 "--only-binary=:all:", "--report", str(report), *target, *roots, *stack])
+            resolved = {}
+            for item in json.loads(report.read_text(encoding="utf-8"))["install"]:
+                metadata = item["metadata"]
+                name = canonicalize_name(metadata["name"])
+                if not provided(name):
+                    resolved[name] = metadata["version"]
+            requirements = bundle / f"requirements-{abi}.txt"
+            requirements.write_text(
+                "".join(f"{name}=={version}\n" for name, version in sorted(resolved.items())),
+                encoding="utf-8",
+            )
+            run([sys.executable, "-m", "pip", "download", "--no-deps", "--only-binary=:all:",
+                 *target, "--dest", str(wheels), "-r", str(requirements)])
+            inventories[python_version] = resolved
+    # Retain this filename for existing manifest/checksum consumers. This file
+    # lists runtime roots; exact resolved inventories live in requirements-cp*.txt.
+    requirements = bundle / "requirements.txt"
+    requirements.write_text("\n".join(roots) + "\n", encoding="utf-8")
+    return inventories
+
+
 WORKING.mkdir(parents=True, exist_ok=True)
 os.chdir(WORKING)
 if BUNDLE.exists():
@@ -93,38 +162,11 @@ roots = [
     "packaging", "tqdm", "numpy", "pillow", "matplotlib",
 ]
 run([sys.executable, "-m", "pip", "install", "-q", *roots])
-from importlib.metadata import distribution
-from packaging.requirements import Requirement
-from packaging.utils import canonicalize_name
-
-pending = [Requirement(spec).name for spec in roots]
-resolved = {}
-while pending:
-    package = canonicalize_name(pending.pop())
-    if package in resolved or package in {"torch", "torchvision", "torchaudio", "triton"} or package.startswith(("nvidia-", "cuda-")):
-        continue
-    installed = distribution(package)
-    resolved[package] = installed.version
-    for specification in installed.requires or []:
-        dependency = Requirement(specification)
-        if dependency.marker is None or dependency.marker.evaluate({"extra": ""}):
-            pending.append(dependency.name)
 requirements_path = BUNDLE / "requirements.txt"
-requirements_path.write_text(
-    "".join(f"{name}=={version}\n" for name, version in sorted(resolved.items())),
-    encoding="utf-8",
+wheel_inventories = download_runtime_wheels(
+    roots, ("3.12", "3.13"), BUNDLE, WHEELS, run,
 )
-# Include binary wheels for both Kaggle Python images; offline pip selects its ABI.
-for python_version in ("3.12", "3.13"):
-    command = [sys.executable, "-m", "pip", "download", "--no-deps",
-               "--only-binary=:all:", "--python-version", python_version,
-               "--implementation", "cp", "--abi", "cp" + python_version.replace(".", ""),
-               "--abi", "abi3", "--abi", "none", "--dest", str(WHEELS),
-               "-r", str(requirements_path)]
-    for platform in ("manylinux_2_28_x86_64", "manylinux_2_27_x86_64", "manylinux2014_x86_64"):
-        command.extend(["--platform", platform])
-    run(command)
-print("[2/6] Pinned non-CUDA dependency wheels:", len(list(WHEELS.glob("*.whl"))))
+print("[2/6] Non-CUDA dependency wheels:", len(list(WHEELS.glob("*.whl"))))
 
 project = SOURCE / "KD-SBIR"
 run(
@@ -261,6 +303,7 @@ wheel_manifest = [
 manifest = {
     "runtime_requirements": roots,
     "wheel_python_targets": ["3.12", "3.13"],
+    "wheel_inventories": wheel_inventories,
     "teacher_triplet_direction": "sketch_to_photo",
     "student_kd": "symmetric_kl",
     "repository": REPOSITORY,
