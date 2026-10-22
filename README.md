@@ -17,6 +17,17 @@ modality-specific templates:
 The student objectives are sketch-photo relational KD, photo-text KD, and
 sketch-text KD. Setting an objective weight to zero disables that objective.
 
+Training losses match `main`: teacher pretraining uses only sketch-to-photo
+batch-hard triplets (without averaging with photo-to-sketch triplets). Each
+student KD objective uses `0.5 * (KL(teacher || student) + KL(student || teacher))`;
+teacher targets remain detached in both terms. Domain KD still ranks photo
+candidates for each sketch; the two KL terms do not reverse retrieval direction.
+Existing training hyperparameters are unchanged.
+
+Teacher-cache metadata includes `teacher_triplet_direction=sketch_to_photo`, so
+automatic cache paths differ from the previous bidirectional-triplet caches.
+Rebuild the teacher cache when switching from those older losses.
+
 ```bash
 !python -m src.train \
     --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
