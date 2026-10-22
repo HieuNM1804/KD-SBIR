@@ -110,6 +110,7 @@ def _teacher_training_config(args):
         "pretrain_epochs": args.teacher_pretrain_epochs,
         "pretrain_batch_size": args.teacher_pretrain_batch_size,
         "lambda_retrieval": args.lambda_teacher_retrieval,
+        "teacher_triplet_direction": "sketch_to_photo",
         "triplet_margin": args.teacher_triplet_margin,
         "scheduler": "StepLR",
         "scheduler_step_size": args.teacher_scheduler_step_size,
