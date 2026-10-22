@@ -23,6 +23,18 @@ uses fixed CLIP features from these modality-specific templates:
 The student objectives are sketch-photo relational KD, photo-text KD, and
 sketch-text KD. Setting an objective weight to zero disables that objective.
 
+Pretraining and distillation losses match current `main`: the teacher uses
+batch-hard triplets with sketch anchors and photo candidates only, without
+averaging with the reverse retrieval direction. Domain, photo-text, and
+sketch-text KD each use `0.5 * (KL(teacher || student) + KL(student || teacher))`.
+Teacher targets remain detached in both KL terms; only student prompts update
+during distillation. Training hyperparameters and teacher identities are
+unchanged.
+
+Teacher-cache metadata records `teacher_triplet_direction=sketch_to_photo`.
+Automatic cache names therefore differ from caches trained with bidirectional
+triplets; rebuild those older teacher caches for the updated training losses.
+
 ```bash
 !python -m src.train \
     --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
