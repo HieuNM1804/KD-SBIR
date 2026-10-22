@@ -11,13 +11,18 @@ def relational_kd_loss(
     teacher_photo,
     temperature=0.07,
 ):
-    """Match the student and teacher sketch-to-photo similarity distributions."""
+    """Average both KL directions on sketch-to-photo distributions.
+
+    Both KL terms update the student; teacher targets remain fixed. This does
+    not introduce photo-to-sketch candidate distributions.
+    """
     student_device = student_sketch.device
     student_sketch = F.normalize(student_sketch.float(), dim=-1)
     student_photo = F.normalize(student_photo.float(), dim=-1)
 
     student_logits = student_sketch @ student_photo.t() / temperature
     student_log_probs = F.log_softmax(student_logits, dim=-1)
+    student_probs = student_log_probs.exp()
 
     with torch.no_grad():
         teacher_sketch = F.normalize(
@@ -29,9 +34,16 @@ def relational_kd_loss(
             dim=-1,
         )
         teacher_logits = teacher_sketch @ teacher_photo.t() / temperature
-        teacher_probs = F.softmax(teacher_logits, dim=-1)
+        teacher_log_probs = F.log_softmax(teacher_logits, dim=-1)
+        teacher_probs = teacher_log_probs.exp()
 
-    return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
+    teacher_to_student = F.kl_div(
+        student_log_probs, teacher_probs, reduction="batchmean"
+    )
+    student_to_teacher = (
+        student_probs * (student_log_probs - teacher_log_probs)
+    ).sum(dim=-1).mean()
+    return 0.5 * (teacher_to_student + student_to_teacher)
 
 
 def image_text_kd_loss(
@@ -82,7 +94,7 @@ def batch_hard_teacher_triplet_loss(
     labels,
     margin=0.2,
 ):
-    """Symmetric batch-hard triplet loss for jointly trained teacher adapters."""
+    """Batch-hard sketch-to-photo triplet loss for teacher visual prompts."""
     sketch_features = F.normalize(sketch_features.float(), dim=-1)
     photo_features = F.normalize(photo_features.float(), dim=-1)
     labels = labels.to(sketch_features.device)
@@ -104,7 +116,7 @@ def batch_hard_teacher_triplet_loss(
             return losses[valid_negative].mean()
         return dist.new_zeros(())
 
-    return 0.5 * (one_direction(distance) + one_direction(distance.t()))
+    return one_direction(distance)
 
 
 def loss_fn(args, features):
