@@ -1,0 +1,14 @@
+%cd /kaggle/working/KD-SBIR-teacher-classification
+
+!python -m src.evaluate_teacher_classification \
+    --models-dir /kaggle/working/KD-SBIR-teacher-classification/models \
+    --datasets sketchy_1 tuberlin quickdraw \
+    --teachers dfn5b_h14 dfn2b_l14 laion_h14 metaclip_l14 openai_l14 \
+    --split seen \
+    --candidate-scope split \
+    --batch-size 256 \
+    --workers 8 \
+    --prefetch-factor 2 \
+    --template-mode modality \
+    --preprocess main \
+    --output-dir /kaggle/working/teacher_classification
