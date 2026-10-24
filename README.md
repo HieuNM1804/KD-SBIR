@@ -1,90 +1,119 @@
-# KD-SBIR: Teacher Visual Prompts, Student Visual-Only Prompts
+# DFN5B-224 pseudo-label retrieval and distillation
 
-## One-way teacher triplet with symmetric student KD
+Branch: `experiment/dfn5b-pseudo-label-retrieval`, based on main
+`741ea272b258c9e7b92a46173618e2fe1d401eaa`.
 
-Branch: `experiment/teacher-triplet-sketch-photo-symmetric-kd`, based directly on
-`040515e0bba195f7301d1bc8552c33a3eb6cc495` (one-way teacher triplet).
+This experiment replaces training image annotations with static predictions from
+original frozen DFN5B ViT-H/14 at 224px. Teacher architecture, visual prompts,
+retrieval loss, distillation losses, optimizers, schedulers and evaluation match main.
+All training hyperparameters are explicit in [the Kaggle run cell](test/kaggle_train.ipy).
+The existing argparse training defaults are inherited from committed main; use the
+run cell (in particular `--teacher_pretrain_epochs 1`) for the full experiment.
 
-Teacher pretraining keeps sketch anchors with batch-hard same-class positive
-photos and different-class negative photos. Its triplet loss has no photo-anchor
-term and no factor of one half.
+## Three stages
 
-Each student KD term (domain, photo-text, sketch-text) uses
-`0.5 * (KL(teacher || student) + KL(student || teacher))`.
-Both KL terms update only the student. Domain distributions remain sketch queries
-over photo candidates; the reverse KL does not transpose the retrieval matrix.
-The text losses retain main's symmetric formulation over class candidates.
-Temperatures and outer objective weights remain unchanged:
-`lambda_domain * domain + lambda_modality * (photo_text + sketch_text)`.
+1. **Frozen classification before creating prompts.** Classify every seen sketch
+   and photo independently against the ENTIRE seen class-name vocabulary. Templates
+   are `a sketch of a {class}.` and `a photo of a {class}.`, matching main. Use
+   normalized image/text features and original teacher logit scale. Take top-1;
+   no confidence threshold, filtering by ground truth, or label correction.
+2. **Teacher prompt retrieval training.** Keep main's independent deep visual
+   prompts and frozen backbone. Sample a photo predicted to have the sketch's
+   predicted class; batch-hard positives/negatives use those pseudo-labels.
+   Teacher objective stays sketch-to-photo triplet only, with no half factor.
+3. **Student distillation.** Cache the tuned teacher features, release DFN5B, and
+   train student visual prompts. Continue sampling photo pairs by pseudo-label.
+   Student losses remain EXACTLY main's
+   `0.5 * (KL(T || S) + KL(S || T))` for domain, photo-text and sketch-text.
+   The reverse KL updates the student only and does not transpose the retrieval
+   candidate matrix. There is no added classification or pseudo-label CE loss.
 
-Teacher architecture, pretraining, cache metadata, and optimizer settings match
-the base. Existing caches from `experiment/teacher-triplet-sketch-photo` (including
-the forward-KL student branch) can be reused. Main's two-way teacher caches remain
-incompatible because `teacher_triplet_direction` differs.
+**Labels are static:** prompts never regenerate them. Known seen class names and
+existing seen/unseen split membership are assumed available. True image-folder
+categories are used for listing that split and evaluation only, not to select
+training positives or construct triplet masks. Both photo and sketch labels are
+predicted; photos do not keep their original annotations.
 
-Run the focused CPU checks with:
+A sketch whose predicted class has no predicted photo positive cannot form a
+pair. It is excluded from pair sampling and its count is printed/reported.
+Original full feature-bank path ordering is preserved, so cache lookup stays
+correct. If fewer than two shared predicted classes remain, training fails with
+an explicit message instead of falling back to true labels. Single-class teacher
+batches have no negative and are skipped/reported. No class-balanced resampling
+or new hard-negative algorithm is introduced.
 
-```bash
-python -m unittest discover -s tests -p "test_*.py" -v
-```
+## Kaggle setup
 
-This branch keeps the DFN5B teacher visual-prompt pretraining pipeline from
-`experiment/teacher-visual-prompt-tuning`. The teacher has separate photo and
-sketch deep visual prompts, learns only from retrieval triplet loss, and is
-validated on the unseen retrieval split after each pretraining epoch.
+1. Online notebook, Internet ON: paste [test/kaggle_online.py](test/kaggle_online.py)
+   as one cell. It bundles pinned source, original DFN5B-224, original student
+   ViT-B/32 and dependency wheels for Python 3.12 and 3.13. It does not train or
+   download the image datasets. Optional `REUSE_TEACHER` / `REUSE_STUDENT` paths
+   avoid downloading weights already attached to the online notebook.
+2. Save Version -> Save & Run All -> Always save output.
+3. Offline GPU notebook: attach that output and the desired image dataset.
+   Paste [test/kaggle_offline.py](test/kaggle_offline.py) as the first setup cell.
+   Small source is copied to `/kaggle/working/KD-SBIR`; checkpoints are linked to
+   attached input rather than copied. Kaggle's torch/CUDA stack is retained.
+4. Paste [test/kaggle_train.ipy](test/kaggle_train.ipy): `%cd` + `!python -m src.train`.
+   The single command runs all three stages. Stage-1 batch size is 256, workers 8;
+   teacher training batch size stays 64. `--pseudo_batch_size` changes inference
+   batching only, not teacher optimization.
 
-The student CLIP backbone is fully frozen. Its only trainable parameters are
-independent photo and sketch deep visual prompts. The student text encoder has
-no learnable prompt tokens and remains fully frozen. Image-text distillation
-uses fixed CLIP features from these modality-specific templates:
+Source pins in setup refer to the runtime commit; the later setup-script commit
+can intentionally differ. Python version differences are not hard-blocked: pip
+selects compatible wheels from the per-ABI bundle.
 
-- `a photo of a {class}.`
-- `a sketch of a {class}.`
+### Dataset roots
 
-The student objectives are sketch-photo relational KD, photo-text KD, and
-sketch-text KD. Setting an objective weight to zero disables that objective.
+| `--dataset` | `--root` |
+|---|---|
+| `sketchy_1` | `/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy` |
+| `sketchy_2` | `/kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy` |
+| `tuberlin` | `/kaggle/input/datasets/b20dccn616nguynhutun/tuberlin` |
+| `quickdraw` | `/kaggle/input/datasets/b20dccn616nguynhutun/quickdraw` |
 
-```bash
-!python -m src.train \
-    --root /kaggle/input/datasets/b20dccn616nguynhutun/sketchy/Sketchy \
-    --dataset sketchy_1 \
-    --epochs 7 \
-    --workers 8 \
-    --batch_size 64 \
-    --test_batch_size 1024 \
-    --n_ctx_visual 3 \
-    --prompt_depth 12 \
-    --lambda_domain 1.0 \
-    --lambda_modality 1.0 \
-    --photo_text_kd_temperature 0.2 \
-    --sketch_text_kd_temperature 0.02 \
-    --lr 1e-3 \
-    --momentum 0.94 \
-    --weight_decay 1e-3 \
-    --teacher_pretrain_epochs 4 \
-    --teacher_pretrain_batch_size 64 \
-    --teacher_n_ctx_visual 3 \
-    --teacher_prompt_depth 12 \
-    --teacher_prompt_std 0.02 \
-    --teacher_prompt_lr 3e-5 \
-    --teacher_prompt_seed 42 \
-    --teacher_momentum 0.9 \
-    --teacher_weight_decay 1e-3 \
-    --lambda_teacher_retrieval 1.5 \
-    --teacher_triplet_margin 0.2 \
-    --seed 42 \
-    --exp_name teacher_visual_student_visual_only \
-    --progress
-```
+Sketchy-1 and Sketchy-2 share image roots but use different splits. Change root,
+dataset and experiment name in the run cell to run another dataset. Keep the
+same hyperparameters as the supervised main comparison you want to reproduce.
 
-Teacher caches are named from the dataset and complete teacher configuration.
-Changing only student prompts, losses, or optimizer settings reuses a compatible
-teacher cache. Use `--rebuild_teacher_cache` only when intentionally replacing
-that cache.
+## Outputs and reuse
 
-Teacher prompt pretraining keeps the epoch with the highest unseen P@K, restores
-that prompt state, and materializes the distillation cache from it. Student
-checkpoints are also ranked by unseen P@K instead of mAP. Ties keep the earlier
-teacher epoch. Neither state cloning nor checkpoint serialization consumes RNG.
-Because unseen labels determine both selections, this setting has test-set
-model-selection leakage and is not a strict inductive ZS-SBIR protocol.
+- `/kaggle/working/pseudo_labels_dfn5b224/<dataset>_<hash>.pt`: pseudo-labels,
+  confidence vectors and original teacher/source/split metadata.
+- Same stem `_sketch.csv`, `_photo.csv`: relative path, predicted label, predicted
+  class, confidence. No ground-truth labels are used for these assignments.
+- Same stem `.json`: predicted class balance, mean confidence, pairable/skipped
+  sketch counts and prediction fingerprint.
+- `/kaggle/working/teacher_cache_pseudo_dfn5b224/<dataset>_<hash>.pt`: tuned teacher
+  prompt state, text targets and full seen feature banks, as in main. The key
+  includes exact pseudo-label fingerprint, so supervised or differently labeled
+  teacher caches cannot be silently reused.
+- `saved_models/<exp_name>/`: student best/last checkpoints; `tb_logs/<exp_name>/`.
+
+Repeat runs reuse static labels; pass `--rebuild_pseudo_labels` to classify again
+with the ORIGINAL frozen teacher. `--pseudo_label_path /exact/file.pt` can point
+at an attached previous output; CSV/JSON reports are written to the current
+`--pseudo_label_dir`. `--rebuild_teacher_cache` retrains teacher prompts.
+Changing only student hyperparameters reuses a compatible tuned teacher cache.
+Do not point this experiment at a supervised main teacher cache.
+
+## Evaluation protocol retained from main
+
+Teacher prompts are evaluated after each epoch on unseen retrieval and the best
+unseen P@K epoch is restored. Student best checkpoint is also selected by unseen
+P@K, exactly as main. **These selections use ground-truth unseen evaluation
+labels.** The training objectives and positive/negative selection do not use
+image annotations, but this inherited evaluation/selection protocol is NOT a
+fully label-free model-selection or strict inductive ZS protocol. No claim of
+that kind should be made from this branch. It intentionally isolates the effect
+of replacing training annotations with frozen-teacher pseudo-labels.
+
+## Local validation
+
+`python -m unittest discover -s tests -p 'test_*.py' -v`
+
+Tests use generated small images, fake frozen classification outputs and small
+random networks, not downloaded checkpoints or datasets. They check leakage,
+independent modality predictions, pseudo pair/mask selection, feature-bank
+indices, incompatible caches, forward teacher triplet and symmetric student KD.
+Full DFN5B training and GPU accuracy are to be tested on Kaggle.

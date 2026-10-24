@@ -16,7 +16,8 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from src.dataset import TrainDataset, ValidDataset, WorkerInvariantSampler
 from src.data_config import UNSEEN_CLASSES
-from src.model import ZS_SBIR, default_teacher_cache_path
+from src.model import ZS_SBIR, default_teacher_cache_path, _load_teacher
+from src.pseudo_labels import prepare_pseudo_labels
 
 
 def seed_everything(seed):
@@ -41,10 +42,11 @@ def seed_worker(_worker_id):
     random.seed(worker_seed)
 
 
-def get_loaders(args):
+def get_loaders(args, train_dataset=None):
     seed_everything(args.seed)
     
-    train_dataset = TrainDataset(args)
+    if train_dataset is None:
+        train_dataset = TrainDataset(args)
     val_sketch = ValidDataset(args, mode='sketch')
     val_photo = ValidDataset(args)
 
@@ -321,6 +323,23 @@ if __name__ == "__main__":
         type=str,
         default="teacher_visual_student_visual_only",
     )
+    parser.add_argument(
+        "--pseudo_label_dir", type=str,
+        default="/kaggle/working/pseudo_labels_dfn5b224",
+        help="Directory for static frozen-teacher labels and CSV/JSON reports.",
+    )
+    parser.add_argument(
+        "--pseudo_label_path", type=str, default="",
+        help="Optional exact .pt pseudo-label cache; metadata are checked before reuse.",
+    )
+    parser.add_argument(
+        "--rebuild_pseudo_labels", action="store_true",
+        help="Regenerate labels with the original frozen DFN5B, never tuned prompts.",
+    )
+    parser.add_argument(
+        "--pseudo_batch_size", type=int, default=256,
+        help="Frozen classification batch size; separate from teacher training batch size.",
+    )
 
     args = parser.parse_args()
     if args.teacher_prompt_seed is None:
@@ -369,6 +388,14 @@ if __name__ == "__main__":
         parser.error("--photo_text_kd_temperature must be greater than 0.")
     if args.sketch_text_kd_temperature <= 0:
         parser.error("--sketch_text_kd_temperature must be greater than 0.")
+    if args.max_size != 224:
+        parser.error("This experiment uses the current 224px DFN5B; --max_size must be 224.")
+    if args.teacher_pretrain_epochs < 1:
+        parser.error("This experiment requires --teacher_pretrain_epochs greater than 0.")
+    if args.pseudo_batch_size < 1 or args.batch_size < 2 or args.workers < 0:
+        parser.error("Use positive pseudo batch size, training batch size >= 2, and workers >= 0.")
+    if args.lambda_domain == 0 and args.lambda_modality == 0:
+        parser.error("At least one student distillation loss must be active.")
     logger = TensorBoardLogger("tb_logs", name=args.exp_name)
 
     checkpoint_callback = ModelCheckpoint(
@@ -380,7 +407,14 @@ if __name__ == "__main__":
         save_last=True,
     )
 
-    train_loader, val_sketch_loader, val_photo_loader = get_loaders(args)
+    seed_everything(args.seed)
+    train_dataset = TrainDataset(args)
+    teacher = prepare_pseudo_labels(
+        args, train_dataset, lambda: _load_teacher(args, ignore_cache=True)
+    )
+    # Reset the training RNG exactly as main does. Stage-1 inference must not
+    # change student initialization or epoch-dependent photo sampling.
+    train_loader, val_sketch_loader, val_photo_loader = get_loaders(args, train_dataset)
     if not args.teacher_cache_path and args.teacher_pretrain_epochs > 0:
         args.teacher_cache_path = default_teacher_cache_path(
             args,
@@ -420,7 +454,14 @@ if __name__ == "__main__":
         callbacks=[checkpoint_callback, progress_bar],
     )
 
-    model = ZS_SBIR(args=args, classnames=train_loader.dataset.all_categories)
+    if cache_exists and not args.rebuild_teacher_cache:
+        # Labels were regenerated but tuned features may already be available.
+        teacher = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    print("[Stage 2] Teacher prompt retrieval training with pseudo-label pairs/masks; main losses and checkpoint selection.", flush=True)
+    model = ZS_SBIR(args=args, classnames=train_loader.dataset.all_categories, teacher=teacher)
+    del teacher  # The wrapper owns the only reference, so cache materialization can release DFN5B.
     if os.path.isfile(args.ckpt_path):
         print(f"Resuming training from {args.ckpt_path}")
         ckpt = torch.load(args.ckpt_path, map_location="cpu")
@@ -435,4 +476,5 @@ if __name__ == "__main__":
         show_progress=args.progress,
     )
 
+    print("[Stage 3] Student distillation with main's unchanged losses; pseudo-label photo pairing.", flush=True)
     trainer.fit(model, train_loader, [val_sketch_loader, val_photo_loader])

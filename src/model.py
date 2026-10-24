@@ -110,6 +110,8 @@ def _teacher_training_config(args):
         "scheduler_gamma": args.teacher_scheduler_gamma,
         "checkpoint_selection": "best_unseen_precision",
         "seed": args.seed,
+        "training_label_source": "frozen_dfn5b_pseudo_v1",
+        "pseudo_label_fingerprint": getattr(args, "pseudo_label_fingerprint", ""),
     }
 
 
@@ -164,7 +166,10 @@ def _persistent_teacher_cache_available(args):
 
 
 def _load_clip_model(backbone):
-    model_path = clip.download_model(backbone)
+    local_path = os.environ.get("KD_SBIR_STUDENT_WEIGHTS", "")
+    if local_path and backbone != "ViT-B/32":
+        raise ValueError("The bundled student checkpoint is ViT-B/32; unset KD_SBIR_STUDENT_WEIGHTS for other backbones.")
+    model_path = local_path or clip.download_model(backbone)
     try:
         model = torch.jit.load(model_path, map_location="cpu").eval()
         state_dict = model.state_dict()
@@ -194,8 +199,8 @@ def _build_teacher_prompts(args, teacher):
     return controller
 
 
-def _load_teacher(args):
-    if _persistent_teacher_cache_available(args):
+def _load_teacher(args, *, ignore_cache=False):
+    if not ignore_cache and _persistent_teacher_cache_available(args):
         print(
             "[Teacher Cache] persistent cache found; "
             "skipping DFN5B loading."
@@ -212,7 +217,7 @@ def _load_teacher(args):
     print(f"[Teacher] Loading {DFN5B_MODEL} in FP16...")
     teacher = open_clip.create_model(
         DFN5B_MODEL,
-        pretrained=DFN5B_PRETRAINED,
+        pretrained=os.environ.get("KD_SBIR_DFN5B_WEIGHTS") or DFN5B_PRETRAINED,
         precision="fp16",
         device=device,
     )
@@ -500,6 +505,7 @@ class CustomCLIP(nn.Module):
         for epoch in range(cfg.teacher_pretrain_epochs):
             retrieval_total = 0.0
             steps = 0
+            skipped_single_class = 0
             batches = tqdm(
                 loader,
                 desc=(
@@ -535,6 +541,11 @@ class CustomCLIP(nn.Module):
                             cfg.teacher_triplet_margin,
                         )
                         loss = cfg.lambda_teacher_retrieval * retrieval
+                    # Pseudo-labels can concentrate a whole batch in one class.
+                    # Main's triplet returns a constant zero without negatives.
+                    if not loss.requires_grad:
+                        skipped_single_class += 1
+                        continue
                     optimizer.zero_grad(set_to_none=True)
                     scaler.scale(loss).backward()
                     scaler.step(optimizer)
@@ -549,11 +560,12 @@ class CustomCLIP(nn.Module):
             scheduler.step()
             if steps == 0:
                 raise RuntimeError(
-                    "Teacher pretraining produced no complete batches."
+                    "Teacher pretraining produced no informative batches; check pseudo-label class diversity and batch size."
                 )
             print(
                 f"[Teacher Pretrain] epoch={epoch + 1}, "
-                f"retrieval={retrieval_total / steps:.6f}"
+                f"retrieval={retrieval_total / steps:.6f}, "
+                f"skipped_single_class_batches={skipped_single_class}"
             )
             precision = self._validate_teacher_unseen(
                 val_sketch_loader,
@@ -902,7 +914,7 @@ class CustomCLIP(nn.Module):
 
 
 class ZS_SBIR(pl.LightningModule):
-    def __init__(self, args, classnames):
+    def __init__(self, args, classnames, teacher=None):
         super().__init__()
         self.args = args
         clip_model = _load_clip_model(args.backbone)
@@ -910,7 +922,8 @@ class ZS_SBIR(pl.LightningModule):
         self.distance_fn = lambda x, y: F.cosine_similarity(x, y)
         self.best_precision = 0.0
 
-        teacher = _load_teacher(args)
+        if teacher is None:
+            teacher = _load_teacher(args)
         self.model = CustomCLIP(
             cfg=args,
             clip_model=clip_model,

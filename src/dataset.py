@@ -63,6 +63,9 @@ class TrainDataset(torch.utils.data.Dataset):
         self.photo_path_to_index = {}
         self.teacher_sketch_features = None
         self.teacher_photo_features = None
+        self.pseudo_sketch_labels = None
+        self.training_sketch_indices = None
+        self.pseudo_photo_paths = None
 
         for category in self.all_categories:
             sketch_paths = sorted(
@@ -77,6 +80,40 @@ class TrainDataset(torch.utils.data.Dataset):
                 self.photo_path_to_index[path] = len(self.all_photo_paths)
                 self.all_photo_paths.append(path)
 
+    def set_pseudo_labels(self, sketch_labels, photo_labels):
+        """Use independently predicted labels for BOTH sampling and triplet masks.
+
+        Feature banks keep their original complete path order. Only sketches
+        without any predicted same-class photo are excluded from pair sampling.
+        Folder categories play no role after the seen split has been listed.
+        """
+        vectors = []
+        for labels, paths in ((sketch_labels, self.all_sketches_path),
+                              (photo_labels, self.all_photo_paths)):
+            value = torch.as_tensor(labels).detach().cpu()
+            if value.ndim != 1 or len(value) != len(paths):
+                raise ValueError("Pseudo-label count does not match the image paths.")
+            if value.dtype not in (torch.int32, torch.int64):
+                raise ValueError("Pseudo-labels must be integer class indices.")
+            if (value < 0).any() or (value >= len(self.all_categories)).any():
+                raise ValueError("Pseudo-label index is outside the seen vocabulary.")
+            vectors.append(value.long())
+        sketches, photos = vectors
+        groups = {}
+        for index, label in enumerate(photos.tolist()):
+            groups.setdefault(label, []).append(self.all_photo_paths[index])
+        indices = [index for index, label in enumerate(sketches.tolist())
+                   if label in groups]
+        shared = {int(sketches[index]) for index in indices}
+        if len(shared) < 2:
+            raise ValueError("Pseudo-labels need at least two classes shared by sketch and photo for triplet negatives.")
+        self.pseudo_sketch_labels = sketches
+        self.pseudo_photo_paths = groups
+        self.training_sketch_indices = indices
+        return {"training_sketches": len(indices),
+                "excluded_sketches_no_pseudo_positive": len(sketches) - len(indices),
+                "shared_predicted_classes": len(shared)}
+
     def set_teacher_features(self, sketch_features, photo_features):
         if len(sketch_features) != len(self.all_sketches_path):
             raise ValueError("Sketch feature cache has the wrong length.")
@@ -86,6 +123,8 @@ class TrainDataset(torch.utils.data.Dataset):
         self.teacher_photo_features = photo_features
 
     def __len__(self):
+        if self.training_sketch_indices is not None:
+            return len(self.training_sketch_indices)
         return len(self.all_sketches_path)
         
     def __getitem__(self, sample_key):
@@ -96,10 +135,16 @@ class TrainDataset(torch.utils.data.Dataset):
 
         current_seed = sample_seed(self.seed, epoch, index)
         photo_rng = np.random.default_rng(current_seed)
+        if self.training_sketch_indices is not None:
+            index = self.training_sketch_indices[index]
         filepath = self.all_sketches_path[index]
-        category = filepath.split(os.path.sep)[-2]
-
-        photo_paths = self.all_photos_path[category]
+        if self.pseudo_sketch_labels is not None:
+            label = int(self.pseudo_sketch_labels[index])
+            photo_paths = self.pseudo_photo_paths[label]
+        else:
+            category = filepath.split(os.path.sep)[-2]
+            label = self.category_to_label[category]
+            photo_paths = self.all_photos_path[category]
         img_path = photo_paths[photo_rng.integers(len(photo_paths))]
 
         sk_data = load_image(filepath, self.max_size)
@@ -121,7 +166,7 @@ class TrainDataset(torch.utils.data.Dataset):
             sk_tensor,
             teacher_photo_feature,
             teacher_sketch_feature,
-            self.category_to_label[category],
+            label,
         )
 
 
