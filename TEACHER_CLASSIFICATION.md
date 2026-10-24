@@ -26,8 +26,8 @@ student, or retrieves photos. Training code inherited from main is unchanged.
    them. Different online/offline Python versions are not blocked in advance;
    pip selects compatible wheels. Installed Kaggle torch/torchvision are retained.
 3. Paste `test/kaggle_teacher_classification_run.ipy` as the second cell
-   (`%cd` plus `!python`). It evaluates all five teachers on Sketchy-1, TU-Berlin,
-   and QuickDraw. All images are evaluated by default. Omit unneeded datasets
+   (`%cd` plus `!python`). It evaluates all five teachers on Sketchy-1, Sketchy-2,
+   TU-Berlin, and QuickDraw (four protocols over three physical datasets). All images are evaluated by default. Omit unneeded datasets
    from `--datasets` and attach only those you request.
 
 Default batch size is 256, workers 8, prefetch factor 2. Reduce batch size on a
