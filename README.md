@@ -1,4 +1,4 @@
-> This branch adds **frozen zero-shot classification of five original teachers**,
+> This branch adds **frozen zero-shot classification of five teachers plus OpenAI ViT-B/32**,
 > evaluated separately on seen photos and sketches. No training is performed by
 > the classification entry point. See [TEACHER_CLASSIFICATION.md](TEACHER_CLASSIFICATION.md)
 > for Kaggle online/offline/run cells, metrics, and output files.

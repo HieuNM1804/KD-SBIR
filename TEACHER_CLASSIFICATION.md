@@ -1,7 +1,7 @@
 # Frozen teacher classification audit
 
-This branch evaluates the original five teacher checkpoints before pseudo-label
-prompt training. It never trains a model, adds teacher prompts, constructs a
+This branch evaluates the original five teacher checkpoints plus the original
+OpenAI CLIP ViT-B/32 backbone baseline before pseudo-label prompt training. It never trains a model, adds teacher prompts, constructs a
 student, or retrieves photos. Training code inherited from main is unchanged.
 
 | Key | OpenCLIP architecture | Original pretrained tag |
@@ -11,6 +11,7 @@ student, or retrieves photos. Training code inherited from main is unchanged.
 | `laion_h14` | ViT-H-14 | laion2b_s32b_b79k |
 | `metaclip_l14` | ViT-L-14 | metaclip_fullcc |
 | `openai_l14` | ViT-L-14 | openai |
+| `openai_b32` | ViT-B-32 | openai |
 
 ## Kaggle
 
@@ -18,7 +19,8 @@ student, or retrieves photos. Training code inherited from main is unchanged.
    `test/kaggle_teacher_classification_online.py` into one cell. Save its output
    as a notebook version. It bundles source, original weights, and non-CUDA
    wheels for Python 3.12 and 3.13, resolving each interpreter separately.
-   It downloads no datasets or student checkpoints. Optional `REUSE_WEIGHTS`
+   It downloads no image datasets or trained student checkpoints. The original
+   ViT-B/32 checkpoint is included as a frozen classification baseline. Optional `REUSE_WEIGHTS`
    entries reuse exact checkpoint files from attached older bundles.
 2. In the offline GPU notebook, attach that output and the three image datasets.
    Paste `test/kaggle_teacher_classification_offline.py` into the first cell.
@@ -26,7 +28,7 @@ student, or retrieves photos. Training code inherited from main is unchanged.
    them. Different online/offline Python versions are not blocked in advance;
    pip selects compatible wheels. Installed Kaggle torch/torchvision are retained.
 3. Paste `test/kaggle_teacher_classification_run.ipy` as the second cell
-   (`%cd` plus `!python`). It evaluates all five teachers on Sketchy-1, Sketchy-2,
+   (`%cd` plus `!python`). It evaluates all six models on Sketchy-1, Sketchy-2,
    TU-Berlin, and QuickDraw (four protocols over three physical datasets). All images are evaluated by default. Omit unneeded datasets
    from `--datasets` and attach only those you request.
 
@@ -44,8 +46,8 @@ matches the pool from which pseudo-label training examples will be obtained.
 Ground truth from folder names is used only for split membership and evaluation;
 it is not passed to the teacher, used to restrict the class candidates for an
 individual image, or used to construct sketch/photo pairs. Photo and sketch are
-evaluated independently. Class names and image lists are identical for all five
-teachers and are saved in dataset manifests with a reproducible fingerprint.
+evaluated independently. Class names and image lists are identical for all six
+models and are saved in dataset manifests with a reproducible fingerprint.
 
 `--split unseen` runs a separate unseen assessment, using unseen class names by
 default; do not use unseen test scores for selecting teachers or hyperparameters.
@@ -66,7 +68,22 @@ All checkpoints are original, frozen weights loaded from local files; inference
 does not access model download APIs. The program creates one teacher at a time,
 releases it before loading the next, and uses no-grad inference throughout.
 Pretrained-tag activation metadata is preserved when loading local files,
-including QuickGELU for the OpenAI and MetaCLIP checkpoints.
+including QuickGELU for the OpenAI and MetaCLIP checkpoints. The original
+OpenAI ViT-B/32 is evaluated without trained student visual prompts; it is the
+same pretrained backbone used by main, not a distilled student checkpoint.
+Its official `ViT-B-32.pt` is downloaded from OpenAI and verified against the
+same SHA256 as main's CLIP downloader. OpenCLIP loads this TorchScript archive
+with `weights_only=False` (required by PyTorch 2.6+) and extracts its state;
+other model checkpoints retain `weights_only=True`.
+
+To include ViT-B/32 offline, rebuild the online bundle using the updated setup
+cells. `REUSE_WEIGHTS` can point to attached existing checkpoints for the five
+teachers and to an existing `clip_cache/ViT-B-32.pt` for `openai_b32`; they are
+checksum-checked before bundling. Setup source pins are updated together.
+
+To evaluate only the added baseline, retain the dataset options in the run cell
+and set `--teachers openai_b32`. Outputs use `openai_b32/<dataset>/` with the
+same separate photo/sketch metrics and pseudo-label quality measurements.
 
 ## Metrics and artifacts
 

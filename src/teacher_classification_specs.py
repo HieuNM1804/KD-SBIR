@@ -1,4 +1,4 @@
-"""Frozen teacher identities used by main and the four teacher experiments."""
+"""Original frozen teacher checkpoints and the OpenAI ViT-B/32 baseline."""
 
 TEACHERS = {
     "dfn5b_h14": dict(
@@ -39,6 +39,12 @@ TEACHERS = {
         filename="open_clip_model.safetensors",
         revision="18d0535469bb561bf468d76c1d73aa35156c922b",
         sha256="9ce2e8a8ebfff3793d7d375ad6d3c35cb9aebf3de7ace0fc7308accab7cd207e",
+    ),
+    "openai_b32": dict(
+        model="ViT-B-32", pretrained="openai", source_branch="main (student backbone)",
+        repository="openai/CLIP", filename="ViT-B-32.pt", checkpoint_format="torchscript",
+        url="https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt",
+        sha256="40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af",
     ),
 }
 

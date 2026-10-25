@@ -13,6 +13,7 @@ import zipfile
 from PIL import Image
 import torch
 from torch import nn
+from open_clip.factory import load_state_dict
 
 from src.evaluate_teacher_classification import list_dataset, main, main_transform, parse_args
 from src.teacher_classification_metrics import ClassificationMetrics
@@ -104,7 +105,8 @@ class DatasetTests(unittest.TestCase):
         args = parse_args(["--models-dir", "models"])
         self.assertEqual(args.split, "seen")
         self.assertEqual(args.candidate_scope, "split")
-        self.assertEqual(len(args.teachers), 5)
+        self.assertEqual(len(args.teachers), 6)
+        self.assertIn("openai_b32", args.teachers)
         self.assertEqual(prompt_templates("sketch", "modality"), ["a sketch of a {}."])
         self.assertEqual(prompt_templates("photo", "modality"), ["a photo of a {}."])
 
@@ -130,6 +132,18 @@ class FakeTeacher(nn.Module):
 
 
 class InferenceTests(unittest.TestCase):
+    def test_original_openai_torchscript_format_loads_without_pretrained_weights(self):
+        # Same archive format as OpenAI's ViT-B-32.pt, using only a tiny local net.
+        model = nn.Linear(3, 2).eval()
+        archive = torch.jit.trace(model, torch.zeros(1, 3))
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / TEACHERS["openai_b32"]["filename"]
+            archive.save(str(path))
+            with self.assertWarns(UserWarning):
+                restored = load_state_dict(path, weights_only=False)
+        for key, value in model.state_dict().items():
+            torch.testing.assert_close(restored[key], value)
+
     def test_full_cli_produces_separate_photo_sketch_and_pseudo_quality(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -139,7 +153,7 @@ class InferenceTests(unittest.TestCase):
                     folder = root / modality / name
                     folder.mkdir(parents=True)
                     Image.new("RGB", (9, 7), color).save(folder / "image.png")
-            keys = ["dfn5b_h14", "openai_l14"]
+            keys = ["dfn5b_h14", "openai_l14", "openai_b32"]
             for key in keys:
                 folder = weights / key
                 folder.mkdir(parents=True)
@@ -152,6 +166,7 @@ class InferenceTests(unittest.TestCase):
                 self.assertEqual(precision, "fp32")
                 self.assertTrue(configuration["force_quick_gelu"])
                 self.assertEqual(configuration["image_resize_mode"], "squash")
+                self.assertEqual(configuration["weights_only"], name != "ViT-B-32")
                 teacher = FakeTeacher()
                 # Match mixed OpenCLIP parameter dtypes: first parameter FP32,
                 # input convolution FP16. Input casting must follow conv1.
@@ -168,7 +183,8 @@ class InferenceTests(unittest.TestCase):
                 main(["--models-dir", str(weights), "--datasets", "quickdraw", "--root", str(root),
                       "--teachers", *keys, "--device", "cpu", "--workers", "0", "--batch-size", "2",
                       "--output-dir", str(output)])
-            self.assertEqual(len(calls), 2)
+            self.assertEqual(len(calls), 3)
+            self.assertIn(("ViT-B-32", str(weights / "openai_b32" / "ViT-B-32.pt")), calls)
             run = next(output.iterdir())
             with zipfile.ZipFile(run / "analysis_report.zip") as archive:
                 self.assertIn("metrics_photo.csv", archive.namelist())
@@ -176,7 +192,7 @@ class InferenceTests(unittest.TestCase):
                 self.assertFalse(any("predictions_" in name for name in archive.namelist()))
             for modality in ("photo", "sketch"):
                 summary = json.loads((run / f"metrics_{modality}.json").read_text())
-                self.assertEqual(len(summary), 2)
+                self.assertEqual(len(summary), 3)
                 self.assertTrue(all(row["accuracy"] == 1 for row in summary))
                 for key in keys:
                     folder = run / key / "quickdraw"

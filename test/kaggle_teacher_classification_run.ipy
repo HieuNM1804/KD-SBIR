@@ -3,7 +3,7 @@
 !python -m src.evaluate_teacher_classification \
     --models-dir /kaggle/working/KD-SBIR-teacher-classification/models \
     --datasets sketchy_1 sketchy_2 tuberlin quickdraw \
-    --teachers dfn5b_h14 dfn2b_l14 laion_h14 metaclip_l14 openai_l14 \
+    --teachers dfn5b_h14 dfn2b_l14 laion_h14 metaclip_l14 openai_l14 openai_b32 \
     --split seen \
     --candidate-scope split \
     --batch-size 256 \

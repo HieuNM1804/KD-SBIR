@@ -277,12 +277,15 @@ def main(argv=None):
         precision = args.precision if device.type == "cuda" else "fp32"
         # Loading a local file bypasses OpenCLIP's pretrained-tag metadata.
         # Restore its activation and preprocessing explicitly: OpenAI/MetaCLIP
-        # use QuickGELU even when the built-in ViT-L-14 default uses GELU.
+        # use QuickGELU even when the built-in architecture default uses GELU.
         pretrained_cfg = open_clip.get_pretrained_cfg(spec["model"], spec["pretrained"])
         if not pretrained_cfg:
             raise ValueError(f"OpenCLIP does not recognize teacher identity: {key}")
         model, _, official_transform = open_clip.create_model_and_transforms(
             spec["model"], pretrained=str(checkpoint), precision=precision, device=device,
+            # OpenAI's checksum-pinned .pt is a TorchScript archive. PyTorch 2.6+
+            # cannot open it with weights_only=True; OpenCLIP extracts its state.
+            weights_only=spec.get("checkpoint_format") != "torchscript",
             force_quick_gelu=bool(pretrained_cfg.get("quick_gelu", False)),
             image_mean=pretrained_cfg.get("mean"), image_std=pretrained_cfg.get("std"),
             image_interpolation=pretrained_cfg.get("interpolation"),
