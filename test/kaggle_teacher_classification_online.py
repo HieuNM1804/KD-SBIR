@@ -1,4 +1,4 @@
-"""ONE ONLINE Kaggle cell: original weights for five frozen teachers + source + wheels."""
+"""ONE ONLINE Kaggle cell: five frozen teachers + OpenAI ViT-B/32 + source + wheels."""
 
 from pathlib import Path
 from datetime import datetime, timezone
@@ -8,20 +8,22 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.request
 
 REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/teacher-zero-shot-classification"
-SOURCE_COMMIT = "c62ea560cfac2724ba01b21ce4497422d58994f0"
+SOURCE_COMMIT = "6cd868320d2ceb5c3198f562857b383c5f9fe642"
 TASK = "teacher_zero_shot_classification"
 WORKING = Path("/kaggle/working")
 BUNDLE = WORKING / ("teacher_classification_" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")) / "offline_bundle"
 PROJECT = BUNDLE / "KD-SBIR"
 MODELS = BUNDLE / "models"
 WHEELS = BUNDLE / "wheels"
-TEACHER_KEYS = ["dfn5b_h14", "dfn2b_l14", "laion_h14", "metaclip_l14", "openai_l14"]
+TEACHER_KEYS = ["dfn5b_h14", "dfn2b_l14", "laion_h14", "metaclip_l14", "openai_l14", "openai_b32"]
 TARGET_PYTHONS = ("3.12", "3.13")
 # Optional: point to existing attached weight files to avoid downloading them again.
 # Example: {"dfn5b_h14": "/kaggle/input/.../dfn5b_openclip/open_clip_pytorch_model.bin"}
+# For the new baseline: {"openai_b32": "/kaggle/input/.../clip_cache/ViT-B-32.pt"}
 REUSE_WEIGHTS = {}
 ROOTS = ["open-clip-torch==3.2.0", "huggingface-hub<1.0", "safetensors",
          "ftfy", "regex", "numpy", "pillow", "tqdm", "packaging"]
@@ -68,6 +70,8 @@ for index, key in enumerate(TEACHER_KEYS, 1):
     path = directory / spec["filename"]
     if key in REUSE_WEIGHTS:
         shutil.copy2(Path(REUSE_WEIGHTS[key]), path)
+    elif spec.get("url"):
+        urllib.request.urlretrieve(spec["url"], path)
     else:
         hf_hub_download(repo_id=spec["repository"], filename=spec["filename"],
                         revision=spec["revision"], local_dir=directory)
@@ -94,7 +98,7 @@ manifest = dict(task=TASK, repository=REPOSITORY, branch=BRANCH, commit=SOURCE_C
                 teacher_specs={key: TEACHERS[key] for key in TEACHER_KEYS},
                 wheel_inventories=inventories, files=files)
 (BUNDLE / "bundle_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-print("[4/5] Five original teacher checkpoints bundled; no student checkpoint or dataset copied.", flush=True)
+print(f"[4/5] {len(TEACHER_KEYS)} original frozen checkpoints bundled; includes ViT-B/32 baseline; no image datasets copied.", flush=True)
 print("[5/5] COMPLETE:", BUNDLE, flush=True)
 print("Save Version -> Save & Run All -> Always save output.")
 print("Attach that output to the offline GPU notebook with the datasets; run the offline cell then the run cell.")

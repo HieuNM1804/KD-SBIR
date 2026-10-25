@@ -12,9 +12,9 @@ import sys
 
 TASK = "teacher_zero_shot_classification"
 BRANCH = "experiment/teacher-zero-shot-classification"
-SOURCE_COMMIT = "c62ea560cfac2724ba01b21ce4497422d58994f0"
+SOURCE_COMMIT = "6cd868320d2ceb5c3198f562857b383c5f9fe642"
 BUNDLE_PATH = None  # Set an exact offline_bundle path only if several are attached.
-VERIFY_WEIGHT_HASHES = False  # Online already checked all weights; True rereads ~12 GiB.
+VERIFY_WEIGHT_HASHES = False  # Online already checked all weights; True rereads all checkpoint bytes.
 WORKING = Path("/kaggle/working")
 PROJECT = WORKING / "KD-SBIR-teacher-classification"
 
