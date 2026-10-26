@@ -10,7 +10,7 @@ import urllib.request
 
 REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/prompted-encoder-cost"
-SOURCE_COMMIT = "92ff04eb17be9e79e103b20773bd6538d18b5c3e"
+SOURCE_COMMIT = "760a08e2de4ce286944ad5dc238a63568234a1b2"
 TASK = "prompted_encoder_cost"
 WORKING = Path("/kaggle/working")
 BUNDLE = WORKING / ("encoder_cost_" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")) / "offline_bundle"
