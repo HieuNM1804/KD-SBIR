@@ -15,7 +15,7 @@ from torch import nn
 from clip.model import VisionTransformer
 from src.cost_prompts import PromptedHFVision, PromptedStudent
 from src.encoder_cost_models import (
-    PromptedTeacher, parameter_counts, restore_prompts, set_precision, vit_flops,
+    PromptedTeacher, load_model, parameter_counts, restore_prompts, set_precision, vit_flops,
 )
 from src.benchmark_encoder_cost import main, measure, profile_flops
 
@@ -49,6 +49,20 @@ class CostTests(unittest.TestCase):
         set_precision(model, key, torch.device("cpu"), "fp32")
         self.assertTrue(all(p.dtype == torch.float32 for p in model.parameters()))
 
+    def check_cuda_fp16(self, model, key, spec):
+        if not torch.cuda.is_available():
+            return
+        set_precision(model, key, torch.device("cuda"), "fp16")
+        images = torch.randn(1, 3, 32, 32, device="cuda", dtype=torch.float16)
+        with torch.inference_mode():
+            for modality in ("sketch", "photo"):
+                output = model(images, modality)
+                self.assertTrue(torch.isfinite(output).all())
+                self.assertEqual(tuple(output.shape), (1, spec["dim"]))
+        self.assertEqual(profile_flops(model, images, "sketch")["total"],
+                         vit_flops(spec, 3, 32)["total"])
+        set_precision(model, key, torch.device("cpu"), "fp32")
+
     def test_real_prompted_openai_profile_includes_attention(self):
         model = openai_model()
         spec = dict(patch=8, width=32, layers=2, mlp=128, dim=16)
@@ -59,11 +73,12 @@ class CostTests(unittest.TestCase):
         self.assertEqual(model(images, "photo").shape, (1, 16))
         self.assertTrue(torch.backends.mha.get_fastpath_enabled())
         self.check_cpu_fp16(model, "clip_b32", spec)
+        self.check_cuda_fp16(model, "clip_b32", spec)
 
     def test_real_prompted_openclip_teacher_profile(self):
-        from open_clip.transformer import VisionTransformer as OpenCLIPVision
+        from open_clip.transformer import VisionTransformer as OpenCLIPVision, LayerNormFp32
         visual = OpenCLIPVision(image_size=32, patch_size=8, width=32, layers=2,
-                                heads=4, mlp_ratio=4, output_dim=16)
+                                heads=4, mlp_ratio=4, output_dim=16, norm_layer=LayerNormFp32)
         model = PromptedTeacher(visual, 3, 2, 42).eval().requires_grad_(False)
         spec = dict(patch=8, width=32, layers=2, mlp=128, dim=16)
         images = torch.randn(1, 3, 32, 32)
@@ -74,6 +89,39 @@ class CostTests(unittest.TestCase):
         self.assertEqual(counts["deployed_parameters"], sum(p.numel() for p in model.parameters()))
         self.assertEqual(model(images, "photo").shape, (1, 16))
         self.check_cpu_fp16(model, "dfn5b_h14", spec)
+        self.check_cuda_fp16(model, "dfn5b_h14", spec)
+
+    def test_teacher_loader_uses_main_mixed_precision_norms_and_original_fp32_weights(self):
+        import open_clip
+        from open_clip.transformer import LayerNormFp32
+        from src.encoder_cost_models import SPECS
+        def tiny_teacher():
+            return open_clip.model.CLIP(
+                embed_dim=16,
+                vision_cfg=dict(image_size=32, patch_size=8, width=32, layers=2, head_width=8),
+                text_cfg=dict(context_length=4, vocab_size=16, width=16, layers=1, heads=2),
+                cast_dtype=torch.float16).float()
+        original = tiny_teacher()
+        def create(name, pretrained=None, precision=None, device=None):
+            self.assertEqual(name, "ViT-H-14-quickgelu")
+            self.assertEqual(precision, "fp16")
+            self.assertEqual(device, "cpu")
+            # Return actual selective-FP16 storage just like OpenCLIP's factory.
+            raw = tiny_teacher()
+            open_clip.model.convert_weights_to_lp(raw, torch.float16)
+            return raw
+        spec = dict(SPECS["dfn5b_h14"], patch=8, width=32, layers=2, mlp=128, dim=16)
+        with tempfile.TemporaryDirectory() as folder, patch.dict(SPECS, {"dfn5b_h14": spec}), \
+                patch.object(open_clip, "create_model", side_effect=create), patch("sys.stdout", new=io.StringIO()):
+            path = Path(folder) / spec["directory"] / spec["filename"]
+            path.parent.mkdir(parents=True)
+            torch.save(original.state_dict(), path)
+            model, _ = load_model("dfn5b_h14", folder, 3, 2)
+            self.assertIsInstance(model.visual.ln_pre, LayerNormFp32)
+            for name, parameter in model.visual.state_dict().items():
+                torch.testing.assert_close(parameter, original.visual.state_dict()[name], rtol=0, atol=0)
+            self.check_cpu_fp16(model, "dfn5b_h14", spec)
+            self.check_cuda_fp16(model, "dfn5b_h14", spec)
 
     def test_real_prompted_huggingface_profile(self):
         from transformers import CLIPConfig, CLIPModel
@@ -99,6 +147,7 @@ class CostTests(unittest.TestCase):
         self.assertLess(counts["deployed_parameters"], sum(p.numel() for p in raw.parameters()))
         self.assertEqual(model(images, "photo").shape, (1, 16))
         self.check_cpu_fp16(model, "tinyclip_61m", spec)
+        self.check_cuda_fp16(model, "tinyclip_61m", spec)
 
     def test_prompt_tokens_persist_beyond_replacement_depth(self):
         spec = dict(patch=8, width=32, layers=2, mlp=128, dim=16)

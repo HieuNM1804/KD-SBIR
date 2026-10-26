@@ -100,8 +100,14 @@ def load_model(key, models_root, n_ctx, depth, seed=42, prompt_path=None):
         raise FileNotFoundError(f"Missing bundled model: {path}")
     if key == "dfn5b_h14":
         import open_clip
-        raw = open_clip.create_model("ViT-H-14-quickgelu", pretrained=None, device="cpu")
+        # Main builds OpenCLIP with precision="fp16", selecting LayerNormFp32.
+        # Starting with precision="fp32" selects plain LayerNorm instead; merely
+        # converting matmul weights later then fails on CUDA Half inputs.
+        # Restore FP32 storage BEFORE loading so CPU FP32 retains original weights.
+        raw = open_clip.create_model("ViT-H-14-quickgelu", pretrained=None,
+                                     precision="fp16", device="cpu").float()
         open_clip.load_checkpoint(raw, str(path), strict=True)
+        print(f"[Weights] DFN5B checkpoint loaded strictly: {path}", flush=True)
         tower = raw.visual
         actual = (tower.conv1.kernel_size[0], tower.conv1.weight.shape[0],
                   len(tower.transformer.resblocks), tower.transformer.resblocks[0].mlp.c_fc.out_features,

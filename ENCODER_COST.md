@@ -34,6 +34,11 @@ text tower is discarded before timing. No teacher-student losses are constructed
    FP32 prompts, as in its training branch. The same precision policy applies
    on CPU and GPU. There is no automatic fallback to FP32; the requested precision
    is recorded in each measurement.
+   DFN5B is constructed with OpenCLIP's FP16 architecture policy, selecting
+   `LayerNormFp32` just as main does. Checkpoint tensors are loaded into FP32
+   storage before per-device conversion so CPU FP32 preserves original values.
+   OpenCLIP's initial random-initialization warning occurs before the explicit
+   strict checkpoint load; the benchmark prints confirmation after loading.
 
 The wheel resolver is reused from classification/GZS: Python 3.12 and 3.13 are
 resolved independently, including compatible NumPy wheels. PyTorch/CUDA are not
@@ -149,6 +154,8 @@ All artifacts must come from the same hardware session for direct comparisons.
 CPU timing can take longer than GPU timing for DFN5B; progress is printed before
 each model/device measurement. The inference model is released between backbones.
 
-Local validation uses only tiny randomly initialized versions of the real three
-forward implementations and fixture checkpoint files. It does not download or
-load the full pretrained models. Full-scale CUDA timing is performed on Kaggle.
+Local validation uses tiny randomly initialized versions of the real three
+forward implementations and fixture checkpoint files. With CUDA available it
+also executes all three FP16 forwards and FLOP checks on GPU, including the
+teacher loader's FP32-normalization policy. It does not download or load the full
+pretrained models. Full-scale timing is performed on the notebook hardware.
