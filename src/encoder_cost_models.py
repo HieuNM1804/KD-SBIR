@@ -138,8 +138,6 @@ def set_precision(model, key, device, precision):
     """Match the main branches: mixed FP16 for OpenAI/OpenCLIP, FP32 prompts."""
     model.float().to(device).eval().requires_grad_(False)
     if precision == "fp16":
-        if device.type != "cuda":
-            raise ValueError("Use fp32 for CPU inference.")
         if key == "dfn5b_h14":
             from open_clip.model import convert_weights_to_lp
             convert_weights_to_lp(model.visual, dtype=torch.float16)

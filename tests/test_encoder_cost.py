@@ -15,7 +15,7 @@ from torch import nn
 from clip.model import VisionTransformer
 from src.cost_prompts import PromptedHFVision, PromptedStudent
 from src.encoder_cost_models import (
-    PromptedTeacher, parameter_counts, restore_prompts, vit_flops,
+    PromptedTeacher, parameter_counts, restore_prompts, set_precision, vit_flops,
 )
 from src.benchmark_encoder_cost import main, measure, profile_flops
 
@@ -29,6 +29,26 @@ def openai_model(image_size=32, n_ctx=3, depth=2):
 
 
 class CostTests(unittest.TestCase):
+    def check_cpu_fp16(self, model, key, spec):
+        set_precision(model, key, torch.device("cpu"), "fp16")
+        images = torch.randn(1, 3, 32, 32).half()
+        with torch.inference_mode():
+            output = model(images, "sketch")
+        self.assertTrue(torch.isfinite(output).all())
+        if key == "dfn5b_h14":
+            self.assertEqual(model.visual.conv1.weight.dtype, torch.float16)
+            self.assertEqual(next(model.controller.prompt_learner.parameters()).dtype, torch.float32)
+        elif key == "clip_b32":
+            self.assertEqual(model.visual.conv1.weight.dtype, torch.float16)
+            self.assertEqual(model.sketch_visual_prompt.ctx.dtype, torch.float32)
+        else:
+            self.assertTrue(all(p.dtype == torch.float16 for p in model.visual.parameters()))
+            self.assertEqual(model.sketch_visual_prompt.ctx.dtype, torch.float32)
+        self.assertEqual(profile_flops(model, images, "sketch")["total"],
+                         vit_flops(spec, 3, 32)["total"])
+        set_precision(model, key, torch.device("cpu"), "fp32")
+        self.assertTrue(all(p.dtype == torch.float32 for p in model.parameters()))
+
     def test_real_prompted_openai_profile_includes_attention(self):
         model = openai_model()
         spec = dict(patch=8, width=32, layers=2, mlp=128, dim=16)
@@ -38,6 +58,7 @@ class CostTests(unittest.TestCase):
         self.assertGreater(vit_flops(spec, 3, 32)["breakdown"]["attention_qk_av"], 0)
         self.assertEqual(model(images, "photo").shape, (1, 16))
         self.assertTrue(torch.backends.mha.get_fastpath_enabled())
+        self.check_cpu_fp16(model, "clip_b32", spec)
 
     def test_real_prompted_openclip_teacher_profile(self):
         from open_clip.transformer import VisionTransformer as OpenCLIPVision
@@ -52,6 +73,7 @@ class CostTests(unittest.TestCase):
         self.assertEqual(counts["sketch_prompt_parameters"], 3 * 32 * 2)
         self.assertEqual(counts["deployed_parameters"], sum(p.numel() for p in model.parameters()))
         self.assertEqual(model(images, "photo").shape, (1, 16))
+        self.check_cpu_fp16(model, "dfn5b_h14", spec)
 
     def test_real_prompted_huggingface_profile(self):
         from transformers import CLIPConfig, CLIPModel
@@ -76,6 +98,7 @@ class CostTests(unittest.TestCase):
         self.assertEqual(counts["deployed_parameters"], sum(p.numel() for p in model.parameters()))
         self.assertLess(counts["deployed_parameters"], sum(p.numel() for p in raw.parameters()))
         self.assertEqual(model(images, "photo").shape, (1, 16))
+        self.check_cpu_fp16(model, "tinyclip_61m", spec)
 
     def test_prompt_tokens_persist_beyond_replacement_depth(self):
         spec = dict(patch=8, width=32, layers=2, mlp=128, dim=16)
@@ -146,6 +169,8 @@ class CostTests(unittest.TestCase):
             output = next(Path(folder).glob("*/summary.json"))
             data = json.loads(output.read_text())
             self.assertEqual(len(data["measurements"]), 2)
+            self.assertEqual(data["config"]["cpu_precision"], "fp16")
+            self.assertTrue(all(r["precision"] == "fp16" for r in data["measurements"]))
             self.assertEqual(data["models"]["clip_b32"]["profile"]["relative_difference"], 0)
             with output.with_name("table4.csv").open() as stream:
                 row = next(csv.DictReader(stream))

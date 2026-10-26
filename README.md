@@ -13,7 +13,7 @@ Kaggle steps (paste each file's complete contents into a cell):
 2. Offline GPU notebook: attach that output, then run
    [`test/kaggle_encoder_cost_offline.py`](test/kaggle_encoder_cost_offline.py).
 3. Run [`test/kaggle_encoder_cost_run.ipy`](test/kaggle_encoder_cost_run.ipy).
-   Defaults: teacher 9 tokens, students 3 tokens, depth 12, GPU FP16 / CPU FP32,
+   Defaults: teacher 9 tokens, students 3 tokens, depth 12, GPU FP16 / CPU FP16,
    30 warm-up + 100 measured calls; all are explicit adjustable arguments.
 4. Return `table4.csv`, `measurements.csv`, `summary.json` under
    `/kaggle/working/encoder_cost/<timestamp>/` for analysis.

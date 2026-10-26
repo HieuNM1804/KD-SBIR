@@ -21,9 +21,11 @@ text tower is discarded before timing. No teacher-student losses are constructed
 2. Offline GPU notebook: attach that output. No datasets are needed. Paste **all**
    of `test/kaggle_encoder_cost_offline.py` into the first cell.
 3. Paste `test/kaggle_encoder_cost_run.ipy` into the next cell. This runs all three
-   models sequentially on GPU FP16 then CPU FP32. CLIP/OpenCLIP use their original
+   models sequentially on GPU FP16 then CPU FP16. CLIP/OpenCLIP use their original
    mixed precision (FP32 norms/prompts); TinyCLIP uses an FP16 vision tower and
-   FP32 prompts, as in its training branch. CPU passes use FP32.
+   FP32 prompts, as in its training branch. The same precision policy applies
+   on CPU and GPU. There is no automatic fallback to FP32; the requested precision
+   is recorded in each measurement.
 
 The wheel resolver is reused from classification/GZS: Python 3.12 and 3.13 are
 resolved independently, including compatible NumPy wheels. PyTorch/CUDA are not
@@ -66,6 +68,8 @@ python -m src.benchmark_encoder_cost --models-root models --modalities sketch ph
 python -m src.benchmark_encoder_cost --models-root models --devices cpu --cpu-threads 8
 # FP32 GPU comparison, separate from the default FP16 result directory.
 python -m src.benchmark_encoder_cost --models-root models --devices cuda --gpu-precision fp32
+# Explicit FP32 on both devices instead of the default FP16.
+python -m src.benchmark_encoder_cost --models-root models --gpu-precision fp32 --cpu-precision fp32
 ```
 
 Prompt values default to seeded initialization, with the same insertion/replacement

@@ -153,6 +153,7 @@ def main(argv=None):
     parser.add_argument("--devices", nargs="+", choices=["cuda", "cpu"], default=["cuda", "cpu"])
     parser.add_argument("--modalities", nargs="+", choices=["sketch", "photo"], default=["sketch"])
     parser.add_argument("--gpu-precision", choices=["fp16", "fp32"], default="fp16")
+    parser.add_argument("--cpu-precision", choices=["fp16", "fp32"], default="fp16")
     parser.add_argument("--teacher-n-ctx", type=int, default=9)
     parser.add_argument("--student-n-ctx", type=int, default=3)
     parser.add_argument("--teacher-depth", type=int, default=12)
@@ -204,7 +205,7 @@ def main(argv=None):
                                     flops=vit_flops(SPECS[key], n_ctx))
         for name in args.devices:
             device = torch.device(name)
-            precision = args.gpu_precision if name == "cuda" else "fp32"
+            precision = args.gpu_precision if name == "cuda" else args.cpu_precision
             set_precision(model, key, device, precision)
             # A single resident image. No dataset workers or gallery scans.
             generator = torch.Generator(device="cpu").manual_seed(args.seed)

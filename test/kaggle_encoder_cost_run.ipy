@@ -6,6 +6,7 @@
     --devices cuda cpu \
     --modalities sketch \
     --gpu-precision fp16 \
+    --cpu-precision fp16 \
     --teacher-n-ctx 9 \
     --student-n-ctx 3 \
     --teacher-depth 12 \
