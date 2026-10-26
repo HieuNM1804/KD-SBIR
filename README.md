@@ -11,8 +11,12 @@ Two independent modes share the same Kaggle online/offline bundle:
 Kaggle steps (paste each file's complete contents into a cell):
 
 1. Online: [`test/kaggle_encoder_cost_online.py`](test/kaggle_encoder_cost_online.py).
+   Or paste [`test/kaggle_encoder_cost_online_launcher.py`](test/kaggle_encoder_cost_online_launcher.py)
+   to fetch and execute the current online cell directly from this branch.
    Save the notebook version with output. Optional `REUSE_WEIGHTS` avoids
-   downloading backbones you already attached.
+   downloading backbones you already attached. Completed weights in previous
+   working bundles are automatically reused after checksum verification, even
+   after a failed online cell. CLIP download supports origin/CDN retries and curl.
 2. Offline GPU notebook: attach that output, then run
    [`test/kaggle_encoder_cost_offline.py`](test/kaggle_encoder_cost_offline.py).
 3. Choose a run cell:

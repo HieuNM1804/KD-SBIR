@@ -3,10 +3,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
 import json
-import shutil
 import subprocess
 import sys
-import urllib.request
 
 REPOSITORY = "https://github.com/HieuNM1804/KD-SBIR.git"
 BRANCH = "experiment/prompted-encoder-cost"
@@ -29,6 +27,7 @@ REUSE_WEIGHTS = {
     # "clip_b32": "/kaggle/input/.../clip_cache/ViT-B-32.pt",
     # "tinyclip_61m": "/kaggle/input/.../models/tinyclip61m_student",
 }
+AUTO_REUSE_WORKING_WEIGHTS = True  # Reuse verified files from previous/failed encoder_cost_* bundles.
 
 
 def run(command, cwd=WORKING):
@@ -53,8 +52,13 @@ actual = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=PROJECT, text
 if actual != SOURCE_COMMIT:
     raise RuntimeError(f"Source commit mismatch: {actual}")
 sys.path.insert(0, str(PROJECT))
+# A previous failed cell may have imported src from an older cloned source.
+for module_name in list(sys.modules):
+    if module_name == "src" or module_name.startswith("src."):
+        del sys.modules[module_name]
 from src.encoder_cost_models import SPECS
 from src.kaggle_cost_wheels import download_runtime_wheels
+from src.kaggle_cost_downloads import download_verified, matches, reuse_verified
 
 # Resolve separately for each ABI; do not force the online NumPy version on 3.13.
 # PyTorch/CUDA are provided by Kaggle and are not downloaded into this bundle.
@@ -66,7 +70,7 @@ from huggingface_hub import HfApi, hf_hub_download
 
 for key, spec in SPECS.items():
     directory = MODELS / spec["directory"]
-    directory.mkdir()
+    directory.mkdir(exist_ok=True)
     names = ("config.json", "model.safetensors") if key == "tinyclip_61m" else (spec["filename"],)
     # Pinned HF metadata also validates reused TinyCLIP weights against the LFS hash.
     hf_files = {}
@@ -75,29 +79,36 @@ for key, spec in SPECS.items():
         hf_files = {item.rfilename: item for item in info.siblings}
     for name in names:
         target = directory / name
-        if key in REUSE_WEIGHTS:
-            source = Path(REUSE_WEIGHTS[key])
-            if key == "tinyclip_61m":
-                source = source / name
-            shutil.copy2(source, target)
-        elif spec.get("url"):
-            urllib.request.urlretrieve(spec["url"], target)
-        else:
-            hf_hub_download(repo_id=spec["repository"], filename=name,
-                            revision=spec["revision"], local_dir=directory)
-        digest = sha256(target)
         expected = spec.get("sha256")
+        blob_id = None
         if key == "tinyclip_61m":
             item = hf_files[name]
             if item.lfs:
                 expected = item.lfs.sha256
             else:
-                # Git blob hash validates small config.json at the pinned revision.
-                data = target.read_bytes()
-                blob = hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest()
-                if blob != item.blob_id:
-                    raise RuntimeError(f"Pinned TinyCLIP config mismatch: {name}")
-        if expected and digest != expected:
+                blob_id = item.blob_id
+        candidates = []
+        if key in REUSE_WEIGHTS:
+            source = Path(REUSE_WEIGHTS[key])
+            if key == "tinyclip_61m":
+                source = source / name
+            if not matches(source, expected, blob_id):
+                raise RuntimeError(f"REUSE_WEIGHTS is missing or has the wrong checksum: {source}")
+            candidates.append(source)
+        if AUTO_REUSE_WORKING_WEIGHTS:
+            candidates.extend(sorted(WORKING.glob(
+                f"encoder_cost_*/offline_bundle/models/{spec['directory']}/{name}"),
+                key=lambda path: path.stat().st_mtime, reverse=True))
+            if key == "clip_b32":
+                candidates.append(Path.home() / ".cache/clip/ViT-B-32.pt")
+        if reuse_verified(target, candidates, expected, blob_id):
+            continue
+        if spec.get("url"):
+            download_verified([spec["url"], *spec.get("fallback_urls", [])], target, expected)
+        else:
+            hf_hub_download(repo_id=spec["repository"], filename=name,
+                            revision=spec["revision"], local_dir=directory)
+        if not matches(target, expected, blob_id):
             raise RuntimeError(f"Checkpoint checksum mismatch: {key}/{name}")
     print(f"[3/5] Ready: {spec['name']}", flush=True)
 

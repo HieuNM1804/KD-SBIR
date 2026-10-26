@@ -19,7 +19,8 @@ SPECS = {
     ),
     "clip_b32": dict(
         name="OpenAI CLIP ViT-B/32", directory="clip_b32", filename="ViT-B-32.pt",
-        url="https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt",
+        url="https://openaipublic.blob.core.windows.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt",
+        fallback_urls=["https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt"],
         sha256="40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af",
         patch=32, width=768, layers=12, mlp=3072, dim=512,
     ),

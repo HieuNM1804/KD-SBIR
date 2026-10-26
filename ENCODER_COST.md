@@ -20,6 +20,12 @@ text tower is discarded before timing. No teacher-student losses are constructed
    → Always save output. It bundles pinned source and the three original backbones.
    `REUSE_WEIGHTS` can point to existing attached DFN5B/CLIP checkpoint files and
    the TinyCLIP snapshot directory to avoid downloading those weights again.
+   The cell also automatically reuses checksum-verified weights from previous
+   `/kaggle/working/encoder_cost_*/offline_bundle` folders, including an interrupted
+   bundle. CLIP-B/32 downloads prefer OpenAI's direct Azure Blob origin, with the
+   original CDN as fallback, retries, then curl if urllib has TLS failures. HTTPS
+   verification remains enabled, and every candidate must match the original
+   OpenAI SHA256. Partial downloads are never accepted as completed checkpoints.
 2. Offline GPU notebook: attach that output. No datasets are needed for inference. Paste **all**
    of `test/kaggle_encoder_cost_offline.py` into the first cell.
 3. Paste `test/kaggle_encoder_cost_run.ipy` into the next cell. This runs all three
