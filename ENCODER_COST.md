@@ -45,6 +45,20 @@ on attached input through a symlink, avoiding a second multi-GB working copy.
 
 ## Run configuration
 
+The run cell is shared by Kaggle and Colab. On Colab, first run
+`test/colab_cost_setup.py` (clone/update branch + install runtime), then paste
+`test/kaggle_encoder_cost_run.ipy`. The current project directory is detected;
+there is no `%cd /kaggle/...` on Colab. Missing original weights are downloaded
+and checksum-verified before timing into `/content/encoder_cost_models`.
+Subsequent runs reuse verified files. Results default to `/content/encoder_cost`.
+No offline Kaggle bundle is needed for Colab.
+
+On Kaggle the same command defaults to offline, using the project's bundled
+`models` symlink and `/kaggle/working/encoder_cost` for reports. Missing offline
+files cause a local-file error without a network attempt. Mode can be overridden
+explicitly using `--download-mode online` or `--download-mode offline` on either
+platform. `--models-root` and `--output-dir` are optional explicit overrides.
+
 Default: one sketch query, batch 1, 224×224, teacher 9 tokens/depth 12,
 students 3 tokens/depth 12. These are explicit, adjustable arguments; match them
 to the configuration used for your reported accuracy before filling the paper.
@@ -121,7 +135,8 @@ operation counts for inspection. Do not use a partial run with such an error.
 
 ## Results to send back
 
-Under `/kaggle/working/encoder_cost/<UTC_timestamp>/`:
+Under `/kaggle/working/encoder_cost/<UTC_timestamp>/` on Kaggle, or
+`/content/encoder_cost/<UTC_timestamp>/` on Colab:
 
 - `table4.csv`: one row per model, params/GFLOPs/dimension, GPU/CPU median latency
   and speedups relative to the prompted teacher.

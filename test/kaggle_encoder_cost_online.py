@@ -16,9 +16,6 @@ PROJECT = BUNDLE / "KD-SBIR"
 MODELS = BUNDLE / "models"
 WHEELS = BUNDLE / "wheels"
 TARGET_PYTHONS = ("3.12", "3.13")
-ROOTS = ["open-clip-torch==3.2.0", "transformers==4.57.6", "huggingface-hub<1.0",
-         "safetensors", "ftfy", "regex", "numpy", "pillow", "tqdm", "packaging",
-         "pytorch-lightning>=2.5,<3", "torchmetrics>=1.6,<2", "lightning-utilities", "tensorboard"]
 # Optional reuse; only these three files/dirs are copied, never a whole dataset.
 # dfn5b_h14 and clip_b32: exact checkpoint file. tinyclip_61m: directory with
 # config.json and model.safetensors from the original TinyCLIP-61M snapshot.
@@ -59,6 +56,8 @@ for module_name in list(sys.modules):
 from src.encoder_cost_models import SPECS
 from src.kaggle_cost_wheels import download_runtime_wheels
 from src.kaggle_cost_downloads import download_verified, matches, reuse_verified
+from src.cost_requirements import RUNTIME_ROOTS as ROOTS
+from src.cost_runtime import model_files
 
 # Resolve separately for each ABI; do not force the online NumPy version on 3.13.
 # PyTorch/CUDA are provided by Kaggle and are not downloaded into this bundle.
@@ -66,27 +65,13 @@ run([sys.executable, "-m", "pip", "install", "-q", "huggingface-hub<1.0", "packa
 inventories = download_runtime_wheels(ROOTS, TARGET_PYTHONS, BUNDLE, WHEELS, run)
 print("[2/5] Non-CUDA wheels ready:", len(list(WHEELS.glob("*.whl"))), flush=True)
 
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import hf_hub_download
 
 for key, spec in SPECS.items():
     directory = MODELS / spec["directory"]
     directory.mkdir(exist_ok=True)
-    names = ("config.json", "model.safetensors") if key == "tinyclip_61m" else (spec["filename"],)
-    # Pinned HF metadata also validates reused TinyCLIP weights against the LFS hash.
-    hf_files = {}
-    if key == "tinyclip_61m":
-        info = HfApi().model_info(spec["repository"], revision=spec["revision"], files_metadata=True)
-        hf_files = {item.rfilename: item for item in info.siblings}
-    for name in names:
+    for name, expected, blob_id in model_files(key):
         target = directory / name
-        expected = spec.get("sha256")
-        blob_id = None
-        if key == "tinyclip_61m":
-            item = hf_files[name]
-            if item.lfs:
-                expected = item.lfs.sha256
-            else:
-                blob_id = item.blob_id
         candidates = []
         if key in REUSE_WEIGHTS:
             source = Path(REUSE_WEIGHTS[key])

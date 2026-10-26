@@ -1,18 +1,21 @@
-%cd /kaggle/working/KD-SBIR-encoder-cost
+# ONE cell, shared by Colab online and Kaggle offline. No dataset needed.
+from pathlib import Path
+import subprocess
+import sys
 
-!python -m src.benchmark_encoder_cost \
-    --models-root models \
-    --models dfn5b_h14 clip_b32 tinyclip_61m \
-    --devices cuda cpu \
-    --modalities sketch \
-    --gpu-precision fp16 \
-    --cpu-precision fp16 \
-    --teacher-n-ctx 9 \
-    --student-n-ctx 3 \
-    --teacher-depth 12 \
-    --student-depth 12 \
-    --cpu-threads 8 \
-    --warmup 30 \
-    --iterations 100 \
-    --seed 42 \
-    --output-dir /kaggle/working/encoder_cost
+PROJECT = next((path for path in (
+    Path.cwd(), Path("/content/KD-SBIR"), Path("/kaggle/working/KD-SBIR-encoder-cost")
+) if (path / "src/benchmark_encoder_cost.py").is_file()), None)
+if PROJECT is None:
+    raise FileNotFoundError("Run Colab setup or Kaggle offline setup first.")
+print("Project:", PROJECT, flush=True)
+subprocess.run([
+    sys.executable, "-m", "src.benchmark_encoder_cost",
+    "--download-mode", "auto",
+    "--models", "dfn5b_h14", "clip_b32", "tinyclip_61m",
+    "--devices", "cuda", "cpu", "--modalities", "sketch",
+    "--gpu-precision", "fp16", "--cpu-precision", "fp16",
+    "--teacher-n-ctx", "9", "--student-n-ctx", "3",
+    "--teacher-depth", "12", "--student-depth", "12",
+    "--cpu-threads", "8", "--warmup", "30", "--iterations", "100", "--seed", "42",
+], cwd=PROJECT, check=True)

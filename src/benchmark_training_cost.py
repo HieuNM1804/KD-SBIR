@@ -13,6 +13,7 @@ from unittest.mock import patch
 import torch
 
 from src.training_cost import TrainingCostRecorder, instrument_training, local_training_weights
+from src.cost_runtime import dataset_directory, download_mode, ensure_models, models_directory, working_directory
 
 
 def build_training_argv(args, remaining, run_id):
@@ -34,9 +35,11 @@ def build_training_argv(args, remaining, run_id):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False,
                                     epilog="Other arguments are forwarded unchanged to src.train (e.g. --root, --dataset, --epochs).")
-    parser.add_argument("--models-root", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, default=Path("/kaggle/working/training_cost"))
-    parser.add_argument("--teacher_cache_dir", type=Path, default=Path("/kaggle/working/teacher_cache_training_cost"))
+    parser.add_argument("--models-root", type=Path)
+    parser.add_argument("--download-mode", choices=["auto", "online", "offline"], default="auto")
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--root", type=Path)
+    parser.add_argument("--teacher_cache_dir", type=Path)
     parser.add_argument("--teacher_cache_path", type=Path)
     parser.add_argument("--teacher_pretrain_epochs", type=int, default=1)
     parser.add_argument("--exp_name", default="training_cost")
@@ -46,12 +49,22 @@ def main(argv=None):
     if args.teacher_pretrain_epochs < 1:
         parser.error("Use --teacher_pretrain_epochs >= 1 for a training-cost configuration")
     if not torch.cuda.is_available():
-        parser.error("Training cost runs main's single-GPU pipeline; enable Kaggle GPU")
+        parser.error("Training cost runs main's single-GPU pipeline; enable the notebook GPU")
+    args.models_root = models_directory(args.models_root)
+    args.output_dir = args.output_dir or working_directory() / "training_cost"
+    args.teacher_cache_dir = args.teacher_cache_dir or working_directory() / "teacher_cache_training_cost"
+    args.download_mode = download_mode(args.download_mode)
+    try:
+        root = dataset_directory(args.root)
+    except FileNotFoundError as error:
+        parser.error(str(error))
+    remaining += ["--root", str(root)]
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     try:
         train_argv, cache = build_training_argv(args, remaining, run_id)
     except ValueError as error:
         parser.error(str(error))
+    ensure_models(["dfn5b_h14", "clip_b32"], args.models_root, args.download_mode)
     output = args.output_dir / run_id
     # Record the unchanged training source hashes, as well as full effective args.
     source_root = Path(__file__).resolve().parents[1]
@@ -61,7 +74,8 @@ def main(argv=None):
     recorder = TrainingCostRecorder(output, metadata=dict(
         training_base="741ea272b258c9e7b92a46173618e2fe1d401eaa", training_source_sha256=sources,
         requested_argv=list(argv if argv is not None else sys.argv[1:]), effective_train_argv=train_argv,
-        models_root=str(args.models_root.resolve()), teacher_cache_path=str(cache)))
+        models_root=str(args.models_root.resolve()), teacher_cache_path=str(cache),
+        download_mode=args.download_mode, preparation="model downloads excluded from training timings"))
     print("Training reports:", output, flush=True)
     print("Teacher cache:", cache, flush=True)
     try:

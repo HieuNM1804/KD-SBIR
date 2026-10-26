@@ -29,6 +29,15 @@ applying the inference benchmark's CPU/GPU precision options.
 
 ## Stage boundaries
 
+Colab with Internet is also supported: run `test/colab_cost_setup.py`, then the
+same `test/kaggle_training_cost_run.ipy`. Set its `DATA_ROOT` to your dataset's
+folder containing `sketch/` and `photo/` if not automatically found. A dataset is
+never downloaded automatically. Missing DFN5B and CLIP-B/32 weights are prepared
+before timing (TinyCLIP is not needed for this mode). Colab defaults to reports
+under `/content/training_cost` and caches under `/content/teacher_cache_training_cost`.
+The same command remains offline on Kaggle; `--download-mode` overrides either
+mode explicitly. Weights are local before the original main pipeline starts.
+
 `src.train`, `src.model`, `src.losses`, `src.teacher_prompts`, `src.dataset`, and
 `src.data_config` remain byte-for-byte the main implementations. The benchmark
 entrypoint invokes `src.train` through `runpy` and temporarily wraps its original

@@ -162,6 +162,7 @@ class CostTests(unittest.TestCase):
             return PromptedStudent(tower, 8, 1, 3, 1, 42).eval().requires_grad_(False), "test"
         with tempfile.TemporaryDirectory() as folder, patch.object(benchmark, "load_model", side_effect=load), \
                 patch.dict(benchmark.SPECS, {"clip_b32": spec}), \
+                patch.object(benchmark, "ensure_models"), \
                 patch.object(benchmark, "environment", return_value={}), patch("sys.stdout", new=io.StringIO()):
             main(["--models-root", folder, "--models", "clip_b32", "--devices", "cpu",
                   "--modalities", "sketch", "photo", "--student-depth", "1", "--cpu-threads", "2",

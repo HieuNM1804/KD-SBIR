@@ -15,6 +15,7 @@ import time
 import torch
 
 from src.encoder_cost_models import SPECS, load_model, parameter_counts, set_precision, vit_flops
+from src.cost_runtime import download_mode, ensure_models, models_directory, working_directory
 
 
 def sync(device):
@@ -148,7 +149,8 @@ def save_reports(output, report):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--models-root", type=Path, required=True)
+    parser.add_argument("--models-root", type=Path)
+    parser.add_argument("--download-mode", choices=["auto", "online", "offline"], default="auto")
     parser.add_argument("--models", nargs="+", choices=list(SPECS), default=list(SPECS))
     parser.add_argument("--devices", nargs="+", choices=["cuda", "cpu"], default=["cuda", "cpu"])
     parser.add_argument("--modalities", nargs="+", choices=["sketch", "photo"], default=["sketch"])
@@ -165,7 +167,7 @@ def main(argv=None):
     parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--cpu-threads", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output-dir", type=Path, default=Path("/kaggle/working/encoder_cost"))
+    parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args(argv)
     if min(args.iterations, args.cpu_threads, args.teacher_n_ctx, args.student_n_ctx) < 1 or args.warmup < 0:
         parser.error("Iterations, threads, prompt counts must be positive; warmup must be nonnegative")
@@ -174,7 +176,11 @@ def main(argv=None):
     for name in ("models", "devices", "modalities"):
         setattr(args, name, list(dict.fromkeys(getattr(args, name))))
     if "cuda" in args.devices and not torch.cuda.is_available():
-        parser.error("CUDA unavailable; enable Kaggle GPU or pass --devices cpu")
+        parser.error("CUDA unavailable; enable the notebook GPU or pass --devices cpu")
+    args.models_root = models_directory(args.models_root)
+    args.output_dir = args.output_dir or working_directory() / "encoder_cost"
+    args.download_mode = download_mode(args.download_mode)
+    ensure_models(args.models, args.models_root, args.download_mode)
     torch.set_num_threads(args.cpu_threads)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False

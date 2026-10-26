@@ -29,6 +29,8 @@ SPECS = {
         filename="model.safetensors",
         repository="wkcn/TinyCLIP-ViT-61M-32-Text-29M-LAION400M",
         revision="94cbbea5c7949cfe7bdafde64bcea5e403f59852",
+        sha256="0c0670dfa6fbf32c3158ef57b10772d5c9668093bda676d78e1452268585d230",
+        config_blob_id="d933c3379805f717c545a8766c69da3edb3325ab",
         patch=32, width=640, layers=12, mlp=2560, dim=512,
     ),
 }

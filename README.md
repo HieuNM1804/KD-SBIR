@@ -8,6 +8,13 @@ Two independent modes share the same Kaggle online/offline bundle:
 - **Training cost:** main's DFN5B -> cache -> CLIP-B/32 pipeline on Sketchy-Ext-2,
   timing teacher adaptation, feature-cache creation and student distillation.
 
+Colab with Internet: run [`test/colab_cost_setup.py`](test/colab_cost_setup.py)
+once, then the same inference/training run cells linked below. Colab automatically
+downloads missing original weights into `/content/encoder_cost_models`; results
+go to `/content/encoder_cost` or `/content/training_cost`. No Kaggle bundle or wheel
+inventory is required on Colab. Training needs your dataset: set `DATA_ROOT` in its
+run cell if Sketchy is not at `/content/Sketchy` or another auto-detected location.
+
 Kaggle steps (paste each file's complete contents into a cell):
 
 1. Online: [`test/kaggle_encoder_cost_online.py`](test/kaggle_encoder_cost_online.py).
@@ -23,6 +30,10 @@ Kaggle steps (paste each file's complete contents into a cell):
    - Inference: [`test/kaggle_encoder_cost_run.ipy`](test/kaggle_encoder_cost_run.ipy).
    - Training cost: attach Sketchy and run
      [`test/kaggle_training_cost_run.ipy`](test/kaggle_training_cost_run.ipy).
+   Both run cells are plain Python, auto-detect the project directory, and work
+   unchanged on Colab online or Kaggle offline. Kaggle defaults to local weights
+   only; Colab downloads missing weights before any timers start. CLI overrides:
+   `--download-mode online|offline`, `--models-root`, `--output-dir`.
 4. For inference:
    Defaults: teacher 9 tokens, students 3 tokens, depth 12, GPU FP16 / CPU FP16,
    30 warm-up + 100 measured calls; all are explicit adjustable arguments.
