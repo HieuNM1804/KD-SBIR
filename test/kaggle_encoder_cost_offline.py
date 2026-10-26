@@ -11,7 +11,7 @@ import sys
 
 TASK = "prompted_encoder_cost"
 BRANCH = "experiment/prompted-encoder-cost"
-SOURCE_COMMIT = "SOURCE_COMMIT_PENDING"
+SOURCE_COMMIT = "92ff04eb17be9e79e103b20773bd6538d18b5c3e"
 BUNDLE_PATH = None  # Set exact offline_bundle folder only if several match.
 VERIFY_WEIGHT_HASHES = False  # Online checked hashes; True rereads all model bytes.
 WORKING = Path("/kaggle/working")
