@@ -65,5 +65,8 @@ os.environ.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_HUB_DISABLE_T
 os.chdir(PROJECT)
 subprocess.run([sys.executable, "-m", "src.benchmark_encoder_cost", "--help"], check=True,
                 stdout=subprocess.DEVNULL)
+subprocess.run([sys.executable, "-m", "src.benchmark_training_cost", "--help"], check=True,
+                stdout=subprocess.DEVNULL)
 print("SETUP COMPLETE:", PROJECT, flush=True)
-print("Paste kaggle_encoder_cost_run.ipy next. No datasets needed.")
+print("Inference: kaggle_encoder_cost_run.ipy (no dataset required).")
+print("Training cost: attach Sketchy, then run kaggle_training_cost_run.ipy.")

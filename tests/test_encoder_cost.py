@@ -208,7 +208,7 @@ class CostTests(unittest.TestCase):
             command = run.call_args_list[0].args[0]
             self.assertIn("--no-index", command)
             self.assertNotIn("--python-version", command)
-            self.assertEqual(run.call_count, 2)  # local pip + help, no git/network
+            self.assertEqual(run.call_count, 3)  # local pip + two help calls, no git/network
             link.assert_called_once()
             self.assertTrue((root / "working/KD-SBIR-encoder-cost/src/example.py").is_file())
 

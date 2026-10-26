@@ -1,9 +1,12 @@
 # Prompted encoder cost: DFN5B, CLIP ViT-B/32, TinyCLIP-61M
 
 Branch: `experiment/prompted-encoder-cost`, based on main `741ea27`.
-Measures image-encoder parameters, GFLOPs, batch-1 GPU/CPU latency at 224×224,
-including the same deep visual prompt forwards used in the training branches.
-No training, dataset attachment, gallery caching or accuracy evaluation is required.
+Two independent modes share the same Kaggle online/offline bundle:
+
+- **Inference:** image-encoder params, GFLOPs, batch-1 GPU/CPU latency at 224×224
+  for DFN5B, CLIP-B/32 and TinyCLIP-61M with deep prompts. No training or dataset needed.
+- **Training cost:** main's DFN5B -> cache -> CLIP-B/32 pipeline on Sketchy-Ext-2,
+  timing teacher adaptation, feature-cache creation and student distillation.
 
 Kaggle steps (paste each file's complete contents into a cell):
 
@@ -12,15 +15,23 @@ Kaggle steps (paste each file's complete contents into a cell):
    downloading backbones you already attached.
 2. Offline GPU notebook: attach that output, then run
    [`test/kaggle_encoder_cost_offline.py`](test/kaggle_encoder_cost_offline.py).
-3. Run [`test/kaggle_encoder_cost_run.ipy`](test/kaggle_encoder_cost_run.ipy).
+3. Choose a run cell:
+   - Inference: [`test/kaggle_encoder_cost_run.ipy`](test/kaggle_encoder_cost_run.ipy).
+   - Training cost: attach Sketchy and run
+     [`test/kaggle_training_cost_run.ipy`](test/kaggle_training_cost_run.ipy).
+4. For inference:
    Defaults: teacher 9 tokens, students 3 tokens, depth 12, GPU FP16 / CPU FP16,
    30 warm-up + 100 measured calls; all are explicit adjustable arguments.
-4. Return `table4.csv`, `measurements.csv`, `summary.json` under
+   Return `table4.csv`, `measurements.csv`, `summary.json` under
    `/kaggle/working/encoder_cost/<timestamp>/` for analysis.
+   For training: return `training_cost.csv` and `training_cost.json` under
+   `/kaggle/working/training_cost/<timestamp>/`.
 
 See [ENCODER_COST.md](ENCODER_COST.md) for the counting convention, optional trained
-prompt checkpoints, CPU-only/FP32 runs, and timing scope. Local tests use tiny
-random models; full pretrained/CUDA measurements run on Kaggle.
+prompt checkpoints, CPU-only/FP32 runs, and timing scope. See
+[TRAINING_COST.md](TRAINING_COST.md) for stage boundaries and cache handling.
+Training reuses main without changing its losses or optimizers. Local tests use
+tiny random models; full pretrained/CUDA measurements run on Kaggle.
 
 The source pin in online/offline cells intentionally points to the runtime commit
 immediately before the bundle-script pin update, avoiding a self-referential SHA.

@@ -1,4 +1,4 @@
-"""ONE ONLINE Kaggle cell: source, three backbones, Python 3.12/3.13 wheels."""
+"""ONE ONLINE Kaggle cell: inference + training cost source, weights and wheels."""
 from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
@@ -19,7 +19,8 @@ MODELS = BUNDLE / "models"
 WHEELS = BUNDLE / "wheels"
 TARGET_PYTHONS = ("3.12", "3.13")
 ROOTS = ["open-clip-torch==3.2.0", "transformers==4.57.6", "huggingface-hub<1.0",
-         "safetensors", "ftfy", "regex", "numpy", "pillow", "tqdm", "packaging"]
+         "safetensors", "ftfy", "regex", "numpy", "pillow", "tqdm", "packaging",
+         "pytorch-lightning>=2.5,<3", "torchmetrics>=1.6,<2", "lightning-utilities", "tensorboard"]
 # Optional reuse; only these three files/dirs are copied, never a whole dataset.
 # dfn5b_h14 and clip_b32: exact checkpoint file. tinyclip_61m: directory with
 # config.json and model.safetensors from the original TinyCLIP-61M snapshot.
@@ -114,7 +115,7 @@ manifest = dict(task=TASK, repository=REPOSITORY, branch=BRANCH, commit=SOURCE_C
                 runtime_requirements=ROOTS, wheel_inventories=inventories,
                 model_specs=SPECS, files=files)
 (BUNDLE / "bundle_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-print("[4/5] Three original backbones bundled. No dataset or training required.", flush=True)
+print("[4/5] Three original backbones bundled; inference + main training runtime ready.", flush=True)
 print("[5/5] COMPLETE:", BUNDLE, flush=True)
 print("Save Version -> Save & Run All -> Always save output.")
-print("Attach this output to an offline GPU notebook; paste offline setup then run cell.")
+print("Attach output to an offline GPU notebook; paste offline setup then choose inference or training cell.")

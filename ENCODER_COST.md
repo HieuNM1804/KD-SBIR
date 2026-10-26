@@ -2,7 +2,9 @@
 
 Branch `experiment/prompted-encoder-cost`, based on main `741ea27`.
 This experiment measures the three image encoders in the paper's cost table.
-It performs no training and reports no accuracy. Main's training files are unchanged.
+This inference mode performs no training and reports no accuracy. Main's training
+files are unchanged. The separate [training-cost mode](TRAINING_COST.md) uses the
+same bundle and has its own run cell; it never starts from the inference command.
 
 Every forward includes modality-specific deep visual prompts, projection and
 feature normalization. Teacher forward reuses `src/teacher_prompts.py` directly
@@ -18,7 +20,7 @@ text tower is discarded before timing. No teacher-student losses are constructed
    → Always save output. It bundles pinned source and the three original backbones.
    `REUSE_WEIGHTS` can point to existing attached DFN5B/CLIP checkpoint files and
    the TinyCLIP snapshot directory to avoid downloading those weights again.
-2. Offline GPU notebook: attach that output. No datasets are needed. Paste **all**
+2. Offline GPU notebook: attach that output. No datasets are needed for inference. Paste **all**
    of `test/kaggle_encoder_cost_offline.py` into the first cell.
 3. Paste `test/kaggle_encoder_cost_run.ipy` into the next cell. This runs all three
    models sequentially on GPU FP16 then CPU FP16. CLIP/OpenCLIP use their original
